@@ -1,0 +1,3209 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+grid_search.py
+last_execution_timestamp.txt
+LICENSE
+minute_execution_timestamp.txt
+pyq_p3.py
+pyquant_orchestra.py
+pyquant_utils.py
+README.md
+requirements.txt
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+.env
+</file>
+
+<file path="grid_search.py">
+"""
+grid_search.py
+Grid search over BTC/ETH signal-threshold parameters using the backtester.
+Exposes run_grid_search() for the daily_optimizer in pyquant_orchestra.py.
+"""
+
+import os
+import time
+import math
+import numpy as np
+import pandas as pd
+from itertools import product
+
+from sklearn.metrics import (
+    mean_squared_error, mean_absolute_percentage_error,
+    mean_absolute_error, r2_score
+)
+
+from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+from filterpy.common import Q_discrete_white_noise
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared with backtest
+# ---------------------------------------------------------------------------
+
+def aggregate_ohlcv_data(data: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame:
+    """Re-samples 1-minute OHLCV data to `aggregation_minutes` bars."""
+    agg_rules = {k: v for k, v in {
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum",
+        "trade_count": "sum", "vwap": "mean"
+    }.items() if k in data.columns}
+
+    if not isinstance(data.index, pd.DatetimeIndex):
+        data.index = pd.to_datetime(data.index)
+
+    return data.resample(f"{aggregation_minutes}T").agg(agg_rules)
+
+
+def ukf_factory(timeframe: str, or_symbols: list):
+    """Creates and trains three UKFs (close, high, low) for the given symbol."""
+    UKF_DAYS = 30
+    ukf_rows = UKF_DAYS * 24
+
+    if or_symbols == ["BTC/USD"]:
+        symb = "BTC"
+        df_raw = pd.read_csv("btc_back365.csv")
+    elif or_symbols == ["ETH/USD"]:
+        symb = "ETH"
+        df_raw = pd.read_csv("eth_back365.csv")
+    else:
+        raise ValueError(f"Unknown symbol list: {or_symbols}")
+
+    crypto_bars_df = df_raw[:ukf_rows]
+
+    if timeframe == "1H":
+        data = crypto_bars_df
+    elif timeframe == "15T":
+        data = aggregate_ohlcv_data(crypto_bars_df.copy(), 15)
+        data.dropna(inplace=True)
+    elif timeframe == "5T":
+        data = aggregate_ohlcv_data(crypto_bars_df.copy(), 5)
+        data.dropna(inplace=True)
+    else:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    dt_step = 1
+    n_dim_state, n_dim_meas = 2, 1
+
+    def fx(x, dt): return np.array([x[0] + dt * x[1], x[1]])
+    def hx(x):     return np.array([x[0]])
+
+    close_prices = data["close"].values
+    high_prices  = data["high"].values
+    low_prices   = data["low"].values
+
+    train_size = int(len(close_prices) * 0.7)
+    train_data     = close_prices[:train_size]
+    high_train     = high_prices[:train_size]
+    low_train      = low_prices[:train_size]
+
+    best_params = (
+        {"alpha": 0.001, "beta": 4.0, "kappa": 1, "P": 0.1,   "Q": 1.0, "R": 0.01}
+        if symb == "ETH" else
+        {"alpha": 0.001, "beta": 7.0, "kappa": 0, "P": 0.001, "Q": 1.0, "R": 0.01}
+    )
+
+    alpha, beta, kappa = best_params["alpha"], best_params["beta"], best_params["kappa"]
+    P, Q, R = best_params["P"], best_params["Q"], best_params["R"]
+    points = MerweScaledSigmaPoints(n=n_dim_state, alpha=alpha, beta=beta, kappa=kappa)
+
+    def _make_ukf(init_val):
+        u = UnscentedKalmanFilter(
+            dim_x=n_dim_state, dim_z=n_dim_meas,
+            fx=fx, hx=hx, dt=dt_step, points=points
+        )
+        u.P = np.eye(n_dim_state) * P
+        u.Q = Q_discrete_white_noise(dim=n_dim_state, dt=dt_step, var=0.004) * Q
+        u.R = np.eye(n_dim_meas) * R
+        u.x = np.array([init_val, 0])
+        return u
+
+    ukf      = _make_ukf(train_data[0])
+    high_ukf = _make_ukf(high_train[0])
+    low_ukf  = _make_ukf(low_train[0])
+
+    for z in train_data:
+        ukf.predict(); ukf.update(z)
+    for z in close_prices[train_size:]:
+        ukf.predict(); ukf.update(z)
+
+    for z in high_train:
+        high_ukf.predict(); high_ukf.update(z)
+    for z in high_prices[train_size:]:
+        high_ukf.predict(); high_ukf.update(z)
+
+    for z in low_train:
+        low_ukf.predict(); low_ukf.update(z)
+    for z in low_prices[train_size:]:
+        low_ukf.predict(); low_ukf.update(z)
+
+    ukf.predict(); high_ukf.predict(); low_ukf.predict()
+
+    return ukf, high_ukf, low_ukf
+
+
+# ---------------------------------------------------------------------------
+# Metric helpers (identical logic to pyQuant_backtest2 to avoid import cycle)
+# ---------------------------------------------------------------------------
+
+def calculate_sharpe_ratio(returns, risk_free_rate=0.0025):
+    if len(returns) < 2:
+        return 0
+    arr = np.array(returns)
+    excess = arr - risk_free_rate
+    return np.mean(excess) / np.std(excess) * math.sqrt(365) if np.std(excess) != 0 else 0
+
+
+def calculate_max_drawdown(trades, initial_capital, date_index):
+    peak = initial_capital
+    max_dd = 0
+    current = initial_capital
+    sorted_trades = sorted(trades, key=lambda x: x["entry_date"])
+    ti = 0
+    for date in date_index:
+        while (ti < len(sorted_trades) and
+               sorted_trades[ti]["exit_date"] is not None and
+               sorted_trades[ti]["exit_date"] <= date):
+            current += sorted_trades[ti]["profit"]
+            ti += 1
+        if current > peak:
+            peak = current
+        dd = (peak - current) / peak if peak != 0 else 0
+        max_dd = max(max_dd, dd)
+    return max_dd
+
+
+def _combined_return(trades, initial_capital, date_index, final_value):
+    returns = final_value / initial_capital - 1 if initial_capital != 0 else 0
+    return returns * 100
+
+
+# ---------------------------------------------------------------------------
+# Slim backtest used only for grid search (no print spam)
+# ---------------------------------------------------------------------------
+
+def _backtest(btc_val, eth_val,
+              high_ukf_btc, low_ukf_btc, ukf_btc,
+              high_ukf_eth, low_ukf_eth, ukf_eth,
+              btc_strict, btc_stricts, eth_strict, eth_stricts,
+              initial_capital=10):
+    """
+    Runs a backtest for one parameter combination.
+    Returns total portfolio return (%).
+    """
+    trades_btc, trades_eth = [], []
+    total_cap = initial_capital
+    commission = 0.0025
+    leverage = 20
+
+    pos_btc = pos_eth = 0.0
+    entry_btc = entry_eth = 0.0
+    in_btc = in_eth = False
+    tp_btc = sl_btc = tp_eth = sl_eth = 0.0
+    lev_btc = lev_eth = leverage
+    cap_btc = cap_eth = 0.0
+
+    mkt_btc, mkt_eth = [], []
+
+    for index, row_btc in btc_val.iterrows():
+        row_eth = eth_val.loc[index]
+
+        mkt_btc.append(row_btc["close"])
+        mkt_eth.append(row_eth["close"])
+
+        price_btc, high_btc, low_btc = row_btc["close"], row_btc["high"], row_btc["low"]
+        price_eth, high_eth, low_eth = row_eth["close"], row_eth["high"], row_eth["low"]
+
+        # --- BTC UKF ---
+        high_ukf_btc.predict(); hpb = high_ukf_btc.x[0]; high_ukf_btc.update(high_btc)
+        low_ukf_btc.predict();  lpb = low_ukf_btc.x[0];  low_ukf_btc.update(low_btc)
+        ukf_btc.predict();      pb  = ukf_btc.x[0];       ukf_btc.update(price_btc)
+
+        sig_btc = None
+        cand_entry_btc = cand_tp_btc = None
+        btc_buy_tp = 1.0075
+        strict_btc  = btc_strict
+        stricts_btc = btc_stricts
+
+        if pb > price_btc:
+            pct_b = abs(1 - pb / price_btc); vol_b = abs(1 - hpb / pb); trend_b = "up"
+        elif price_btc > pb:
+            pct_b = abs(1 - price_btc / pb); vol_b = abs(1 - pb / lpb);  trend_b = "down"
+        else:
+            pct_b = vol_b = 0; trend_b = "flat"
+
+        if pct_b <= stricts_btc or vol_b >= stricts_btc:
+            if trend_b == "up":
+                prof = abs(1 - pb / lpb)
+                if pb > lpb and prof >= strict_btc and low_btc <= lpb <= high_btc:
+                    sig_btc = "BUY"
+                    cand_entry_btc = lpb
+                    cand_tp_btc = min(pb, lpb * btc_buy_tp)
+            elif trend_b == "down":
+                prof = abs(1 - hpb / pb)
+                if hpb > pb and prof >= strict_btc and low_btc <= hpb <= high_btc:
+                    sig_btc = "SELL"
+                    cand_entry_btc = hpb
+                    cand_tp_btc = min(pb, hpb * btc_buy_tp)
+
+        # --- ETH UKF ---
+        high_ukf_eth.predict(); hpe = high_ukf_eth.x[0]; high_ukf_eth.update(high_eth)
+        low_ukf_eth.predict();  lpe = low_ukf_eth.x[0];  low_ukf_eth.update(low_eth)
+        ukf_eth.predict();      pe  = ukf_eth.x[0];       ukf_eth.update(price_eth)
+
+        sig_eth = None
+        cand_entry_eth = cand_tp_eth = None
+        eth_buy_tp = 1.0085
+        eth_sell_tp = 2 - eth_buy_tp
+        strict_eth_v  = eth_strict
+        stricts_eth_v = eth_stricts
+
+        if pe > price_eth:
+            pct_e = abs(1 - pe / price_eth); vol_e = abs(1 - hpe / pe); trend_e = "up"
+        elif price_eth > pe:
+            pct_e = abs(1 - price_eth / pe); vol_e = abs(1 - pe / lpe);  trend_e = "down"
+        else:
+            pct_e = vol_e = 0; trend_e = "flat"
+
+        if pct_e <= stricts_eth_v or vol_e >= stricts_eth_v:
+            if trend_e == "up":
+                prof = abs(1 - pe / lpe)
+                if pe > lpe and prof >= strict_eth_v and low_eth <= lpe <= high_eth:
+                    sig_eth = "BUY"
+                    cand_entry_eth = lpe
+                    cand_tp_eth = min(pe, lpe * eth_buy_tp)
+            elif trend_e == "down":
+                prof = abs(1 - hpe / pe)
+                if hpe > pe and prof >= strict_eth_v and low_eth <= hpe <= high_eth:
+                    sig_eth = "SELL"
+                    cand_entry_eth = hpe
+                    cand_tp_eth = min(pe, hpe * eth_sell_tp)
+
+        # --- Portfolio allocation ---
+        Max_Loss     = total_cap * 15
+        btc_Max_Loss = total_cap * 8.5 * 32.5
+
+        if sig_btc and sig_eth and not in_btc and not in_eth:
+            cap_btc = cap_eth = total_cap / 2
+            total_cap = 0
+            entry_btc = cand_entry_btc; tp_btc = cand_tp_btc
+            p_bt = cap_btc / entry_btc; pos_btc = p_bt - commission * p_bt
+            ml = btc_Max_Loss / (entry_btc * pos_btc)
+            sl_btc = entry_btc - ml if sig_btc == "BUY" else entry_btc + ml
+            in_btc = True
+            trades_btc.append({"asset": "BTC", "entry_date": row_btc.name, "entry_price": entry_btc, "signal": sig_btc, "exit_date": None, "exit_price": None, "profit": 0, "tp_price": tp_btc, "sl_price": sl_btc})
+
+            entry_eth = cand_entry_eth; tp_eth = cand_tp_eth
+            p_et = cap_eth / entry_eth; pos_eth = p_et - commission * p_et
+            ml = Max_Loss / (entry_eth * pos_eth)
+            sl_eth = entry_eth - ml if sig_eth == "BUY" else entry_eth + ml
+            in_eth = True
+            trades_eth.append({"asset": "ETH", "entry_date": row_eth.name, "entry_price": entry_eth, "signal": sig_eth, "exit_date": None, "exit_price": None, "profit": 0, "tp_price": tp_eth, "sl_price": sl_eth})
+
+        elif sig_btc and not sig_eth and not in_btc and not in_eth:
+            cap_btc = total_cap; total_cap = 0
+            entry_btc = cand_entry_btc; tp_btc = cand_tp_btc
+            p_bt = cap_btc / entry_btc; pos_btc = p_bt - commission * p_bt
+            ml = btc_Max_Loss / (entry_btc * pos_btc)
+            sl_btc = entry_btc - ml if sig_btc == "BUY" else entry_btc + ml
+            in_btc = True
+            trades_btc.append({"asset": "BTC", "entry_date": row_btc.name, "entry_price": entry_btc, "signal": sig_btc, "exit_date": None, "exit_price": None, "profit": 0, "tp_price": tp_btc, "sl_price": sl_btc})
+
+        elif not sig_btc and sig_eth and not in_btc and not in_eth:
+            cap_eth = total_cap; total_cap = 0
+            entry_eth = cand_entry_eth; tp_eth = cand_tp_eth
+            p_et = cap_eth / entry_eth; pos_eth = p_et - commission * p_et
+            ml = Max_Loss / (entry_eth * pos_eth)
+            sl_eth = entry_eth - ml if sig_eth == "BUY" else entry_eth + ml
+            in_eth = True
+            trades_eth.append({"asset": "ETH", "entry_date": row_eth.name, "entry_price": entry_eth, "signal": sig_eth, "exit_date": None, "exit_price": None, "profit": 0, "tp_price": tp_eth, "sl_price": sl_eth})
+
+        # --- BTC exit ---
+        if in_btc:
+            lt = trades_btc[-1]
+            exit_b = False; exit_p_b = None
+            if lt["signal"] == "BUY":
+                if low_btc <= lt["sl_price"]:
+                    exit_b = True; exit_p_b = lt["sl_price"]
+                elif high_btc >= lt["tp_price"]:
+                    exit_b = True; exit_p_b = lt["tp_price"]
+                elif trend_b == "down" and pct_b >= 0.00005:
+                    exit_b = True; exit_p_b = price_btc
+            elif lt["signal"] == "SELL":
+                if high_btc >= lt["sl_price"]:
+                    exit_b = True; exit_p_b = lt["sl_price"]
+                elif low_btc <= lt["tp_price"]:
+                    exit_b = True; exit_p_b = lt["tp_price"]
+                elif trend_b == "down" and pct_b >= 0.00005:
+                    exit_b = True; exit_p_b = price_btc
+
+            if exit_b:
+                profit = lev_btc * ((exit_p_b - lt["entry_price"]) * pos_btc if lt["signal"] == "BUY" else (lt["entry_price"] - exit_p_b) * pos_btc)
+                total_cap += (pos_btc * lt["entry_price"]) + profit
+                pos_btc = 0; in_btc = False
+                lt["exit_date"] = row_btc.name; lt["exit_price"] = exit_p_b; lt["profit"] = profit
+
+        # --- ETH exit ---
+        if in_eth:
+            lt = trades_eth[-1]
+            exit_e = False; exit_p_e = None
+            if lt["signal"] == "BUY":
+                if low_eth <= lt["sl_price"]:
+                    exit_e = True; exit_p_e = lt["sl_price"]
+                elif high_eth >= lt["tp_price"]:
+                    exit_e = True; exit_p_e = lt["tp_price"]
+                elif trend_e == "down" and pct_e >= 0.00005:
+                    exit_e = True; exit_p_e = price_eth
+            elif lt["signal"] == "SELL":
+                if high_eth >= lt["sl_price"]:
+                    exit_e = True; exit_p_e = lt["sl_price"]
+                elif low_eth <= lt["tp_price"]:
+                    exit_e = True; exit_p_e = lt["tp_price"]
+                elif trend_e == "down" and pct_e >= 0.00005:
+                    exit_e = True; exit_p_e = price_eth
+
+            if exit_e:
+                profit = lev_eth * ((exit_p_e - lt["entry_price"]) * pos_eth if lt["signal"] == "BUY" else (lt["entry_price"] - exit_p_e) * pos_eth)
+                total_cap += (pos_eth * lt["entry_price"]) + profit
+                pos_eth = 0; in_eth = False
+                lt["exit_date"] = row_eth.name; lt["exit_price"] = exit_p_e; lt["profit"] = profit
+
+    final = total_cap
+    if in_btc and mkt_btc: final += pos_btc * mkt_btc[-1]
+    if in_eth and mkt_eth: final += pos_eth * mkt_eth[-1]
+
+    return (final / initial_capital - 1) * 100
+
+
+# ---------------------------------------------------------------------------
+# Public entry point called by pyquant_orchestra.py
+# ---------------------------------------------------------------------------
+
+def run_grid_search(backtest_days: int = 15, initial_capital: float = 10.0) -> dict:
+    """
+    Performs a grid search over signal thresholds and returns the best
+    parameter set as a dict that can be JSON-serialised and saved.
+
+    Returns:
+        dict: {
+            "strict_btc": float, "stricts_btc": float,
+            "strict_eth": float, "stricts_eth": float,
+            "best_returns": float
+        }
+    """
+    # Load CSVs written by data_download()
+    length = backtest_days * 24
+    btc_valid = pd.read_csv("btc_back366.csv")
+    eth_valid = pd.read_csv("eth_back366.csv")
+    btc_val = btc_valid[-length:].reset_index(drop=True)
+    eth_val = eth_valid[-length:].reset_index(drop=True)
+
+    # Align indices so the backtest can use .loc[index]
+    btc_val.index = range(len(btc_val))
+    eth_val.index = range(len(eth_val))
+
+    # Train UKFs once (shared across all param combos)
+    btc_ukf, btc_high_ukf, btc_low_ukf = ukf_factory("1H", ["BTC/USD"])
+    eth_ukf, eth_high_ukf, eth_low_ukf = ukf_factory("1H", ["ETH/USD"])
+
+    # Parameter grid
+    strict_btc_values  = [0.0025, 0.00275, 0.003, 0.0035, 0.004, 0.0045, 0.005]
+    stricts_btc_values = [0.004,  0.0045,  0.005, 0.0055, 0.006, 0.007,  0.0075]
+    strict_eth_values  = [0.0045, 0.0035,  0.004, 0.0055, 0.00475, 0.005, 0.006]
+    stricts_eth_values = [0.0045, 0.005,   0.0055, 0.006, 0.0065, 0.007, 0.0075, 0.008]
+
+    best_returns = -np.inf
+    best_params  = None
+    start_time   = time.time()
+
+    for sb, sbs, se, ses in product(
+        strict_btc_values, stricts_btc_values,
+        strict_eth_values, stricts_eth_values
+    ):
+        # Re-train fresh UKFs for each combo so state doesn't bleed between runs
+        b_ukf, b_high, b_low = ukf_factory("1H", ["BTC/USD"])
+        e_ukf, e_high, e_low = ukf_factory("1H", ["ETH/USD"])
+
+        try:
+            ret = _backtest(
+                btc_val, eth_val,
+                b_high, b_low, b_ukf,
+                e_high, e_low, e_ukf,
+                sb, sbs, se, ses,
+                initial_capital=initial_capital
+            )
+        except Exception as exc:
+            print(f"[grid_search] Skipping combo ({sb},{sbs},{se},{ses}): {exc}")
+            continue
+
+        if ret > best_returns and ret > 0:
+            best_returns = ret
+            best_params  = (sb, sbs, se, ses)
+            print(f"[grid_search] New best → returns={ret:.2f}%  params=({sb},{sbs},{se},{ses})")
+
+    elapsed = time.time() - start_time
+    h, rem  = divmod(elapsed, 3600)
+    m, s    = divmod(rem, 60)
+    print(f"[grid_search] Completed in {int(h)}h {int(m)}m {int(s)}s")
+
+    if best_params is None:
+        print("[grid_search] WARNING: No profitable combo found. Returning defaults.")
+        return {
+            "strict_btc": 0.0025, "stricts_btc": 0.005,
+            "strict_eth": 0.0035, "stricts_eth": 0.0075,
+            "best_returns": 0.0
+        }
+
+    return {
+        "strict_btc":  best_params[0],
+        "stricts_btc": best_params[1],
+        "strict_eth":  best_params[2],
+        "stricts_eth": best_params[3],
+        "best_returns": best_returns
+    }
+
+
+if __name__ == "__main__":
+    result = run_grid_search()
+    print(result)
+</file>
+
+<file path="last_execution_timestamp.txt">
+2026-06-26T15:28:15.007832
+</file>
+
+<file path="LICENSE">
+Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+</file>
+
+<file path="minute_execution_timestamp.txt">
+2026-06-26T15:27:47.677257
+</file>
+
+<file path="pyquant_orchestra.py">
+"""
+pyquant_orchestra.py
+Master scheduler.  Runs:
+  - daily_optimizer at 00:03 (data refresh + grid search)
+  - hourly_task,  fifteen_minute_task,  five_minute_task,  one_minute_task
+"""
+
+import json
+import time
+import traceback
+import schedule
+
+# FIX: orchestra was importing from pyq_p2; the current module is pyq_p3
+from pyq_p3 import hourly_task, fifteen_minute_task, five_minute_task, one_minute_task
+from data_download import data_download
+from grid_search import run_grid_search
+
+
+def daily_optimizer():
+    print("[Orchestra] Starting daily optimisation…")
+    try:
+        # 1. Download fresh historical data (also refreshes the CSVs for grid search)
+        btc_val, eth_val = data_download()
+
+        # 2. Run grid search against the freshly downloaded data
+        best_params = run_grid_search()
+
+        # 3. Persist optimal params so other modules can read them if needed
+        with open("optimal_params.json", "w") as f:
+            json.dump(best_params, f, indent=4)
+
+        print(f"[Orchestra] Optimisation complete. Best params saved: {best_params}")
+    except Exception as e:
+        print(f"[Orchestra] daily_optimizer error: {e}")
+        print(traceback.format_exc())
+
+
+# ── Schedule setup ────────────────────────────────────────────────────────────
+
+schedule.every().day.at("00:03").do(daily_optimizer)
+
+schedule.every().hour.at(":00").do(hourly_task)
+
+for _offset in [":00", ":15", ":30", ":45"]:
+    schedule.every().hour.at(_offset).do(fifteen_minute_task)
+
+for _offset in [":00", ":05", ":10", ":15", ":20", ":25",
+                ":30", ":35", ":40", ":45", ":50", ":55"]:
+    schedule.every().hour.at(_offset).do(five_minute_task)
+
+schedule.every(1).minutes.do(one_minute_task)
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+print("[Orchestra] Scheduler running. Press Ctrl-C to stop.")
+try:
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("[Orchestra] Shutdown requested.")
+except Exception as e:
+    print(f"[Orchestra] Fatal error: {e}")
+    print(traceback.format_exc())
+</file>
+
+<file path="README.md">
+# pyq-p3
+</file>
+
+<file path="requirements.txt">
+numpy
+pandas
+scikit-learn
+matplotlib
+filterpy
+nest-asyncio
+schedule
+requests
+websocket-client
+python-dotenv
+alpaca-trade-api
+alpaca-py
+pybit
+python-binance
+python-telegram-bot
+</file>
+
+<file path="pyquant_utils.py">
+"""
+pyquant_utils.py
+Shared utilities: UKF model factory, data download, signal generation,
+position management, and PositionGuard monitoring service.
+All API credentials are loaded from the .env file.
+"""
+
+# ── Standard library ──────────────────────────────────────────────────────────
+import os
+import json
+import math
+import time
+import logging
+import hashlib
+import hmac
+import threading
+import traceback
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
+from queue import Queue
+from typing import Dict, Any, Set
+
+# ── Third-party ───────────────────────────────────────────────────────────────
+import numpy as np
+import pandas as pd
+import requests
+import asyncio
+import websocket
+import matplotlib.pyplot as plt
+import nest_asyncio
+
+from dotenv import load_dotenv
+
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.stream import Stream
+from alpaca_trade_api.common import URL
+import datetime as dt
+
+from alpaca.trading.client import TradingClient
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.live.crypto import CryptoDataStream
+
+from pybit.unified_trading import HTTP
+
+from binance.client import Client
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.error import TelegramError
+
+import schedule
+
+from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+from filterpy.common import Q_discrete_white_noise
+from sklearn.metrics import (
+    mean_absolute_error, mean_squared_error,
+    mean_absolute_percentage_error, r2_score
+)
+
+nest_asyncio.apply()
+
+# ── Environment / credentials ─────────────────────────────────────────────────
+load_dotenv()
+
+ALPACA_API_KEY    = os.environ["ALPACA_API_KEY"]
+ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
+BYBIT_API_KEY     = os.environ["BYBIT_API_KEY"]
+BYBIT_SECRET_KEY  = os.environ["BYBIT_SECRET_KEY"]
+BINANCE_API_KEY   = os.environ["BINANCE_API_KEY"]
+BINANCE_SECRET_KEY = os.environ["BINANCE_SECRET_KEY"]
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
+
+# ── Clients ───────────────────────────────────────────────────────────────────
+api = tradeapi.REST(
+    ALPACA_API_KEY, ALPACA_SECRET_KEY,
+    "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+)
+
+start_date    = dt.date.today() - dt.timedelta(days=60)
+end_date      = dt.date.today()
+
+crypto_stream = CryptoDataStream(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+crypto_client = CryptoHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
+
+session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+_ch = logging.StreamHandler()
+_ch.setLevel(logging.INFO)
+_fh = logging.FileHandler("pyq_p3.log")
+_fh.setLevel(logging.DEBUG)
+_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+_ch.setFormatter(_fmt)
+_fh.setFormatter(_fmt)
+
+if not logger.handlers:
+    logger.addHandler(_ch)
+    logger.addHandler(_fh)
+
+
+# ── OHLCV aggregation ─────────────────────────────────────────────────────────
+
+class OHLCVAggregator:
+    @staticmethod
+    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+        return aggregate_ohlcv_data(df, aggregation_minutes)
+
+
+def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+    """Re-samples OHLCV data to the specified number of minutes."""
+    df_agg = df.copy()
+    rules = {k: v for k, v in {
+        "open": "first", "high": "max", "low": "min",
+        "close": "last", "volume": "sum"
+    }.items() if k in df_agg.columns}
+
+    if not rules:
+        logger.error("aggregate_ohlcv_data: no standard OHLCV columns found.")
+        return None
+
+    freq = f"{aggregation_minutes}min"
+    try:
+        result = df_agg.resample(freq, level="timestamp").agg(rules)
+        result.dropna(how="all", inplace=True)
+        return result
+    except Exception as e:
+        logger.error(f"aggregate_ohlcv_data: resampling failed: {e}")
+        return None
+
+
+# ── Live data download ────────────────────────────────────────────────────────
+
+def data_download(timeframe: str, or_symbols):
+    """
+    Downloads the most recent bars for `or_symbols` at `timeframe` granularity.
+    Returns a DataFrame indexed by (timestamp, symbol).
+    """
+    tf_map = {
+        "1H":  TimeFrame.Hour,
+        "15T": TimeFrame(15, TimeFrame.Minute),
+        "5T":  TimeFrame(5,  TimeFrame.Minute),
+        "1T":  TimeFrame.Minute,
+    }
+    tf = tf_map.get(timeframe)
+    if tf is None:
+        raise ValueError(f"data_download: unsupported timeframe '{timeframe}'")
+
+    request_params = CryptoBarsRequest(symbol_or_symbols=or_symbols, timeframe=tf)
+    bars = crypto_client.get_crypto_bars(request_params)
+    return bars.df
+
+
+# ── UKF model ─────────────────────────────────────────────────────────────────
+
+class UKFModel:
+    def __init__(self, crypto_client, start_date):
+        self.crypto_client = crypto_client
+        self.start_date    = start_date
+        self.aggregator    = OHLCVAggregator()
+
+    @staticmethod
+    def calculate_metrics(true_values, predictions):
+        mae  = mean_absolute_error(true_values, predictions)
+        mse  = mean_squared_error(true_values, predictions)
+        rmse = np.sqrt(mse)
+        mape = mean_absolute_percentage_error(true_values, predictions)
+        r2   = r2_score(true_values, predictions)
+        return {"MAE": mae, "RMSE": rmse, "MAPE": mape, "R2": r2}
+
+    def create_ukf_models(self, timeframe: str, or_symbols: list):
+        """Downloads historical data, trains three UKFs (close/high/low) and returns them."""
+        dt_step      = 1
+        n_dim_state  = 2
+        n_dim_meas   = 1
+        frame        = timeframe
+
+        # Select API timeframe
+        tf_map = {"1H": TimeFrame.Hour, "15T": TimeFrame.Minute, "5T": TimeFrame.Minute}
+        api_tf = tf_map.get(timeframe)
+        if api_tf is None:
+            logger.error(f"create_ukf_models: bad timeframe '{timeframe}'")
+            return None, None, None
+
+        if or_symbols == ["BTC/USD"]:
+            symb = "BTC"
+        elif or_symbols == ["ETH/USD"]:
+            symb = "ETH"
+        else:
+            logger.error(f"create_ukf_models: unknown symbols {or_symbols}")
+            return None, None, None
+
+        request_params = CryptoBarsRequest(
+            symbol_or_symbols=or_symbols,
+            timeframe=api_tf,
+            start=self.start_date
+        )
+        raw_df = self.crypto_client.get_crypto_bars(request_params).df
+
+        if frame == "1H":
+            data = raw_df
+        elif frame == "15T":
+            data = self.aggregator.aggregate_ohlcv_data(raw_df.copy(), 15)
+            data.dropna(inplace=True)
+        elif frame == "5T":
+            data = self.aggregator.aggregate_ohlcv_data(raw_df.copy(), 5)
+            data.dropna(inplace=True)
+        else:
+            logger.error(f"create_ukf_models: unhandled frame '{frame}'")
+            return None, None, None
+
+        def fx(x, dt): return np.array([x[0] + dt * x[1], x[1]])
+        def hx(x):     return np.array([x[0]])
+
+        close_prices = data["close"].values
+        high_prices  = data["high"].values
+        low_prices   = data["low"].values
+
+        train_size = int(len(close_prices) * 0.7)
+        train_close = close_prices[:train_size]; test_close = close_prices[train_size:]
+        train_high  = high_prices[:train_size];  test_high  = high_prices[train_size:]
+        train_low   = low_prices[:train_size];   test_low   = low_prices[train_size:]
+
+        best_params = (
+            {"alpha": 0.001, "beta": 4.0, "kappa": 1, "P": 0.1,   "Q": 1.0, "R": 0.01}
+            if symb == "ETH" else
+            {"alpha": 0.001, "beta": 7.0, "kappa": 0, "P": 0.001, "Q": 1.0, "R": 0.01}
+        )
+
+        alpha, beta, kappa = best_params["alpha"], best_params["beta"], best_params["kappa"]
+        P, Q, R = best_params["P"], best_params["Q"], best_params["R"]
+        points  = MerweScaledSigmaPoints(n=n_dim_state, alpha=alpha, beta=beta, kappa=kappa)
+
+        def _make_ukf(init_val):
+            u = UnscentedKalmanFilter(
+                dim_x=n_dim_state, dim_z=n_dim_meas,
+                fx=fx, hx=hx, dt=dt_step, points=points
+            )
+            u.P = np.eye(n_dim_state) * P
+            u.Q = Q_discrete_white_noise(dim=n_dim_state, dt=dt_step, var=0.004) * Q
+            u.R = np.eye(n_dim_meas) * R
+            u.x = np.array([init_val, 0])
+            return u
+
+        ukf      = _make_ukf(train_close[0])
+        high_ukf = _make_ukf(train_high[0])
+        low_ukf  = _make_ukf(train_low[0])
+
+        # Train
+        train_preds, test_preds = [], []
+        for z in train_close: ukf.predict(); train_preds.append(ukf.x[0]); ukf.update(z)
+        for z in test_close:  ukf.predict(); test_preds.append(ukf.x[0]);  ukf.update(z)
+
+        htr_preds, hte_preds = [], []
+        for z in train_high: high_ukf.predict(); htr_preds.append(high_ukf.x[0]); high_ukf.update(z)
+        for z in test_high:  high_ukf.predict(); hte_preds.append(high_ukf.x[0]);  high_ukf.update(z)
+
+        ltr_preds, lte_preds = [], []
+        for z in train_low: low_ukf.predict(); ltr_preds.append(low_ukf.x[0]); low_ukf.update(z)
+        for z in test_low:  low_ukf.predict(); lte_preds.append(low_ukf.x[0]);  low_ukf.update(z)
+
+        ukf.predict(); high_ukf.predict(); low_ukf.predict()
+
+        # Metrics
+        metric_data = {
+            "Metric": ["MAE", "RMSE", "MAPE", "R2"],
+            "Train": list(self.calculate_metrics(train_close, train_preds).values()),
+            "Test":  list(self.calculate_metrics(test_close,  test_preds).values()),
+            "High Train": list(self.calculate_metrics(train_high, htr_preds).values()),
+            "High Test":  list(self.calculate_metrics(test_high,  hte_preds).values()),
+            "Low Train":  list(self.calculate_metrics(train_low,  ltr_preds).values()),
+            "Low Test":   list(self.calculate_metrics(test_low,   lte_preds).values()),
+        }
+        print(f"{symb} METRICS for {frame}\n{pd.DataFrame(metric_data)}")
+
+        return ukf, high_ukf, low_ukf
+
+    @staticmethod
+    def _stabilise_P(ukf, min_var: float = 1e-6) -> None:
+        """
+        Keeps the covariance matrix P symmetric and positive-definite.
+
+        After many predict/update cycles, floating-point drift can make P
+        slightly non-symmetric or give it near-zero / negative eigenvalues.
+        Either of those causes scipy's Cholesky to raise:
+            LinAlgError: Internal potrf return info = [1]
+        Two cheap operations prevent this permanently:
+          1. Symmetrise  →  P = (P + Pᵀ) / 2
+          2. Diagonal floor  →  P[i,i] = max(P[i,i], min_var)
+        """
+        P = ukf.P
+        P = (P + P.T) / 2                          # remove asymmetry from float drift
+        for i in range(P.shape[0]):
+            if P[i, i] < min_var:
+                P[i, i] = min_var                  # guarantee positive diagonal
+        ukf.P = P
+
+    @staticmethod
+    def ukf_handler(data, ukf, high_ukf, low_ukf):
+        """
+        Updates all three UKFs with the latest bar and returns next-step predictions.
+        Calls _stabilise_P after every step so Cholesky never sees a
+        non-positive-definite matrix.
+        """
+        high  = data["high"]
+        low   = data["low"]
+        price = data["close"]
+
+        ukf.update(price)
+        UKFModel._stabilise_P(ukf)
+        ukf.predict()
+        UKFModel._stabilise_P(ukf)
+        pred = ukf.x[0]
+
+        high_ukf.update(high)
+        UKFModel._stabilise_P(high_ukf)
+        high_ukf.predict()
+        UKFModel._stabilise_P(high_ukf)
+        high_pred = high_ukf.x[0]
+
+        low_ukf.update(low)
+        UKFModel._stabilise_P(low_ukf)
+        low_ukf.predict()
+        UKFModel._stabilise_P(low_ukf)
+        low_pred = low_ukf.x[0]
+
+        return pred, high_pred, low_pred
+
+
+# ── Equity helper ─────────────────────────────────────────────────────────────
+
+def get_equities() -> tuple:
+    """Returns (usdt_equity, btc_equity, eth_equity) from Binance Futures account."""
+    usdt_equity = btc_equity = eth_equity = 0.0
+    try:
+        account_info = binance_client.futures_account()
+        for asset in account_info["assets"]:
+            name = asset["asset"]
+            if name == "USDT":
+                usdt_equity = float(asset["walletBalance"])
+            elif name == "BTC":
+                btc_equity  = float(asset["walletBalance"])
+            elif name == "ETH":
+                eth_equity  = float(asset["walletBalance"])
+    except Exception as e:
+        logger.error(f"get_equities: {e}")
+    return usdt_equity, btc_equity, eth_equity
+
+
+# ── Position helpers (also used by PositionGuard) ────────────────────────────
+
+def check_open_position(symbol: str) -> dict:
+    """Returns a dict describing any open Binance Futures position for `symbol`."""
+    position_info = {
+        "is_open_position": False, "symbol": symbol,
+        "side": None, "size": 0.0, "entry_price": None,
+        "unrealized_pnl": 0.0, "liquidation_price": None,
+        "take_profit_price": None, "stop_loss_price": None,
+    }
+    try:
+        positions     = binance_client.futures_position_information()
+        usdt_eq, _, _ = get_equities()
+        wallet_balance = usdt_eq
+
+        position = next(
+            (p for p in positions if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
+            None
+        )
+        if position:
+            position_info["is_open_position"] = True
+            position_info["side"]             = "BUY" if float(position["positionAmt"]) > 0 else "SELL"
+            position_info["size"]             = abs(float(position["positionAmt"]))
+            position_info["entry_price"]      = float(position["entryPrice"])
+            position_info["unrealized_pnl"]   = float(position["unRealizedProfit"])
+            position_info["liquidation_price"] = float(position["liquidationPrice"])
+
+            limit = 0.2 if symbol == "BTCUSDT" else 0.15
+            upnl  = position_info["unrealized_pnl"]
+            if upnl >= wallet_balance * limit or upnl >= 0.6:
+                close_futures_position(position_info)
+                logger.info(
+                    f"check_open_position: auto-closed {symbol} due to profit "
+                    f"(uPNL={upnl:.4f})"
+                )
+    except Exception as e:
+        logger.error(f"check_open_position ({symbol}): {e}")
+    return position_info
+
+
+def close_futures_position(position_data: dict) -> dict:
+    """Closes an open Binance Futures position with a market reduceOnly order."""
+    try:
+        symbol     = position_data["symbol"]
+        side       = position_data["side"]
+        size       = position_data["size"]
+        close_side = "SELL" if side == "BUY" else "BUY"
+        response   = binance_client.futures_create_order(
+            symbol=symbol, side=close_side,
+            type="MARKET", quantity=size, reduceOnly=True
+        )
+        logger.info(f"close_futures_position: closed {symbol} via {close_side} market order.")
+        return response
+    except Exception as e:
+        err = f"close_futures_position ({position_data.get('symbol')}): {e}"
+        logger.error(err)
+        return {"error": err}
+
+
+# ── SignalGenerator ───────────────────────────────────────────────────────────
+
+class SignalGenerator:
+    def __init__(self):
+        self.sig_gened = False
+        self.signals   = []
+        self.signal    = None
+        self.sig_vol   = False
+        self.stake     = 0.9985
+        self.pct_diff  = None
+        self.trend     = None
+
+    @staticmethod
+    def load_params() -> dict:
+        try:
+            with open("optimal_params.json", "r") as f:
+                params = json.load(f)
+            print(f"Loaded optimal params: {params}")
+            return params
+        except FileNotFoundError:
+            print("optimal_params.json not found – using defaults.")
+            return {
+                "strict_btc":  0.0025, "stricts_btc": 0.006,
+                "strict_eth":  0.004,  "stricts_eth": 0.008,
+            }
+
+    def _calculate_tp_price(self, price, pred, tp_multiplier, rounds, leverage, bal, tp_inc, entry, trend):
+        net_bal = bal * tp_inc
+        net_val = net_bal * leverage
+        tp_qty  = (bal * leverage) / entry
+
+        tp_candidate = net_val / tp_qty
+        if trend == "up":
+            return round(tp_candidate, rounds) if pred > tp_candidate else round(pred, rounds)
+        else:
+            return round(tp_candidate, rounds) if pred < tp_candidate else round(pred, rounds)
+
+    def _calculate_sl_price(self, entry_price, positions, max_loss, rr, symbol, trend, tp_price=None):
+        if trend == "up":
+            if symbol in ("BTC/USD", "ETH/USD"):
+                return entry_price - (max_loss / (entry_price * positions))
+            return entry_price - (1 / rr * (tp_price - entry_price))
+        else:
+            if symbol in ("BTC/USD", "ETH/USD"):
+                return entry_price + (max_loss / (entry_price * positions))
+            return entry_price + (1 / rr * (entry_price - tp_price))
+
+    def _get_symbol_params(self, symbol: str, params: dict) -> dict:
+        if symbol == "BTC/USD":
+            tp_inc = 1.004
+            return {
+                "rr": 8.6, "trig_ratio": 6.1,
+                "strict": params["strict_btc"], "trade_symbol": "BTCUSDT",
+                "pct_diff_and_vol_strict": params["stricts_btc"],
+                "buy_tp": 1.0075, "sell_tp": 2 - 1.0075,
+                "first_loss": 7.5, "loss_multiple": 30, "rounds": 0,
+                "tp_inc": tp_inc, "sell_inc": 2 - tp_inc,
+            }
+        elif symbol == "ETH/USD":
+            tp_inc = 1.05
+            return {
+                "rr": 8.62, "trig_ratio": 6.02,
+                "strict": params["strict_eth"], "trade_symbol": "ETHUSDT",
+                "pct_diff_and_vol_strict": params["stricts_eth"],
+                "buy_tp": 1.0085, "sell_tp": 2 - 1.0085,
+                "first_loss": 16, "loss_multiple": 1, "rounds": 2,
+                "tp_inc": tp_inc, "sell_inc": 2 - tp_inc,
+            }
+        raise ValueError(f"Unknown symbol: {symbol}")
+
+    def _process_signal(self, price, pred, high_pred, low_pred, symbol, bal, trend, symbol_params, lev):
+        params = self.load_params()
+        self.sig_vol  = False
+        self.pct_diff = None
+
+        pct_diff = abs(1 - pred / price) if trend == "up" else abs(1 - price / pred)
+        self.pct_diff = pct_diff
+        vol = 1 - (high_pred / low_pred)
+
+        if pct_diff <= symbol_params["pct_diff_and_vol_strict"] or vol >= symbol_params["pct_diff_and_vol_strict"]:
+            print(f"Primary siggen criteria met for {symbol}. Checking secondary…")
+            self.sig_vol = True
+        else:
+            print("Primary siggen criteria NOT met.")
+            return None
+
+        max_loss = float(bal) * symbol_params["first_loss"] * symbol_params["loss_multiple"]
+
+        if trend == "up":
+            return self._process_buy_signal(
+                price, pred, high_pred, low_pred, symbol, bal,
+                symbol_params, max_loss, params, lev
+            )
+        return self._process_sell_signal(
+            price, pred, high_pred, low_pred, symbol, bal,
+            symbol_params, max_loss, params, lev
+        )
+
+    def _process_buy_signal(self, price, pred, high_pred, low_pred, symbol, bal,
+                             symbol_params, max_loss, params, lev):
+        buy_price    = low_pred
+        tp_price_cand = pred
+        prof = abs(1 - tp_price_cand / buy_price)
+
+        if tp_price_cand > buy_price and prof >= symbol_params["strict"]:
+            print("BUY signal passed secondary check.")
+            if price < buy_price:
+                entry_price = round(price, symbol_params["rounds"])
+                order_type  = "Market"
+            else:
+                entry_price = round(buy_price, symbol_params["rounds"])
+                order_type  = "Limit"
+            self.sig_gened = True
+
+            tp_price = self._calculate_tp_price(
+                price, pred, symbol_params["buy_tp"], symbol_params["rounds"],
+                lev, bal, symbol_params["tp_inc"], entry_price, "up"
+            )
+            trigger_price = round(
+                entry_price - (1 / symbol_params["trig_ratio"] * (tp_price - entry_price)),
+                symbol_params["rounds"]
+            )
+            positions = bal / entry_price
+            sl_price  = round(
+                self._calculate_sl_price(entry_price, positions, max_loss,
+                                         symbol_params["rr"], symbol, "up", tp_price),
+                symbol_params["rounds"]
+            )
+            return {
+                "symbol": symbol_params["trade_symbol"], "order_type": order_type,
+                "entry_price": entry_price, "order_side": "Buy",
+                "tp_price": tp_price, "sl_price": sl_price,
+                "trigger_price": trigger_price, "orderLinkId": None,
+                "current_price": price, "checked": False, "current_bal": bal,
+            }
+        print("Secondary check failed – no BUY signal.")
+        self.sig_gened = False
+        return None
+
+    def _process_sell_signal(self, price, pred, high_pred, low_pred, symbol, bal,
+                              symbol_params, max_loss, params, lev):
+        sell_price    = high_pred
+        tp_price_cand = pred
+        prof = abs(1 - sell_price / tp_price_cand)
+
+        if sell_price > tp_price_cand and prof >= symbol_params["strict"]:
+            print("SELL signal passed secondary check.")
+            if price > sell_price:
+                entry_price = round(price, symbol_params["rounds"])
+                order_type  = "Market"
+            else:
+                entry_price = round(sell_price, symbol_params["rounds"])
+                order_type  = "Limit"
+            self.sig_gened = True
+
+            tp_price = self._calculate_tp_price(
+                price, pred, symbol_params["sell_tp"], symbol_params["rounds"],
+                lev, bal, symbol_params["sell_inc"], entry_price, "down"
+            )
+            trigger_price = round(
+                entry_price + (1 / symbol_params["trig_ratio"] * (entry_price - tp_price)),
+                symbol_params["rounds"]
+            )
+            positions = bal / entry_price
+            sl_price  = round(
+                self._calculate_sl_price(entry_price, positions, max_loss,
+                                         symbol_params["rr"], symbol, "down", tp_price),
+                symbol_params["rounds"]
+            )
+            return {
+                "symbol": symbol_params["trade_symbol"], "order_type": order_type,
+                "entry_price": entry_price, "order_side": "Sell",
+                "tp_price": tp_price, "sl_price": sl_price,
+                "trigger_price": trigger_price, "orderLinkId": None,
+                "current_price": price, "checked": False, "current_bal": bal,
+            }
+        print("Secondary check failed – no SELL signal.")
+        self.sig_gened = False
+        return None
+
+    def generate_signal(self, price, pred, high_pred, low_pred, symbol, leverage, bal):
+        """Entry point: returns a signal dict or None."""
+        print("Starting Siggen Services")
+        self.signal = None
+        self.trend  = None
+
+        if pred > price:
+            trend = self.trend = "up"
+        elif price > pred:
+            trend = self.trend = "down"
+        else:
+            print(f"Flat price – no signal (price={price}, pred={pred})")
+            return None
+
+        params = self.load_params()
+        try:
+            symbol_params = self._get_symbol_params(symbol, params)
+        except ValueError as e:
+            print(e); return None
+
+        try:
+            if not self.sig_gened:
+                signal = self._process_signal(
+                    price, pred, high_pred, low_pred, symbol, bal,
+                    trend, symbol_params, leverage
+                )
+                if signal:
+                    print("Signal generated.")
+                    self.signals.append(signal)
+                    self.signal = signal
+                    return signal
+                self.sig_gened = False
+                return None
+        except Exception as e:
+            print(f"Siggen error: {e}")
+            print(traceback.format_exc())
+        return None
+
+    def get_state(self) -> dict:
+        return {
+            "sig_gened": self.sig_gened, "sig_vol": self.sig_vol,
+            "stake": self.stake, "current_signal": self.signal,
+            "all_signals": self.signals.copy(), "trend": self.trend,
+            "pct_diff": self.pct_diff,
+        }
+
+    def reset(self):
+        self.sig_gened = False
+        self.sig_vol   = False
+        self.signal    = None
+        self.signals   = []
+        print("SignalGenerator state reset.")
+
+
+# ── PositionGuard ─────────────────────────────────────────────────────────────
+
+class PositionGuard:
+    """
+    Background service that monitors open orders and positions.
+    - Checks order fill status every 30 seconds.
+    - Places/verifies TP/SL via Binance Futures stop orders.
+    - Falls back to 1-minute manual tracking if bracket placement fails.
+    - Persists state to active_trades.json so restarts are safe.
+    - Sends Telegram alerts for every significant event.
+    """
+
+    def __init__(self, binance_client: Client, telegram_token: str, chat_id: str):
+        self.binance           = binance_client
+        self.telegram_token    = telegram_token
+        self.telegram_chat_id  = chat_id
+        self.telegram_app      = None
+
+        self.trade_state_file  = "active_trades.json"
+        self.active_trades     = self.load_trade_state()
+        self.monitored_orders: Dict[str, Dict[str, Any]] = self.load_trade_state()
+        self.monitored_positions: Set[str] = set()
+        self.alert_queue       = Queue()
+
+        # FIX: `running` must be initialised here so async methods can reference it
+        self.running           = False
+        self.scheduler_thread  = None
+        self.telegram_thread   = None
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+
+    def load_trade_state(self) -> dict:
+        if os.path.exists(self.trade_state_file):
+            try:
+                with open(self.trade_state_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_to_json(self):
+        """FIX: Saves monitored_orders to disk so the 1-minute task can read it."""
+        try:
+            with open(self.trade_state_file, "w") as f:
+                json.dump(self.monitored_orders, f, indent=4, default=str)
+        except Exception as e:
+            logger.error(f"PositionGuard.save_to_json: {e}")
+
+    def save_trade_state(self, symbol: str, side: str, entry, tp, sl):
+        self.active_trades[symbol] = {
+            "side": side, "entry": float(entry),
+            "tp": float(tp), "sl": float(sl),
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(self.trade_state_file, "w") as f:
+            json.dump(self.active_trades, f, indent=4)
+
+    def clear_trade_state(self, symbol: str):
+        if symbol in self.active_trades:
+            del self.active_trades[symbol]
+            with open(self.trade_state_file, "w") as f:
+                json.dump(self.active_trades, f, indent=4)
+
+    # ── Telegram ──────────────────────────────────────────────────────────────
+
+    async def send_telegram_alert(self, message: str):
+        try:
+            if self.telegram_app:
+                await self.telegram_app.bot.send_message(
+                    chat_id=self.telegram_chat_id, text=message
+                )
+            logger.info(f"Telegram: {message}")
+        except Exception as e:
+            logger.error(f"Telegram send failed: {e}")
+
+    def add_alert_to_queue(self, message: str):
+        self.alert_queue.put(message)
+
+    async def process_alert_queue(self):
+        while self.running:
+            try:
+                if not self.alert_queue.empty():
+                    await self.send_telegram_alert(self.alert_queue.get_nowait())
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.error(f"process_alert_queue: {e}")
+                await asyncio.sleep(1)
+
+    # ── Telegram bot commands ─────────────────────────────────────────────────
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = (
+            f"🔄 PositionGuard Status\n"
+            f"Monitored Orders:    {len(self.monitored_orders)}\n"
+            f"Monitored Positions: {len(self.monitored_positions)}\n"
+            f"Alert Queue:         {self.alert_queue.qsize()}\n"
+            f"Running:             {self.running}"
+        )
+        await update.message.reply_text(msg)
+
+    async def list_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self.monitored_orders and not self.monitored_positions:
+            await update.message.reply_text("No active orders or positions being monitored.")
+            return
+        msg = "📋 Monitored Items\n"
+        if self.monitored_orders:
+            msg += "\n📝 Orders:\n"
+            for oid, info in self.monitored_orders.items():
+                msg += f"  {info['symbol']} (ID:{oid}, {info.get('status','?')})\n"
+        if self.monitored_positions:
+            msg += "\n🔒 Positions:\n"
+            for sym in self.monitored_positions:
+                msg += f"  {sym}\n"
+        await update.message.reply_text(msg)
+
+    async def stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        self.running = False
+        await update.message.reply_text("🛑 PositionGuard stopping…")
+
+    # ── Core monitoring loop ──────────────────────────────────────────────────
+
+    def check_all_orders_and_positions(self):
+        if not self.monitored_orders and not self.monitored_positions:
+            return
+
+        orders_to_remove = []
+        for order_id, order_info in list(self.monitored_orders.items()):
+            try:
+                symbol       = order_info["symbol"]
+                order_status = self.binance.futures_get_order(symbol=symbol, orderId=order_id)
+                status       = order_status.get("status")
+                order_info["status"] = status
+
+                if status == "FILLED":
+                    self.add_alert_to_queue(f"✅ Order {order_id} FILLED for {symbol}.")
+                    self.save_to_json()
+                    orders_to_remove.append(order_id)
+                    self._check_and_place_bracket(symbol, order_id=order_id)
+
+                elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                    self.add_alert_to_queue(f"❌ Order {order_id} failed: {status}.")
+                    orders_to_remove.append(order_id)
+
+                else:
+                    logger.info(f"Order {order_id} status: {status}. Waiting…")
+
+            except Exception as e:
+                logger.error(f"Error checking order {order_id}: {e}")
+
+        for oid in orders_to_remove:
+            self.monitored_orders.pop(oid, None)
+        if orders_to_remove:
+            self.save_to_json()
+
+        for symbol in list(self.monitored_positions):
+            try:
+                open_orders = self.binance.futures_get_open_orders(symbol=symbol)
+                has_bracket = any(
+                    o for o in open_orders
+                    if o["type"] in ("TAKE_PROFIT", "STOP_MARKET", "TAKE_PROFIT_MARKET")
+                )
+                if has_bracket:
+                    self.add_alert_to_queue(
+                        f"🛡️ {symbol} has active TP/SL. Removing from monitoring."
+                    )
+                    self.monitored_positions.discard(symbol)
+                else:
+                    positions = self.binance.futures_position_information(symbol=symbol)
+                    position  = next(
+                        (p for p in positions if float(p["positionAmt"]) != 0), None
+                    )
+                    if not position:
+                        self.add_alert_to_queue(f"🤔 No open position for {symbol}. Removing.")
+                        self.monitored_positions.discard(symbol)
+                    else:
+                        logger.info(f"{symbol} still needs TP/SL. Retrying…")
+                        self._check_and_place_bracket(symbol)
+            except Exception as e:
+                logger.error(f"Error checking position for {symbol}: {e}")
+                self.add_alert_to_queue(f"⚠️ Error checking position for {symbol}: {e}")
+
+    # ── Bracket order placement ───────────────────────────────────────────────
+
+    def _check_and_place_bracket(self, symbol: str, order_id=None):
+        """Verifies a filled order has TP/SL; places them if not."""
+        tp_sl_placed = False
+        # FIX: initialise position_info in scope so the fallback block can reference it
+        position_info = {
+            "is_open_position": False, "symbol": symbol,
+            "side": None, "size": 0.0, "entry_price": None,
+            "unrealized_pnl": 0.0, "liquidation_price": None,
+            "positionAmt": "0",
+        }
+
+        try:
+            # Find the live position
+            positions = self.binance.futures_position_information()
+            raw_pos   = next(
+                (p for p in positions if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
+                None
+            )
+            if raw_pos:
+                position_info.update({
+                    "is_open_position": True,
+                    "side":             "BUY" if float(raw_pos["positionAmt"]) > 0 else "SELL",
+                    "size":             abs(float(raw_pos["positionAmt"])),
+                    "entry_price":      float(raw_pos["entryPrice"]),
+                    "unrealized_pnl":   float(raw_pos["unRealizedProfit"]),
+                    "liquidation_price": float(raw_pos["liquidationPrice"]),
+                    "positionAmt":      raw_pos["positionAmt"],
+                })
+
+            self.monitored_positions.add(symbol)
+
+            # Retrieve the matching signal
+            signal = None
+            if order_id and str(order_id) in self.monitored_orders:
+                signal = self.monitored_orders[str(order_id)].get("signal")
+            if not signal:
+                for info in self.monitored_orders.values():
+                    if info.get("symbol") == symbol and "signal" in info:
+                        signal = info["signal"]
+                        break
+
+            if not signal:
+                self.add_alert_to_queue(f"⚠️ No signal found for {symbol}. Using fallback TP/SL.")
+                self._place_bracket_order_fallback(symbol, position_info)
+                return
+
+            # Check if position still open
+            live_positions = self.binance.futures_position_information(symbol=symbol)
+            live_pos       = next(
+                (p for p in live_positions if float(p["positionAmt"]) != 0), None
+            )
+            if not live_pos:
+                self.add_alert_to_queue(f"🤔 Entry filled but no open position for {symbol}.")
+                self.monitored_positions.discard(symbol)
+                return
+
+            # Check existing TP/SL
+            open_orders = self.binance.futures_get_open_orders(symbol=symbol)
+            has_bracket = any(
+                o for o in open_orders
+                if o["type"] in ("TAKE_PROFIT", "STOP_MARKET", "TAKE_PROFIT_MARKET")
+            )
+            if has_bracket:
+                self.add_alert_to_queue(f"🛡️ {symbol} already has TP/SL. Guard done.")
+                self.monitored_positions.discard(symbol)
+                tp_sl_placed = True
+            else:
+                try:
+                    resp = self._place_bracket_order(symbol, live_pos, signal)
+                    sl_id = resp["sl_order"]["orderId"] if resp.get("sl_order") else "N/A"
+                    tp_id = resp["tp_order"]["orderId"] if resp.get("tp_order") else "N/A"
+                    self.add_alert_to_queue(
+                        f"🔒 TP/SL placed for {symbol}. SL:{sl_id}  TP:{tp_id}"
+                    )
+                    tp_sl_placed = True
+                except Exception as e:
+                    logger.error(f"_place_bracket_order failed for {symbol}: {e}")
+                    try:
+                        self._place_bracket_order_fallback(symbol, live_pos, signal)
+                        tp_sl_placed = True
+                    except Exception as e2:
+                        logger.error(f"Fallback also failed for {symbol}: {e2}")
+
+            # Manual TP/SL tracking safety net
+            if not tp_sl_placed:
+                try:
+                    # FIX: use assignment, not comparison
+                    if symbol == "ETHUSDT":
+                        symbolis = "ETH/USD"
+                    elif symbol == "BTCUSDT":
+                        symbolis = "BTC/USD"
+                    else:
+                        symbolis = None
+
+                    position_status = check_open_position(symbol=symbol)
+                    tr_data = None
+                    for _ in range(3):
+                        downloaded = data_download("1T", symbolis)
+                        if downloaded is not None:
+                            tr_data = downloaded.iloc[-1]
+                            break
+                        time.sleep(2)
+
+                    if tr_data is not None and signal:
+                        price = tr_data["close"]
+                        llow  = tr_data["low"]
+                        hhigh = tr_data["high"]
+                        logger.info(f"Manual tracking {symbol} {signal['order_side']}")
+                        if signal["order_side"] == "Buy":
+                            if hhigh >= signal["tp_price"] or llow <= signal["sl_price"]:
+                                close_futures_position(position_status)
+                        elif signal["order_side"] == "Sell":
+                            if llow <= signal["tp_price"] or hhigh >= signal["sl_price"]:
+                                close_futures_position(position_status)
+                except Exception as e:
+                    logger.error(f"Manual tracking fallback failed for {symbol}: {e}")
+
+        except Exception as e:
+            logger.error(f"_check_and_place_bracket fatal error for {symbol}: {e}")
+            self.add_alert_to_queue(f"🚨 CRITICAL: TP/SL management failed for {symbol}: {e}")
+
+    def _place_bracket_order(self, symbol: str, position_info: dict, signal: dict) -> dict:
+        """
+        Places one STOP_MARKET (SL) and one TAKE_PROFIT_MARKET (TP) order.
+
+        Binance Futures rules for these order types:
+          • timeInForce must NOT be sent — Binance rejects the order with
+            error -1106 ("Parameter 'timeInForce' sent when not required").
+          • quantity must NOT be sent when closePosition=True.
+          • workingType should be MARK_PRICE so the trigger is based on the
+            fair-value mark price rather than the last traded price, preventing
+            wick-induced early stops on low-liquidity moves.
+          • priceProtect=True makes Binance reject the order if the stopPrice
+            deviates unreasonably from the current mark price — a free sanity check.
+          • Side must be the OPPOSITE of the position:
+              Long (positionAmt > 0) → close side = SELL
+              Short (positionAmt < 0) → close side = BUY
+          • Price direction must also be validated before sending:
+              Long: SL < entry, TP > entry
+              Short: SL > entry, TP < entry
+            Sending a TP below the entry for a long will be rejected (-2021).
+        """
+        sl_order = tp_order = None
+        try:
+            position_amt = float(position_info.get("positionAmt",
+                                 position_info.get("size", 0)))
+            is_long      = position_amt > 0
+            close_side   = "SELL" if is_long else "BUY"
+
+            sl_price = float(signal["sl_price"])
+            tp_price = float(signal["tp_price"])
+
+            # ── Tick-size precision ───────────────────────────────────────────
+            info        = self.binance.futures_exchange_info()
+            symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
+            pf          = next(f for f in symbol_info["filters"]
+                               if f["filterType"] == "PRICE_FILTER")
+            tick_size   = float(pf["tickSize"])
+            ts_str      = str(tick_size)
+            price_prec  = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+
+            sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
+            tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
+
+            # ── Direction validation ──────────────────────────────────────────
+            # Binance error -2021 if SL/TP are on the wrong side of the market.
+            entry = float(position_info.get("entry_price",
+                          position_info.get("entryPrice", 0)))
+            if entry > 0:
+                if is_long:
+                    if sl_price >= entry:
+                        logger.warning(f"SL {sl_price} >= entry {entry} for LONG — clamping.")
+                        sl_price = round(round(entry * 0.995 / tick_size) * tick_size, price_prec)
+                    if tp_price <= entry:
+                        logger.warning(f"TP {tp_price} <= entry {entry} for LONG — clamping.")
+                        tp_price = round(round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                else:
+                    if sl_price <= entry:
+                        logger.warning(f"SL {sl_price} <= entry {entry} for SHORT — clamping.")
+                        sl_price = round(round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                    if tp_price >= entry:
+                        logger.warning(f"TP {tp_price} >= entry {entry} for SHORT — clamping.")
+                        tp_price = round(round(entry * 0.995 / tick_size) * tick_size, price_prec)
+
+            sl_str = f"{sl_price:.{price_prec}f}"
+            tp_str = f"{tp_price:.{price_prec}f}"
+            logger.info(f"Placing bracket for {symbol} ({'LONG' if is_long else 'SHORT'}): "
+                        f"entry={entry}  SL={sl_str}  TP={tp_str}")
+
+            # ── Stop-loss ─────────────────────────────────────────────────────
+            sl_order = self.binance.futures_create_order(
+                symbol       = symbol,
+                side         = close_side,
+                type         = "STOP_MARKET",
+                stopPrice    = sl_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",   # trigger on mark, not last price
+                priceProtect = True,            # reject if trigger is far from mark
+            )
+            logger.info(f"SL placed: {symbol}  orderId={sl_order.get('orderId')}  stopPrice={sl_str}")
+
+            # ── Take-profit ───────────────────────────────────────────────────
+            tp_order = self.binance.futures_create_order(
+                symbol       = symbol,
+                side         = close_side,
+                type         = "TAKE_PROFIT_MARKET",
+                stopPrice    = tp_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
+            )
+            logger.info(f"TP placed: {symbol}  orderId={tp_order.get('orderId')}  stopPrice={tp_str}")
+
+        except Exception as e:
+            logger.error(f"_place_bracket_order ({symbol}): {e}")
+
+        return {"sl_order": sl_order, "tp_order": tp_order, "combined": True}
+
+    def _place_bracket_order_fallback(self, symbol: str, position_info: dict, signal=None) -> tuple:
+        """
+        Fallback bracket when no signal dict is available.
+        Uses conservative 0.5% TP / 0.5% SL defaults.
+        Same Binance API rules: no timeInForce, MARK_PRICE trigger.
+        """
+        try:
+            position_amt = float(position_info.get("positionAmt",
+                                 position_info.get("size", 0)))
+            is_long      = position_amt > 0
+            close_side   = "SELL" if is_long else "BUY"
+            entry_price  = float(position_info.get("entry_price")
+                                 or position_info.get("entryPrice", 0))
+
+            if signal:
+                tp_price = float(signal["tp_price"])
+                sl_price = float(signal["sl_price"])
+            elif is_long:
+                tp_price = entry_price * 1.005
+                sl_price = entry_price * 0.995
+            else:
+                tp_price = entry_price * 0.995
+                sl_price = entry_price * 1.005
+
+            info        = self.binance.futures_exchange_info()
+            symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
+            pf          = next(f for f in symbol_info["filters"]
+                               if f["filterType"] == "PRICE_FILTER")
+            tick_size   = float(pf["tickSize"])
+            ts_str      = str(tick_size)
+            price_prec  = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+
+            sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
+            tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
+            sl_str   = f"{sl_price:.{price_prec}f}"
+            tp_str   = f"{tp_price:.{price_prec}f}"
+
+            fallback_sl = self.binance.futures_create_order(
+                symbol       = symbol,
+                side         = close_side,
+                type         = "STOP_MARKET",
+                stopPrice    = sl_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
+            )
+            fallback_tp = self.binance.futures_create_order(
+                symbol       = symbol,
+                side         = close_side,
+                type         = "TAKE_PROFIT_MARKET",
+                stopPrice    = tp_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
+            )
+            logger.info(f"Fallback bracket placed for {symbol}: SL={sl_str}  TP={tp_str}")
+            return fallback_tp, fallback_sl
+
+        except Exception as e:
+            logger.error(f"_place_bracket_order_fallback ({symbol}): {e}")
+            return None, None
+
+    # ── Order registration ────────────────────────────────────────────────────
+
+    def start_guard_for_order(self, signal: Dict[str, Any], order_id: int):
+        """Registers a new order for monitoring and persists to JSON."""
+        symbol = signal["symbol"]
+        # FIX: store as string key so JSON round-trips cleanly
+        self.monitored_orders[str(order_id)] = {
+            "symbol":     symbol,
+            "signal":     signal,
+            "status":     "NEW",
+            "added_time": datetime.now().isoformat(),
+        }
+        self.save_to_json()
+        msg = f"👮 PositionGuard monitoring order {order_id} for {symbol}."
+        self.add_alert_to_queue(msg)
+        logger.info(msg)
+
+    # ── Telegram bot runner ───────────────────────────────────────────────────
+
+    async def run_telegram_bot(self):
+        """
+        Runs the Telegram bot in the current event loop.
+
+        The crash:
+            RuntimeError: This Application is not running!
+        happened because the `finally` block called `app.stop()` even when
+        `app.start()` had never succeeded.  python-telegram-bot v20+ tracks
+        its own running state and raises if you call stop() on an app that
+        was never started.
+
+        Fix: only call stop() when `self.telegram_app.running` is True.
+        """
+        _app_started = False
+        try:
+            self.telegram_app = Application.builder().token(self.telegram_token).build()
+            self.telegram_app.add_handler(CommandHandler("status", self.status_command))
+            self.telegram_app.add_handler(CommandHandler("list",   self.list_command))
+            self.telegram_app.add_handler(CommandHandler("stop",   self.stop_command))
+            await self.telegram_app.initialize()
+            await self.telegram_app.start()
+            _app_started = True                        # only True once start() succeeds
+            await self.telegram_app.updater.start_polling()
+            await self.process_alert_queue()
+        except Exception as e:
+            logger.error(f"Telegram bot error: {e}")
+        finally:
+            # Guard: only stop if the app was actually started
+            if _app_started and self.telegram_app is not None:
+                try:
+                    if self.telegram_app.updater and self.telegram_app.updater.running:
+                        await self.telegram_app.updater.stop()
+                    await self.telegram_app.stop()
+                    await self.telegram_app.shutdown()
+                except Exception as stop_err:
+                    logger.error(f"Telegram bot shutdown error: {stop_err}")
+
+    # ── Scheduler runner ──────────────────────────────────────────────────────
+
+    def run_scheduler(self):
+        schedule.every(30).seconds.do(self.check_all_orders_and_positions)
+        self.add_alert_to_queue("🔔 PositionGuard scheduler ONLINE.")
+        logger.info("PositionGuard scheduler started.")
+        while self.running:                # FIX: respect self.running
+            schedule.run_pending()
+            time.sleep(1)                  # FIX: single sleep (was doubled)
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def start(self):
+        self.running = True
+
+        self.scheduler_thread = threading.Thread(
+            target=self.run_scheduler, daemon=True
+        )
+        self.scheduler_thread.start()
+
+        def _run_telegram():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.run_telegram_bot())
+
+        self.telegram_thread = threading.Thread(target=_run_telegram, daemon=True)
+        self.telegram_thread.start()
+
+    def stop(self):
+        self.running = False
+        self.add_alert_to_queue("🛑 PositionGuard stopped.")
+        if self.scheduler_thread:
+            self.scheduler_thread.join(timeout=5)
+        if self.telegram_thread:
+            self.telegram_thread.join(timeout=5)
+
+
+# ── StateManager ──────────────────────────────────────────────────────────────
+
+class StateManager:
+    """Manages bot_state.json / bot_commands.json for external dashboard integration."""
+
+    def __init__(self, state_file="bot_state.json", command_file="bot_commands.json"):
+        self.state_file   = state_file
+        self.command_file = command_file
+        self._ensure_files_exist()
+
+    def _ensure_files_exist(self):
+        if not os.path.exists(self.command_file):
+            with open(self.command_file, "w") as f:
+                json.dump({"command": None}, f)
+
+    def update_state(self, data: Dict[str, Any]):
+        try:
+            data["last_updated"] = datetime.now().isoformat()
+            tmp = self.state_file + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=4)
+            os.replace(tmp, self.state_file)
+        except Exception as e:
+            logger.error(f"StateManager.update_state: {e}")
+
+    def get_command(self) -> str | None:
+        try:
+            if not os.path.exists(self.command_file):
+                return None
+            with open(self.command_file, "r") as f:
+                data = json.load(f)
+            cmd = data.get("command")
+            if cmd:
+                logger.info(f"StateManager received command: {cmd}")
+                with open(self.command_file, "w") as f:
+                    json.dump({"command": None}, f)
+            return cmd
+        except Exception as e:
+            logger.error(f"StateManager.get_command: {e}")
+            return None
+</file>
+
+<file path="pyq_p3.py">
+"""
+pyq_p3.py
+PyQuant live trading module.
+Prediction/signal-generation logic is UNTOUCHED.
+All post-signal execution has been fixed:
+  - API keys from .env (no hardcoded credentials)
+  - Guard initialised here; circular import from p3_orchestra removed
+  - signal_executor returns (signal, response, ordered) 3-tuple consistently
+  - Response dict logging fixed (.text removed)
+  - leverage defined as module constant (50x as per original)
+"""
+
+# ── Standard library ──────────────────────────────────────────────────────────
+import os
+import json
+import math
+import time
+import logging
+import threading
+import traceback
+import hashlib
+import hmac
+import websocket
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
+from queue import Queue
+from typing import Dict, Any, Set
+
+# ── Third-party ───────────────────────────────────────────────────────────────
+import numpy as np
+import pandas as pd
+import requests
+import asyncio
+import matplotlib.pyplot as plt
+import nest_asyncio
+from dotenv import load_dotenv
+
+import alpaca_trade_api as tradeapi
+from alpaca_trade_api.stream import Stream
+from alpaca_trade_api.common import URL
+import datetime as dt
+
+from alpaca.trading.client import TradingClient
+from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.live.crypto import CryptoDataStream
+
+from pybit.unified_trading import HTTP
+
+from binance.client import Client
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from sklearn.metrics import (
+    mean_squared_error, mean_absolute_percentage_error,
+    mean_absolute_error, r2_score
+)
+
+# FIX: Import PositionGuard directly from pyquant_utils.
+# REMOVED: `from p3_orchestra import guard` which caused a circular import:
+# pyquant_orchestra imports from pyq_p3 → pyq_p3 importing back from
+# pyquant_orchestra created a mutual dependency that prevented either from loading.
+from pyquant_utils import (
+    UKFModel, get_equities, SignalGenerator, PositionGuard,
+    data_download, aggregate_ohlcv_data,
+    check_open_position, close_futures_position,
+    # Shared clients — created once in pyquant_utils with retry logic.
+    # Importing them here means pyq_p3 and pyquant_utils use the exact
+    # same objects, so _binance_lock covers every Binance call in the process.
+    binance_client, crypto_client, session, _binance_lock,
+)
+
+nest_asyncio.apply()
+
+# ── Environment ───────────────────────────────────────────────────────────────
+# pyquant_utils already loaded the .env on import.  We call load_dotenv again
+# here with the same explicit path so pyq_p3.py can also be run / tested
+# standalone without going through pyquant_orchestra.py.
+from pathlib import Path as _Path
+_ENV_PATH = _Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
+
+
+def _require_env(key: str) -> str:
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise EnvironmentError(
+            f"Required variable '{key}' not set. "
+            f"Check your .env file at: {_ENV_PATH}"
+        )
+    return value
+
+
+ALPACA_API_KEY     = _require_env("ALPACA_API_KEY")
+ALPACA_SECRET_KEY  = _require_env("ALPACA_SECRET_KEY")
+BYBIT_API_KEY      = _require_env("BYBIT_API_KEY")
+BYBIT_SECRET_KEY   = _require_env("BYBIT_SECRET_KEY")
+BINANCE_API_KEY    = _require_env("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = _require_env("BINANCE_SECRET_KEY")
+TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
+
+# ── Trading constant ──────────────────────────────────────────────────────────
+LEVERAGE = 50
+
+# ── Clients ───────────────────────────────────────────────────────────────────
+api = tradeapi.REST(
+    ALPACA_API_KEY, ALPACA_SECRET_KEY,
+    "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+)
+
+BYBIT_BASE_URL = "https://api.bybit.com"
+session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
+
+start_date    = dt.date.today() - dt.timedelta(days=60)
+end_date      = dt.date.today()
+
+crypto_stream  = CryptoDataStream(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+crypto_client  = CryptoHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
+
+# ── Bybit raw-HTTP helper (kept for compatibility) ────────────────────────────
+_http_session = requests.Session()
+_recv_window  = str(50000)
+
+
+def genSignature(payload: str, time_stamp: str) -> str:
+    param_str = time_stamp + BYBIT_API_KEY + _recv_window + str(payload)
+    return hmac.new(
+        BYBIT_SECRET_KEY.encode("utf-8"),
+        param_str.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def HTTP_Request(endPoint: str, method: str, payload: str, Info: str):
+    time_stamp = str(int(time.time() * 1000))
+    headers = {
+        "X-BAPI-API-KEY":     BYBIT_API_KEY,
+        "X-BAPI-SIGN":        genSignature(payload, time_stamp),
+        "X-BAPI-SIGN-TYPE":   "2",
+        "X-BAPI-TIMESTAMP":   time_stamp,
+        "X-BAPI-RECV-WINDOW": _recv_window,
+        "Content-Type":       "application/json",
+    }
+    if method == "POST":
+        return _http_session.request(method, BYBIT_BASE_URL + endPoint,
+                                     headers=headers, data=payload).text
+    return _http_session.request(method, BYBIT_BASE_URL + endPoint + "?" + payload,
+                                 headers=headers).text
+
+
+# Fetch Bybit withdrawal info at startup (best-effort)
+btc_withdrawal = eth_withdrawal = usdt_withdrawal = None
+try:
+    HTTP_Request("/v5/account/info", "GET", "", "Info")
+    response_text = HTTP_Request(
+        "/v5/account/withdrawal", "GET", "coinName=BTC,ETH,USDT", "Withdrawal"
+    )
+    if response_text:
+        _data = json.loads(response_text)
+        if _data.get("retCode") == 0:
+            aw_map          = _data["result"]["availableWithdrawalMap"]
+            btc_withdrawal  = aw_map.get("BTC")
+            eth_withdrawal  = aw_map.get("ETH")
+            usdt_withdrawal = aw_map.get("USDT")
+except Exception as _e:
+    print(f"Bybit withdrawal info unavailable at startup: {_e}")
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+_console_h = logging.StreamHandler()
+_console_h.setLevel(logging.INFO)
+_file_h = logging.FileHandler("pyq_p3.log")
+_file_h.setLevel(logging.DEBUG)
+_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+_console_h.setFormatter(_fmt)
+_file_h.setFormatter(_fmt)
+if not logger.handlers:
+    logger.addHandler(_console_h)
+    logger.addHandler(_file_h)
+
+logger.info("\nStarting PyQuant" + "-" * 80 + "\n")
+
+# ── UKF model setup ───────────────────────────────────────────────────────────
+ukf_model = UKFModel(crypto_client, start_date)
+
+eth_symbols = ["ETH/USD"]
+btc_symbols = ["BTC/USD"]
+
+btc_ukf,      btc_high_ukf,      btc_low_ukf      = ukf_model.create_ukf_models("1H",  btc_symbols)
+btc_fift_ukf, btc_fift_high_ukf, btc_fift_low_ukf = ukf_model.create_ukf_models("15T", btc_symbols)
+btc_five_ukf, btc_five_high_ukf, btc_five_low_ukf = ukf_model.create_ukf_models("5T",  btc_symbols)
+
+eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.create_ukf_models("1H",  eth_symbols)
+eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.create_ukf_models("15T", eth_symbols)
+eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models("5T",  eth_symbols)
+
+# ── Signal generator ──────────────────────────────────────────────────────────
+signal_generator = SignalGenerator()
+
+# ── PositionGuard — initialised here, no circular import ─────────────────────
+guard = PositionGuard(
+    binance_client=binance_client,
+    telegram_token=TELEGRAM_TOKEN,
+    chat_id=TELEGRAM_CHAT_ID,
+)
+guard.start()
+
+# ── UKF mapping ───────────────────────────────────────────────────────────────
+symbols_list = ["ETH/USD", "BTC/USD"]
+
+ukf_mapping = {
+    "ETH/USD": {"ukf": eth_ukf, "high_ukf": eth_high_ukf, "low_ukf": eth_low_ukf},
+    "BTC/USD": {"ukf": btc_ukf, "high_ukf": btc_high_ukf, "low_ukf": btc_low_ukf},
+}
+
+# ── Module-level state ────────────────────────────────────────────────────────
+predictions      = []
+high_predictions = []
+low_predictions  = []
+ukf_handle       = []
+signals          = []
+order_changes    = []
+order_history    = []
+
+ordered         = False
+sig_gened       = False
+in_trade        = False
+double_order    = False
+order_changed   = False
+position_closed = False
+stake           = 0.9985
+
+wallet_balance = None
+btc_balance    = None
+eth_balance    = None
+
+btc_ordered_signal = None
+eth_ordered_signal = None
+btc_position       = False
+eth_position       = False
+bo_declared        = False
+eo_declared        = False
+
+btc_tracker = {
+    "sig_gened": False, "ordered": False, "order_filled": False,
+    "in_trade": False, "open_trade": False, "last_event_timestamp": None,
+    "tp_hit": False, "sl_hit": False,
+}
+eth_tracker = {
+    "sig_gened": False, "ordered": False, "order_filled": False,
+    "in_trade": False, "open_trade": False, "last_event_timestamp": None,
+    "tp_hit": False, "sl_hit": False,
+}
+
+# ── Duplicate-run guards ──────────────────────────────────────────────────────
+LAST_RUN_FILE   = "last_execution_timestamp.txt"
+MINUTE_RUN_FILE = "minute_execution_timestamp.txt"
+
+
+def has_function_run_this_hour() -> bool:
+    if os.path.exists(LAST_RUN_FILE):
+        try:
+            with open(LAST_RUN_FILE, "r") as f:
+                last = datetime.fromisoformat(f.read().strip())
+            now = datetime.now()
+            if (now.year, now.month, now.day, now.hour) == \
+               (last.year, last.month, last.day, last.hour):
+                return True
+        except Exception as e:
+            print(f"Error reading hour timestamp: {e}")
+    return False
+
+
+def update_last_run_timestamp():
+    with open(LAST_RUN_FILE, "w") as f:
+        f.write(datetime.now().isoformat())
+
+
+def has_function_run_this_minute() -> bool:
+    if os.path.exists(MINUTE_RUN_FILE):
+        try:
+            with open(MINUTE_RUN_FILE, "r") as f:
+                last = datetime.fromisoformat(f.read().strip())
+            now = datetime.now()
+            if (now.year, now.month, now.day, now.hour, now.minute) == \
+               (last.year, last.month, last.day, last.hour, last.minute):
+                return True
+        except Exception as e:
+            print(f"Error reading minute timestamp: {e}")
+    return False
+
+
+def update_minute_run_timestamp():
+    with open(MINUTE_RUN_FILE, "w") as f:
+        f.write(datetime.now().isoformat())
+
+
+# ── Utility helpers ───────────────────────────────────────────────────────────
+
+def safe_decimal(value) -> Decimal:
+    if value is None or value == "":
+        return Decimal("0")
+    try:
+        return Decimal(value)
+    except Exception:
+        return Decimal("0")
+
+
+def custom_floor(value: float, decimal_places: int) -> float:
+    decimal_value = Decimal(str(value))
+    quantum_str   = "1e-" + str(decimal_places)
+    return float(decimal_value.quantize(Decimal(quantum_str), rounding=ROUND_FLOOR))
+
+
+def handle_api_response(response: dict, action_description: str):
+    if response and response.get("retCode") == 0:
+        return response["result"]
+    err = (
+        f"Failed to {action_description}: "
+        f"{response.get('retMsg', 'Unknown error')} "
+        f"(retCode: {response.get('retCode', 'N/A')})"
+    )
+    logger.error(err)
+    return None
+
+
+# ── open_tp_sl_position ───────────────────────────────────────────────────────
+
+def open_tp_sl_position(tp_price, sl_price, symbol: str) -> bool:
+    """Sets TP/SL on a Bybit position using the module-level session."""
+    attempts, max_attempts = 0, 3
+    while attempts < max_attempts:
+        try:
+            response = session.set_trading_stop(
+                category="linear", symbol=symbol,
+                takeProfit=tp_price, stopLoss=sl_price,
+                tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice",
+                tpslMode="Full", tpOrderType="Market", slOrderType="Market",
+                positionIdx=0,
+            )
+            if response and response.get("retCode") == 0:
+                logger.info(f"TP/SL set for {symbol}: tp={tp_price}  sl={sl_price}")
+                return True
+            logger.warning(f"TP/SL set failed for {symbol}: {response}")
+        except Exception as e:
+            logger.error(f"open_tp_sl_position ({symbol}): {e}")
+        attempts += 1
+        logger.info(f"Retrying TP/SL ({attempts}/{max_attempts}) in 5s…")
+        time.sleep(5)
+    logger.error(f"Giving up TP/SL for {symbol} after {max_attempts} attempts.")
+    return False
+
+
+# ── signal_executor ───────────────────────────────────────────────────────────
+
+def signal_executor(signal: dict, trade_val: float):
+    """
+    Places a Binance Futures entry order from a signal dict.
+
+    Always returns a 3-tuple: (signal, response, ordered)
+      ordered = True on success, False on any failure.
+    """
+    global ordered, signals
+    response = None
+
+    # Set leverage
+    try:
+        binance_client.futures_change_leverage(symbol=signal["symbol"], leverage=LEVERAGE)
+        logger.info(f"SignalExecutor: leverage={LEVERAGE}x for {signal['symbol']}")
+    except Exception as e:
+        logger.warning(f"SignalExecutor: could not set leverage (may already be set): {e}")
+
+    if not signal or signal.get("entry_price") is None:
+        logger.warning("SignalExecutor: invalid signal – no order placed.")
+        ordered = False
+        return signal, response, ordered
+
+    symbol      = signal["symbol"]
+    order_side  = signal["order_side"].upper()
+    order_type  = signal["order_type"].upper()
+    entry_price = float(signal["entry_price"])
+
+    logger.info(f"SignalExecutor: {symbol} {order_side} {order_type} @ {entry_price}")
+
+    # Quantity calculation
+    try:
+        # FIX: futures_exchange_info() takes no symbol argument; filter afterwards
+        exchange_info = binance_client.futures_exchange_info()
+        symbol_info   = next(
+            (s for s in exchange_info["symbols"] if s["symbol"] == symbol), None
+        )
+        if symbol_info is None:
+            logger.error(f"SignalExecutor: {symbol} not found in exchange info.")
+            ordered = False
+            return signal, response, ordered
+
+        lot_filter  = next(f for f in symbol_info["filters"] if f["filterType"] == "LOT_SIZE")
+        step_size   = float(lot_filter["stepSize"])
+        ss_str      = str(step_size)
+        precision   = len(ss_str.split(".")[1].rstrip("0")) if "." in ss_str else 0
+
+        notional_value = trade_val * LEVERAGE
+        raw_qty        = notional_value / entry_price
+        quantity       = math.floor(raw_qty / step_size) * step_size
+        quantity       = round(quantity, precision)
+        quantity_str   = f"{quantity:.{precision}f}"
+        signal["qty"]  = quantity_str
+        logger.debug(f"SignalExecutor: qty={quantity_str}")
+    except Exception as e:
+        logger.error(f"SignalExecutor: qty calculation failed for {symbol}: {e}")
+        ordered = False
+        return signal, response, ordered
+
+    # Build order params
+    order_params: dict = {
+        "symbol": symbol, "side": order_side,
+        "type": order_type, "quantity": quantity_str,
+    }
+
+    if order_type == "LIMIT":
+        try:
+            pf         = next(f for f in symbol_info["filters"] if f["filterType"] == "PRICE_FILTER")
+            tick_size  = float(pf["tickSize"])
+            ts_str     = str(tick_size)
+            price_prec = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+            entry_price = round(entry_price / tick_size) * tick_size
+            entry_str   = f"{entry_price:.{price_prec}f}"
+        except StopIteration:
+            entry_str = str(entry_price)
+        order_params["price"]       = entry_str
+        order_params["timeInForce"] = "GTC"
+
+    # Place order
+    try:
+        logger.info(f"SignalExecutor: placing {order_type} for {symbol}…")
+        response = binance_client.futures_create_order(**order_params)
+        logger.info(f"SignalExecutor: order placed – ID={response['orderId']}")
+        signal["orderId"] = response["orderId"]
+        signals.append(signal)
+        ordered = True
+        return signal, response, ordered
+    except Exception as e:
+        logger.error(f"SignalExecutor: order placement failed for {symbol}: {e}")
+        ordered = False
+        return signal, response, ordered
+
+
+# ── price_tracker / order_editor ─────────────────────────────────────────────
+
+def price_tracker(signal, pred, high_pred, low_pred, price, the_symbol):
+    """Detects entry drift and updates signal if price conditions shift."""
+    try:
+        if not isinstance(signal, dict):
+            raise TypeError(f"Invalid signal format: {type(signal)}")
+    except (TypeError, ValueError):
+        raise TypeError(f"Could not interpret signal as dict: {type(signal)}")
+
+    global order_changed, order_changes, stake, order_history, position_closed
+
+    new_entry = new_sl = order_id = None
+    symbol    = signal["symbol"]
+
+    if ordered and not order_changed:
+        order_id = signal.get("orderLinkId")
+        if the_symbol == signal["symbol"]:
+            if signal["order_side"] == "Buy":
+                if low_pred < signal["entry_price"] and low_pred <= signal["sl_price"]:
+                    new_entry              = low_pred
+                    positions              = 10 / new_entry
+                    new_sl                 = (positions * new_entry * stake) / positions
+                    signal["entry_price"]  = new_entry
+                    signal["sl_price"]     = new_sl
+                    order_changed          = True
+            elif signal["order_side"] == "Sell" and not order_changed:
+                if high_pred > signal["entry_price"] and high_pred >= signal["sl_price"]:
+                    new_entry              = high_pred
+                    positions              = 10 / new_entry
+                    new_sl                 = (positions * new_entry * (2 - stake)) / positions
+                    signal["entry_price"]  = new_entry
+                    signal["sl_price"]     = new_sl
+                    order_changed          = True
+
+            if signal["order_side"] == "Buy" and not position_closed:
+                if price["high"] >= signal["tp_price"]:
+                    signal["condition"] = "Profit"
+                elif price["low"] <= signal["sl_price"]:
+                    signal["condition"] = "Loss"
+            elif signal["order_side"] == "Sell" and not position_closed:
+                if price["low"] <= signal["tp_price"]:
+                    signal["condition"] = "Profit"
+                elif price["high"] >= signal["sl_price"]:
+                    signal["condition"] = "Loss"
+
+    order_changes.append({
+        "new_entry": new_entry, "new_sl": new_sl,
+        "order_id": order_id,  "symbol": symbol,
+    })
+    if order_changed:
+        return order_changes[-1]
+    order_changed = False
+    return None
+
+
+def order_editor(order_changes: dict):
+    logger.info(
+        f"[OrderEditor] symbol={order_changes['symbol']}  "
+        f"orderId={order_changes['order_id']}  "
+        f"new_entry={order_changes['new_entry']}  "
+        f"new_sl={order_changes['new_sl']}"
+    )
+
+
+# ── position_manager ──────────────────────────────────────────────────────────
+
+def position_manager(symbol: str, data):
+    """
+    Checks open position against UKF trend/pct_diff.
+    Closes on reversal, loss limit, or if TP was already reached post-fill.
+    """
+    global in_trade, signals, eth_tracker, btc_tracker
+
+    logger.info(f"Starting Position Manager for {symbol}")
+    try:
+        position_status = check_open_position(symbol=symbol)
+        if position_status["is_open_position"]:
+            trend    = signal_generator.trend
+            pct_diff = signal_generator.pct_diff
+            side     = position_status["side"].lower()
+
+            if side == "buy" and trend == "down":
+                if pct_diff is not None and pct_diff >= 0.00005 \
+                        and position_status["unrealized_pnl"] > 0:
+                    close_futures_position(position_status)
+                    logger.info(f"PM: closed {symbol} BUY on downtrend reversal. "
+                                f"PNL={position_status['unrealized_pnl']:.4f}")
+                elif position_status["unrealized_pnl"] <= -0.2:
+                    close_futures_position(position_status)
+                    logger.info(f"PM: closed {symbol} BUY on loss limit.")
+
+            elif side == "sell" and trend == "up":
+                if pct_diff is not None and pct_diff >= 0.00005 \
+                        and position_status["unrealized_pnl"] > 0:
+                    close_futures_position(position_status)
+                    logger.info(f"PM: closed {symbol} SELL on uptrend reversal. "
+                                f"PNL={position_status['unrealized_pnl']:.4f}")
+                elif position_status["unrealized_pnl"] <= -0.2:
+                    close_futures_position(position_status)
+                    logger.info(f"PM: closed {symbol} SELL on loss limit.")
+
+            # Post-fill TP alignment check
+            sig = None
+            if signals and symbol == signals[-1]["symbol"] and not signals[-1].get("checked"):
+                signals[-1]["checked"] = True
+                sig = signals[-1]
+            elif len(signals) >= 2 and symbol == signals[-2]["symbol"] \
+                    and not signals[-2].get("checked"):
+                signals[-2]["checked"] = True
+                sig = signals[-2]
+
+            if sig and data["high"] > sig["tp_price"]:
+                close_futures_position(position_status)
+                logger.info(f"PM2: {symbol} TP already passed post-fill – closed. "
+                            f"PNL={position_status['unrealized_pnl']:.4f}")
+
+        print(f"position_manager: finished for {symbol}")
+    except Exception as e:
+        logger.error(f"position_manager ({symbol}): {e}")
+
+
+# ── hourly_task ───────────────────────────────────────────────────────────────
+
+def hourly_task():
+    if has_function_run_this_hour():
+        print(f"Hourly task already ran this hour. Skipping.")
+        return
+
+    # FIX: Write the timestamp immediately so a second scheduler tick within
+    # the same hour (possible if the task takes < 1 s) is blocked by the guard
+    # even before the body completes.  Previously written at the end of the
+    # function, so a crash or slow run left the guard unset.
+    update_last_run_timestamp()
+
+    global ordered, sig_gened, order_changed, signal, my_signal, signals
+    global eth_tracker, btc_tracker, position_closed
+    global btc_withdrawal, eth_withdrawal, wallet_balance, usdt_withdrawal
+    global btc_ordered_signal, eth_ordered_signal
+    global bo_declared, eo_declared, in_trade, double_order
+    global btc_balance, eth_balance
+
+    # Reset cycle state
+    sig_gened               = False
+    signal_generator.sig_gened = False
+    ordered                 = False
+    bo_declared             = False
+    eo_declared             = False
+    my_signal               = None
+    btc_ordered_signal      = None
+    eth_ordered_signal      = None
+    btc_signal              = None
+    eth_signal              = None
+    btc_response            = None
+    eth_response            = None
+    btc_ordered             = False
+    eth_ordered             = False
+
+    btc_tracker.update({"sig_gened": False, "ordered": False, "order_filled": False})
+    eth_tracker.update({"sig_gened": False, "ordered": False, "order_filled": False})
+
+    now = datetime.now()
+    print(f"[{now:%Y-%m-%d %H:%M:%S}] Running Hourly Task.")
+
+    # Balance
+    try:
+        wallet_balance = None
+        while wallet_balance is None:
+            try:
+                usdt_equity, btc_equity, eth_equity = get_equities()
+                wallet_balance = float(usdt_equity)
+                btc_balance    = float(btc_equity)
+                eth_balance    = float(eth_equity)
+                logger.info(f"Balance – USDT:{wallet_balance}  BTC:{btc_balance}  ETH:{eth_balance}")
+            except Exception as e:
+                logger.error(f"Error getting balance: {e}")
+                time.sleep(2)
+
+        # Cancel stale open orders per symbol
+        try:
+            open_orders         = binance_client.futures_get_open_orders()
+            symbols_with_orders = {o["symbol"] for o in open_orders}
+            for sym in symbols_with_orders:
+                binance_client.futures_cancel_all_open_orders(symbol=sym)
+            logger.info("Cancelled all stale open orders.")
+        except Exception as e:
+            logger.error(f"Error cancelling open orders: {e}")
+
+        if not wallet_balance:
+            logger.warning("Balance unavailable – using default $3.")
+            wallet_balance = 3.0
+
+    except Exception as e:
+        logger.error(f"Balance routine error: {e}")
+
+    # Open position check
+    try:
+        btc_pos = check_open_position(symbol="BTCUSDT")
+        if btc_pos["is_open_position"]:
+            logger.info(
+                f"Open BTC: side={btc_pos['side']}  size={btc_pos['size']}  "
+                f"entry={btc_pos['entry_price']:.4f}  uPNL={btc_pos['unrealized_pnl']:.4f}"
+            )
+            in_trade = btc_tracker["in_trade"] = True
+            upnl = btc_pos["unrealized_pnl"]
+            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.125 or upnl <= -0.2):
+                close_futures_position(btc_pos)
+                btc_tracker["in_trade"] = False
+            if upnl >= wallet_balance * 0.2 or upnl >= 0.6:
+                close_futures_position(btc_pos)
+                btc_tracker["in_trade"] = False
+        else:
+            in_trade = btc_tracker["in_trade"] = False
+
+        eth_pos = check_open_position(symbol="ETHUSDT")
+        if eth_pos["is_open_position"]:
+            logger.info(
+                f"Open ETH: side={eth_pos['side']}  size={eth_pos['size']}  "
+                f"entry={eth_pos['entry_price']:.4f}  uPNL={eth_pos['unrealized_pnl']:.4f}"
+            )
+            in_trade = eth_tracker["in_trade"] = True
+            upnl = eth_pos["unrealized_pnl"]
+            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.1 or upnl <= -0.2):
+                close_futures_position(eth_pos)
+                eth_tracker["in_trade"] = False
+            if upnl >= wallet_balance * 0.15 or upnl >= 0.6:
+                close_futures_position(eth_pos)
+                eth_tracker["in_trade"] = False
+        else:
+            in_trade = eth_tracker["in_trade"] = False
+
+    except Exception as e:
+        logger.error(f"Position check error: {e}")
+
+    position_closed = False
+
+    # Signal generation
+    logger.info("Starting Hourly Signal Services")
+    try:
+        for symbol in symbols_list:
+            ukf_data = ukf_mapping.get(symbol)
+
+            ddata = None
+            while ddata is None:
+                try:
+                    downloaded_data = data_download("1H", symbol)
+                    if downloaded_data is not None:
+                        ddata = downloaded_data.iloc[-1]
+                    else:
+                        print(f"Data None for {symbol} (1H). Retrying…")
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"Error downloading {symbol} 1H: {e}")
+                    time.sleep(2)
+
+            price = ddata["close"]
+
+            try:
+                position_manager(symbol, ddata)
+                # Hourly ETH TP threshold
+                if symbol in ("ETH/USD", "ETHUSDT"):
+                    eth_ps = check_open_position(symbol="ETHUSDT")
+                    if eth_ps["is_open_position"]:
+                        hr_inc  = 1.003
+                        net_val = (wallet_balance * hr_inc) * LEVERAGE
+                        take_tp = net_val / eth_ps["size"]
+                        if eth_ps["side"].lower() == "buy" and ddata["high"] >= take_tp:
+                            close_futures_position(eth_ps)
+                            logger.info("Hourly ETH BUY TP threshold hit – closed.")
+                        elif eth_ps["side"].lower() == "sell" and ddata["low"] <= take_tp:
+                            close_futures_position(eth_ps)
+                            logger.info("Hourly ETH SELL TP threshold hit – closed.")
+            except Exception as e:
+                logger.error(f"position_manager / hourly threshold error: {e}")
+
+            if ukf_data:
+                try:
+                    pred, high_pred, low_pred = UKFModel.ukf_handler(
+                        ddata,
+                        ukf_data["ukf"], ukf_data["high_ukf"], ukf_data["low_ukf"]
+                    )
+                    my_signal = signal_generator.generate_signal(
+                        price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance
+                    )
+                except Exception as e:
+                    print(f"Signal generation error for {symbol}: {e}")
+            else:
+                print(f"Warning: no UKF data for {symbol}")
+
+            if my_signal:
+                logger.info(f"{symbol} signal: {my_signal}")
+                if symbol in ("BTC/USD", "BTCUSDT"):
+                    btc_signal = my_signal
+                    btc_tracker.update({"sig_gened": True, "ordered": False})
+                elif symbol in ("ETH/USD", "ETHUSDT"):
+                    eth_signal = my_signal
+                    eth_tracker.update({"sig_gened": True, "ordered": False})
+                else:
+                    logger.error(f"Signal generated for unknown symbol: {symbol}")
+                ordered = False
+            else:
+                print(f"No signal for {symbol} (1H).")
+                signal_generator.sig_gened = False
+                if symbol in ("BTC/USD", "BTCUSDT"):
+                    btc_signal = None
+                    btc_tracker.update({"sig_gened": False, "ordered": False})
+                elif symbol in ("ETH/USD", "ETHUSDT"):
+                    eth_signal = None
+                    eth_tracker.update({"sig_gened": False, "ordered": False})
+
+    except Exception as e:
+        logger.error(f"Signal generation block error: {e}")
+
+    # Order execution
+    try:
+        print("Starting Signal Execution block (1hr)")
+
+        if btc_tracker["sig_gened"] and eth_tracker["sig_gened"]:
+            logger.info("Signal from both coins.")
+            trade_value = float(wallet_balance)
+
+            try:
+                eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
+                if eth_response:
+                    guard.start_guard_for_order(eth_signal, eth_response["orderId"])
+            except Exception as e:
+                logger.error(f"ETH order execution error: {e}")
+
+            # FIX: eth_response is a dict, not requests.Response — log orderId not .text
+            if eth_ordered:
+                logger.info(f"ETH order placed: id={eth_response.get('orderId') if eth_response else 'N/A'}")
+            else:
+                logger.info("ETH order not placed successfully.")
+
+            double_order = True
+            signal_generator.sig_gened = True
+            ordered = True
+            eth_tracker.update({"sig_gened": True, "last_event_timestamp": now})
+            btc_tracker.update({"sig_gened": True, "last_event_timestamp": now})
+
+        elif btc_tracker["sig_gened"] and not eth_tracker["sig_gened"]:
+            trade_value = float(wallet_balance) * 0.8
+            btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
+            try:
+                if btc_response:
+                    guard.start_guard_for_order(btc_signal, btc_response["orderId"])
+            except Exception as e:
+                logger.error(f"BTC guard start error: {e}")
+
+            # FIX: dict logging
+            logger.info(f"BTC signal: {btc_ordered_signal}")
+            logger.info(f"BTC order: id={btc_response.get('orderId') if btc_response else 'N/A'}")
+
+            eth_ordered_signal = None
+            signal_generator.sig_gened = True
+            ordered      = True
+            double_order = False
+            btc_tracker.update({"ordered": True, "last_event_timestamp": now})
+            eth_tracker["sig_gened"] = False
+
+        elif eth_tracker["sig_gened"] and not btc_tracker["sig_gened"]:
+            trade_value = float(wallet_balance) * 0.8
+            eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
+            try:
+                if eth_response:
+                    guard.start_guard_for_order(eth_signal, eth_response["orderId"])
+            except Exception as e:
+                logger.error(f"ETH guard start error: {e}")
+
+            # FIX: dict logging
+            logger.info(f"ETH signal: {eth_ordered_signal}")
+            logger.info(f"ETH order: id={eth_response.get('orderId') if eth_response else 'N/A'}")
+
+            btc_ordered_signal = None
+            signal_generator.sig_gened = True
+            ordered      = True
+            double_order = False
+            eth_tracker.update({"sig_gened": True, "ordered": True, "last_event_timestamp": now})
+            btc_tracker["sig_gened"] = False
+
+        else:
+            print("No signals from either coin. No orders placed.")
+            logger.info("No signal from either coin this hour.")
+            btc_ordered_signal = eth_ordered_signal = None
+            signal_generator.sig_gened = False
+            btc_tracker.update({"sig_gened": False, "ordered": False})
+            eth_tracker.update({"sig_gened": False, "ordered": False})
+
+    except Exception as e:
+        logger.error(f"Signal execution error: {e}\n{traceback.format_exc()}")
+
+
+# ── fifteen_minute_task ───────────────────────────────────────────────────────
+
+def fifteen_minute_task():
+    global order_changed, my_signal, btc_ordered_signal, eth_ordered_signal
+
+    try:
+        the_symbol = None
+        now        = datetime.now()
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] Running 15-minute task.")
+
+        for i in symbols_list:
+            the_symbol = i
+            fift_data  = None
+            while fift_data is None:
+                try:
+                    downloaded_data = data_download("1T", i)
+                    if downloaded_data is not None:
+                        agg       = aggregate_ohlcv_data(downloaded_data.copy(), aggregation_minutes=15)
+                        agg.dropna(inplace=True)
+                        fift_data = agg.iloc[-1]
+                    else:
+                        print(f"15M data None for {i}. Retrying…")
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"Error downloading 15M data for {i}: {e}")
+                    time.sleep(2)
+
+            print(f"{i}: Open:{fift_data['open']}  High:{fift_data['high']}  Low:{fift_data['low']}")
+
+            if i in ("BTC/USD", ["BTC/USD"]):
+                UKFModel.ukf_handler(fift_data, btc_fift_ukf, btc_fift_high_ukf, btc_fift_low_ukf)
+            elif i in ("ETH/USD", ["ETH/USD"]):
+                UKFModel.ukf_handler(fift_data, eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf)
+            else:
+                print(f"Problem generating 15T preds for {i}")
+
+        if signal_generator.sig_gened:
+            print("Work on Price Tracker (15T)")
+        if order_changed:
+            order_changed = False
+
+    except Exception as e:
+        print(f"15-minute task error: {e}\n{traceback.format_exc()}")
+
+
+# ── five_minute_task ──────────────────────────────────────────────────────────
+
+def five_minute_task():
+    global order_changed, signal, my_signal
+
+    try:
+        for i in symbols_list:
+            five_data = None
+            while five_data is None:
+                try:
+                    downloaded_data = data_download("1T", i)
+                    if downloaded_data is not None:
+                        agg       = aggregate_ohlcv_data(downloaded_data.copy(), aggregation_minutes=5)
+                        five_data = agg.iloc[-1]
+                    else:
+                        print(f"5M data None for {i}. Retrying…")
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"Error downloading 5M data for {i}: {e}")
+                    time.sleep(2)
+
+            print(f"{i}: O:{five_data['open']}  H:{five_data['high']}  "
+                  f"L:{five_data['low']}  C:{five_data['close']}")
+
+            if i in ("BTC/USD", ["BTC/USD"]):
+                UKFModel.ukf_handler(five_data, btc_five_ukf, btc_five_high_ukf, btc_five_low_ukf)
+            elif i in ("ETH/USD", ["ETH/USD"]):
+                UKFModel.ukf_handler(five_data, eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf)
+            else:
+                print(f"Problem generating 5T preds for {i}")
+
+        if signal_generator.sig_gened:
+            print("Work on Price Tracker (5T)")
+        if order_changed:
+            order_changed = False
+
+    except Exception as e:
+        print(f"5-minute task error: {e}\n{traceback.format_exc()}")
+
+
+# ── one_minute_task ───────────────────────────────────────────────────────────
+
+def one_minute_task():
+    if has_function_run_this_minute():
+        print(f"1-minute task already ran this minute. Skipping.")
+        return
+
+    # FIX: Write timestamp immediately — if the scheduler fires a second time
+    # within the same minute (seen in logs at :17 and :18 of the same minute),
+    # the guard file is already written and the second call exits instantly.
+    # Previously at the very end of the function, so any mid-task exception
+    # left the guard unset and allowed the double-fire.
+    update_minute_run_timestamp()
+
+    global usdt_withdrawal, btc_withdrawal, eth_withdrawal
+    global btc_ordered_signal, double_order, ordered, eth_ordered_signal
+    global btc_tracker, eth_tracker
+    global btc_balance, eth_balance, wallet_balance
+    global bo_declared, eo_declared
+    global btc_position, eth_position
+
+    wallet_balance = None
+
+    try:
+        btc_position_status = check_open_position(symbol="BTCUSDT")
+        eth_position_status = check_open_position(symbol="ETHUSDT")
+
+        if btc_tracker["open_trade"] or eth_tracker["open_trade"]:
+            try:
+                usdt_eq, btc_eq, eth_eq = get_equities()
+                wallet_balance = float(usdt_eq)
+                btc_balance    = float(btc_eq)
+                eth_balance    = float(eth_eq)
+                if btc_tracker["open_trade"] and not btc_position:
+                    btc_position = True
+                if eth_tracker["open_trade"] and not eth_position:
+                    eth_position = True
+            except Exception as e:
+                print(f"Equity fetch error (1m): {e}")
+
+        elif btc_position_status["is_open_position"] or eth_position_status["is_open_position"]:
+            logger.info("Untracked open position detected on exchange.")
+            try:
+                usdt_eq, btc_eq, eth_eq = get_equities()
+                wallet_balance = float(usdt_eq)
+                btc_balance    = float(btc_eq)
+                eth_balance    = float(eth_eq)
+                if btc_position_status["is_open_position"] and not btc_position:
+                    btc_position = True
+                    btc_tracker["open_trade"] = True
+                if eth_position_status["is_open_position"] and not eth_position:
+                    eth_position = True
+                    eth_tracker["open_trade"] = True
+            except Exception as e:
+                print(f"Equity fetch error (untracked 1m): {e}")
+        else:
+            btc_position = eth_position = False
+
+        now = datetime.now()
+        print(f"[{now:%Y-%m-%d %H:%M:%S}] Running 1-minute task.")
+
+        for i in symbols_list:
+            data = None
+            while data is None:
+                try:
+                    downloaded_data = data_download("1T", i)
+                    if downloaded_data is not None:
+                        data     = downloaded_data
+                        one_data = data.iloc[-1]
+                    else:
+                        print(f"1M data None for {i}. Retrying…")
+                        time.sleep(2)
+                except Exception as e:
+                    print(f"Error downloading 1M data for {i}: {e}")
+                    time.sleep(2)
+
+            price = one_data["close"]
+            llow  = one_data["low"]
+            hhigh = one_data["high"]
+            print(f"{i}: O:{one_data['open']}  H:{hhigh}  L:{llow}  C:{price}")
+
+            # PositionGuard virtual TP/SL safeguard
+            if guard and guard.monitored_orders:
+                for order_id, order_info in list(guard.monitored_orders.items()):
+                    if (order_info["symbol"] == i or
+                            order_info["symbol"].replace("/", "") == i.replace("/", "")):
+                        sig = order_info.get("signal")
+                        if not sig:
+                            continue
+                        virtual_close = False
+                        reason        = ""
+                        if sig["order_side"] == "Buy":
+                            if hhigh >= sig["tp_price"]:
+                                virtual_close = True; reason = "Virtual TP (Buy)"
+                            elif llow <= sig["sl_price"]:
+                                virtual_close = True; reason = "Virtual SL (Buy)"
+                        elif sig["order_side"] == "Sell":
+                            if llow <= sig["tp_price"]:
+                                virtual_close = True; reason = "Virtual TP (Sell)"
+                            elif hhigh >= sig["sl_price"]:
+                                virtual_close = True; reason = "Virtual SL (Sell)"
+
+                        if virtual_close:
+                            logger.warning(f"🚨 {reason} HIT for {i}. Checking position…")
+                            pos_check = check_open_position(symbol=order_info["symbol"])
+                            if pos_check["is_open_position"]:
+                                logger.warning("Position OPEN – executing emergency close.")
+                                close_futures_position(pos_check)
+                                guard.add_alert_to_queue(
+                                    f"✅ {reason} executed via 1m safeguard for {i}"
+                                )
+                                del guard.monitored_orders[order_id]
+                                guard.save_to_json()
+
+            # BTC manual tracker
+            if i in ("BTC/USD", "BTCUSDT"):
+                try:
+                    bo_signal = btc_ordered_signal
+                    if bo_signal is not None:
+                        btc_position_status = check_open_position(symbol="BTCUSDT")
+                        if not btc_tracker["order_filled"] and btc_tracker["sig_gened"]:
+                            if bo_signal["order_type"] == "Market":
+                                btc_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} market order filled. Price:{price}")
+                            if bo_signal["current_price"] > bo_signal["entry_price"] \
+                                    and price <= bo_signal["entry_price"]:
+                                btc_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} BUY limit filled. Price:{price}")
+                            elif bo_signal["current_price"] < bo_signal["entry_price"] \
+                                    and price >= bo_signal["entry_price"]:
+                                btc_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} SELL limit filled. Price:{price}")
+
+                        if btc_tracker["open_trade"] \
+                                and not btc_tracker["tp_hit"] \
+                                and not btc_tracker["sl_hit"]:
+                            pnl = float(bo_signal["current_bal"]) - (wallet_balance or 0)
+                            if bo_signal["order_side"] == "Buy":
+                                if hhigh >= bo_signal["tp_price"]:
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False})
+                                    logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
+                                elif llow <= bo_signal["sl_price"]:
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False})
+                                    logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
+                            elif bo_signal["order_side"] == "Sell":
+                                if llow <= bo_signal["tp_price"]:
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False})
+                                    logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
+                                elif hhigh >= bo_signal["sl_price"]:
+                                    btc_tracker.update({"sl_hit": True, "open_trade": True})
+                                    logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
+                            else:
+                                print("BTC order tracking: unknown order_side.")
+
+                    elif bo_signal is None and btc_tracker["sig_gened"] and not bo_declared:
+                        logger.info("BTC sig_gened=True but no ordered_signal – order likely failed.")
+                        bo_declared = True
+
+                except Exception as e:
+                    print(f"BTC 1m tracker error: {e}")
+
+            # ETH manual tracker
+            if i in ("ETH/USD", "ETHUSDT"):
+                try:
+                    eo_signal = eth_ordered_signal
+                    if eo_signal is not None:
+                        eth_position_status = check_open_position(symbol="ETHUSDT")
+                        if not eth_tracker["order_filled"] and eth_tracker["sig_gened"]:
+                            if eo_signal["order_type"] == "Market":
+                                eth_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} market order filled. Price:{price}")
+                            if eo_signal["current_price"] > eo_signal["entry_price"] \
+                                    and price <= eo_signal["entry_price"]:
+                                eth_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} BUY limit filled. Price:{price}")
+                            elif eo_signal["current_price"] < eo_signal["entry_price"] \
+                                    and price >= eo_signal["entry_price"]:
+                                eth_tracker.update({"order_filled": True, "open_trade": True})
+                                logger.info(f"{i} SELL limit filled. Price:{price}")
+
+                        if eth_tracker["open_trade"] \
+                                and not eth_tracker["tp_hit"] \
+                                and not eth_tracker["sl_hit"]:
+                            pnl = float(eo_signal["current_bal"]) - (wallet_balance or 0)
+                            if eo_signal["order_side"] == "Buy":
+                                if hhigh >= eo_signal["tp_price"]:
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False})
+                                    logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
+                                elif llow <= eo_signal["sl_price"]:
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False})
+                                    logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
+                            elif eo_signal["order_side"] == "Sell":
+                                if llow <= eo_signal["tp_price"]:
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False})
+                                    logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
+                                elif hhigh >= eo_signal["sl_price"]:
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False})
+                                    logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
+                            else:
+                                print("ETH order tracking: unknown order_side.")
+
+                    elif eo_signal is None and eth_tracker["sig_gened"] and not eo_declared:
+                        logger.info("ETH sig_gened=True but no ordered_signal – order likely failed.")
+                        eo_declared = True
+
+                except Exception as e:
+                    print(f"ETH 1m tracker error: {e}")
+
+        print("1m task executed!")
+
+    except Exception as e:
+        print(f"1-minute task fatal error: {e}\n{traceback.format_exc()}")
+</file>
+
+</files>

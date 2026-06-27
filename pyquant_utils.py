@@ -85,7 +85,29 @@ end_date      = dt.date.today()
 
 crypto_stream = CryptoDataStream(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
 crypto_client = CryptoHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
-binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
+
+# Enhanced Binance Client Initialization with Retry & Timeout logic
+def init_binance_client():
+    retries = 5
+    for attempt in range(retries):
+        try:
+            # 30-second timeout helps bypass slow SSL handshakes.
+            # Python-binance automatically pings the server on initialization.
+            return Client(
+                BINANCE_API_KEY, 
+                BINANCE_SECRET_KEY, 
+                testnet=False, 
+                requests_params={'timeout': 30}
+            )
+        except Exception as e:
+            print(f"[Warning] Failed to connect to Binance (Attempt {attempt + 1}/{retries}). Retrying in 5s... Error: {e}")
+            time.sleep(5)
+            
+    print("[Error] Could not connect to Binance API.")
+    print("[Action Required] If you are operating in Nigeria or a restricted region, please ensure your system-wide VPN is ACTIVE.")
+    raise ConnectionError("Binance API connection failed after multiple retries due to network timeouts/blocks.")
+
+binance_client = init_binance_client()
 
 session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
 
