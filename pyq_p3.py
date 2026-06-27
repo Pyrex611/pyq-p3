@@ -66,24 +66,44 @@ from pyquant_utils import (
     UKFModel, get_equities, SignalGenerator, PositionGuard,
     data_download, aggregate_ohlcv_data,
     check_open_position, close_futures_position,
+    # Shared clients — created once in pyquant_utils with retry logic.
+    # Importing them here means pyq_p3 and pyquant_utils use the exact
+    # same objects, so _binance_lock covers every Binance call in the process.
+    binance_client, crypto_client, session, _binance_lock,
 )
 
 nest_asyncio.apply()
 
-# ── Environment / credentials ─────────────────────────────────────────────────
-load_dotenv()
+# ── Environment ───────────────────────────────────────────────────────────────
+# pyquant_utils already loaded the .env on import.  We call load_dotenv again
+# here with the same explicit path so pyq_p3.py can also be run / tested
+# standalone without going through pyquant_orchestra.py.
+from pathlib import Path as _Path
+_ENV_PATH = _Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
-ALPACA_API_KEY     = os.environ["ALPACA_API_KEY"]
-ALPACA_SECRET_KEY  = os.environ["ALPACA_SECRET_KEY"]
-BYBIT_API_KEY      = os.environ["BYBIT_API_KEY"]
-BYBIT_SECRET_KEY   = os.environ["BYBIT_SECRET_KEY"]
-BINANCE_API_KEY    = os.environ["BINANCE_API_KEY"]
-BINANCE_SECRET_KEY = os.environ["BINANCE_SECRET_KEY"]
-TELEGRAM_TOKEN     = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+
+def _require_env(key: str) -> str:
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise EnvironmentError(
+            f"Required variable '{key}' not set. "
+            f"Check your .env file at: {_ENV_PATH}"
+        )
+    return value
+
+
+ALPACA_API_KEY     = _require_env("ALPACA_API_KEY")
+ALPACA_SECRET_KEY  = _require_env("ALPACA_SECRET_KEY")
+BYBIT_API_KEY      = _require_env("BYBIT_API_KEY")
+BYBIT_SECRET_KEY   = _require_env("BYBIT_SECRET_KEY")
+BINANCE_API_KEY    = _require_env("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = _require_env("BINANCE_SECRET_KEY")
+TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading constant ──────────────────────────────────────────────────────────
-LEVERAGE = 50   # Futures leverage applied to every order
+LEVERAGE = 50
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
