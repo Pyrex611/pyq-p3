@@ -283,15 +283,53 @@ class UKFModel:
         return ukf, high_ukf, low_ukf
 
     @staticmethod
+    def _stabilise_P(ukf, min_var: float = 1e-6) -> None:
+        """
+        Keeps the covariance matrix P symmetric and positive-definite.
+
+        After many predict/update cycles, floating-point drift can make P
+        slightly non-symmetric or give it near-zero / negative eigenvalues.
+        Either of those causes scipy's Cholesky to raise:
+            LinAlgError: Internal potrf return info = [1]
+        Two cheap operations prevent this permanently:
+          1. Symmetrise  →  P = (P + Pᵀ) / 2
+          2. Diagonal floor  →  P[i,i] = max(P[i,i], min_var)
+        """
+        P = ukf.P
+        P = (P + P.T) / 2                          # remove asymmetry from float drift
+        for i in range(P.shape[0]):
+            if P[i, i] < min_var:
+                P[i, i] = min_var                  # guarantee positive diagonal
+        ukf.P = P
+
+    @staticmethod
     def ukf_handler(data, ukf, high_ukf, low_ukf):
-        """Updates all three UKFs with the latest bar and returns next-step predictions."""
+        """
+        Updates all three UKFs with the latest bar and returns next-step predictions.
+        Calls _stabilise_P after every step so Cholesky never sees a
+        non-positive-definite matrix.
+        """
         high  = data["high"]
         low   = data["low"]
         price = data["close"]
 
-        ukf.update(price);      ukf.predict();      pred      = ukf.x[0]
-        high_ukf.update(high);  high_ukf.predict(); high_pred = high_ukf.x[0]
-        low_ukf.update(low);    low_ukf.predict();  low_pred  = low_ukf.x[0]
+        ukf.update(price)
+        UKFModel._stabilise_P(ukf)
+        ukf.predict()
+        UKFModel._stabilise_P(ukf)
+        pred = ukf.x[0]
+
+        high_ukf.update(high)
+        UKFModel._stabilise_P(high_ukf)
+        high_ukf.predict()
+        UKFModel._stabilise_P(high_ukf)
+        high_pred = high_ukf.x[0]
+
+        low_ukf.update(low)
+        UKFModel._stabilise_P(low_ukf)
+        low_ukf.predict()
+        UKFModel._stabilise_P(low_ukf)
+        low_pred = low_ukf.x[0]
 
         return pred, high_pred, low_pred
 
@@ -914,41 +952,96 @@ class PositionGuard:
             self.add_alert_to_queue(f"🚨 CRITICAL: TP/SL management failed for {symbol}: {e}")
 
     def _place_bracket_order(self, symbol: str, position_info: dict, signal: dict) -> dict:
-        """Places STOP_MARKET and TAKE_PROFIT_MARKET orders using signal TP/SL values."""
+        """
+        Places one STOP_MARKET (SL) and one TAKE_PROFIT_MARKET (TP) order.
+
+        Binance Futures rules for these order types:
+          • timeInForce must NOT be sent — Binance rejects the order with
+            error -1106 ("Parameter 'timeInForce' sent when not required").
+          • quantity must NOT be sent when closePosition=True.
+          • workingType should be MARK_PRICE so the trigger is based on the
+            fair-value mark price rather than the last traded price, preventing
+            wick-induced early stops on low-liquidity moves.
+          • priceProtect=True makes Binance reject the order if the stopPrice
+            deviates unreasonably from the current mark price — a free sanity check.
+          • Side must be the OPPOSITE of the position:
+              Long (positionAmt > 0) → close side = SELL
+              Short (positionAmt < 0) → close side = BUY
+          • Price direction must also be validated before sending:
+              Long: SL < entry, TP > entry
+              Short: SL > entry, TP < entry
+            Sending a TP below the entry for a long will be rejected (-2021).
+        """
         sl_order = tp_order = None
         try:
-            position_amt = float(position_info["positionAmt"])
-            side         = "SELL" if position_amt > 0 else "BUY"
+            position_amt = float(position_info.get("positionAmt",
+                                 position_info.get("size", 0)))
+            is_long      = position_amt > 0
+            close_side   = "SELL" if is_long else "BUY"
 
-            tp_price = float(signal["tp_price"])
             sl_price = float(signal["sl_price"])
+            tp_price = float(signal["tp_price"])
 
-            # Get tick size
+            # ── Tick-size precision ───────────────────────────────────────────
             info        = self.binance.futures_exchange_info()
             symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
-            pf          = next(f for f in symbol_info["filters"] if f["filterType"] == "PRICE_FILTER")
+            pf          = next(f for f in symbol_info["filters"]
+                               if f["filterType"] == "PRICE_FILTER")
             tick_size   = float(pf["tickSize"])
             ts_str      = str(tick_size)
             price_prec  = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
 
-            sl_price = round(sl_price / tick_size) * tick_size
-            tp_price = round(tp_price / tick_size) * tick_size
-            sl_str   = f"{sl_price:.{price_prec}f}"
-            tp_str   = f"{tp_price:.{price_prec}f}"
+            sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
+            tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
 
-            # FIX: use self.binance, use stopPrice (not triggerPrice), use correct prices
+            # ── Direction validation ──────────────────────────────────────────
+            # Binance error -2021 if SL/TP are on the wrong side of the market.
+            entry = float(position_info.get("entry_price",
+                          position_info.get("entryPrice", 0)))
+            if entry > 0:
+                if is_long:
+                    if sl_price >= entry:
+                        logger.warning(f"SL {sl_price} >= entry {entry} for LONG — clamping.")
+                        sl_price = round(round(entry * 0.995 / tick_size) * tick_size, price_prec)
+                    if tp_price <= entry:
+                        logger.warning(f"TP {tp_price} <= entry {entry} for LONG — clamping.")
+                        tp_price = round(round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                else:
+                    if sl_price <= entry:
+                        logger.warning(f"SL {sl_price} <= entry {entry} for SHORT — clamping.")
+                        sl_price = round(round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                    if tp_price >= entry:
+                        logger.warning(f"TP {tp_price} >= entry {entry} for SHORT — clamping.")
+                        tp_price = round(round(entry * 0.995 / tick_size) * tick_size, price_prec)
+
+            sl_str = f"{sl_price:.{price_prec}f}"
+            tp_str = f"{tp_price:.{price_prec}f}"
+            logger.info(f"Placing bracket for {symbol} ({'LONG' if is_long else 'SHORT'}): "
+                        f"entry={entry}  SL={sl_str}  TP={tp_str}")
+
+            # ── Stop-loss ─────────────────────────────────────────────────────
             sl_order = self.binance.futures_create_order(
-                symbol=symbol, side=side, type="STOP_MARKET",
-                stopPrice=sl_str, closePosition=True, timeInForce="GTC"
+                symbol       = symbol,
+                side         = close_side,
+                type         = "STOP_MARKET",
+                stopPrice    = sl_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",   # trigger on mark, not last price
+                priceProtect = True,            # reject if trigger is far from mark
             )
-            logger.info(f"SL order placed for {symbol}: {sl_order.get('orderId')}")
+            logger.info(f"SL placed: {symbol}  orderId={sl_order.get('orderId')}  stopPrice={sl_str}")
 
-            # FIX: was incorrectly using sl_price_str for TP trigger
+            # ── Take-profit ───────────────────────────────────────────────────
             tp_order = self.binance.futures_create_order(
-                symbol=symbol, side=side, type="TAKE_PROFIT_MARKET",
-                stopPrice=tp_str, closePosition=True, timeInForce="GTC"
+                symbol       = symbol,
+                side         = close_side,
+                type         = "TAKE_PROFIT_MARKET",
+                stopPrice    = tp_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
             )
-            logger.info(f"TP order placed for {symbol}: {tp_order.get('orderId')}")
+            logger.info(f"TP placed: {symbol}  orderId={tp_order.get('orderId')}  stopPrice={tp_str}")
 
         except Exception as e:
             logger.error(f"_place_bracket_order ({symbol}): {e}")
@@ -956,38 +1049,61 @@ class PositionGuard:
         return {"sl_order": sl_order, "tp_order": tp_order, "combined": True}
 
     def _place_bracket_order_fallback(self, symbol: str, position_info: dict, signal=None) -> tuple:
-        """Fallback bracket: calculates default TP/SL if no signal is available."""
+        """
+        Fallback bracket when no signal dict is available.
+        Uses conservative 0.5% TP / 0.5% SL defaults.
+        Same Binance API rules: no timeInForce, MARK_PRICE trigger.
+        """
         try:
-            position_amt = float(position_info.get("positionAmt", 0))
-            side         = "SELL" if position_amt > 0 else "BUY"
-            entry_price  = float(position_info.get("entry_price") or position_info.get("entryPrice", 0))
+            position_amt = float(position_info.get("positionAmt",
+                                 position_info.get("size", 0)))
+            is_long      = position_amt > 0
+            close_side   = "SELL" if is_long else "BUY"
+            entry_price  = float(position_info.get("entry_price")
+                                 or position_info.get("entryPrice", 0))
 
             if signal:
                 tp_price = float(signal["tp_price"])
                 sl_price = float(signal["sl_price"])
-            elif side == "SELL":
-                tp_price = entry_price * 1.02
-                sl_price = entry_price * 0.98
+            elif is_long:
+                tp_price = entry_price * 1.005
+                sl_price = entry_price * 0.995
             else:
-                tp_price = entry_price * 0.98
-                sl_price = entry_price * 1.02
+                tp_price = entry_price * 0.995
+                sl_price = entry_price * 1.005
 
             info        = self.binance.futures_exchange_info()
             symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
-            pf          = next(f for f in symbol_info["filters"] if f["filterType"] == "PRICE_FILTER")
+            pf          = next(f for f in symbol_info["filters"]
+                               if f["filterType"] == "PRICE_FILTER")
             tick_size   = float(pf["tickSize"])
-            tp_price    = round(tp_price / tick_size) * tick_size
-            sl_price    = round(sl_price / tick_size) * tick_size
+            ts_str      = str(tick_size)
+            price_prec  = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
 
-            # FIX: use futures_create_order with standard params (no algoType)
+            sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
+            tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
+            sl_str   = f"{sl_price:.{price_prec}f}"
+            tp_str   = f"{tp_price:.{price_prec}f}"
+
             fallback_sl = self.binance.futures_create_order(
-                symbol=symbol, side=side, type="STOP_MARKET",
-                stopPrice=sl_price, closePosition=True, timeInForce="GTC"
+                symbol       = symbol,
+                side         = close_side,
+                type         = "STOP_MARKET",
+                stopPrice    = sl_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
             )
             fallback_tp = self.binance.futures_create_order(
-                symbol=symbol, side=side, type="TAKE_PROFIT_MARKET",
-                stopPrice=tp_price, closePosition=True, timeInForce="GTC"
+                symbol       = symbol,
+                side         = close_side,
+                type         = "TAKE_PROFIT_MARKET",
+                stopPrice    = tp_str,
+                closePosition= True,
+                workingType  = "MARK_PRICE",
+                priceProtect = True,
             )
+            logger.info(f"Fallback bracket placed for {symbol}: SL={sl_str}  TP={tp_str}")
             return fallback_tp, fallback_sl
 
         except Exception as e:
@@ -1014,6 +1130,19 @@ class PositionGuard:
     # ── Telegram bot runner ───────────────────────────────────────────────────
 
     async def run_telegram_bot(self):
+        """
+        Runs the Telegram bot in the current event loop.
+
+        The crash:
+            RuntimeError: This Application is not running!
+        happened because the `finally` block called `app.stop()` even when
+        `app.start()` had never succeeded.  python-telegram-bot v20+ tracks
+        its own running state and raises if you call stop() on an app that
+        was never started.
+
+        Fix: only call stop() when `self.telegram_app.running` is True.
+        """
+        _app_started = False
         try:
             self.telegram_app = Application.builder().token(self.telegram_token).build()
             self.telegram_app.add_handler(CommandHandler("status", self.status_command))
@@ -1021,13 +1150,21 @@ class PositionGuard:
             self.telegram_app.add_handler(CommandHandler("stop",   self.stop_command))
             await self.telegram_app.initialize()
             await self.telegram_app.start()
+            _app_started = True                        # only True once start() succeeds
             await self.telegram_app.updater.start_polling()
             await self.process_alert_queue()
         except Exception as e:
             logger.error(f"Telegram bot error: {e}")
         finally:
-            if self.telegram_app:
-                await self.telegram_app.stop()
+            # Guard: only stop if the app was actually started
+            if _app_started and self.telegram_app is not None:
+                try:
+                    if self.telegram_app.updater and self.telegram_app.updater.running:
+                        await self.telegram_app.updater.stop()
+                    await self.telegram_app.stop()
+                    await self.telegram_app.shutdown()
+                except Exception as stop_err:
+                    logger.error(f"Telegram bot shutdown error: {stop_err}")
 
     # ── Scheduler runner ──────────────────────────────────────────────────────
 
