@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
 from queue import Queue
-from typing import Dict, Any, Set
+from typing import Dict, Any, Set, Optional
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
@@ -91,8 +91,6 @@ def init_binance_client():
     retries = 5
     for attempt in range(retries):
         try:
-            # 30-second timeout helps bypass slow SSL handshakes.
-            # Python-binance automatically pings the server on initialization.
             return Client(
                 BINANCE_API_KEY, 
                 BINANCE_SECRET_KEY, 
@@ -104,10 +102,13 @@ def init_binance_client():
             time.sleep(5)
             
     print("[Error] Could not connect to Binance API.")
-    print("[Action Required] If you are operating in Nigeria or a restricted region, please ensure your system-wide VPN is ACTIVE.")
+    print("[Action Required] If you are operating in a restricted region, please ensure your system-wide VPN is ACTIVE.")
     raise ConnectionError("Binance API connection failed after multiple retries due to network timeouts/blocks.")
 
 binance_client = init_binance_client()
+
+# PHASE 2 FIX: Ensure thread lock exists for pyq_p3.py import
+_binance_lock = threading.Lock()
 
 session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
 
@@ -132,11 +133,12 @@ if not logger.handlers:
 
 class OHLCVAggregator:
     @staticmethod
-    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
         return aggregate_ohlcv_data(df, aggregation_minutes)
 
 
-def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+# PHASE 2 FIX: Replaced "pd.DataFrame | None" with "Optional[pd.DataFrame]" for older Python versions
+def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
     """Re-samples OHLCV data to the specified number of minutes."""
     df_agg = df.copy()
     rules = {k: v for k, v in {
@@ -306,31 +308,15 @@ class UKFModel:
 
     @staticmethod
     def _stabilise_P(ukf, min_var: float = 1e-6) -> None:
-        """
-        Keeps the covariance matrix P symmetric and positive-definite.
-
-        After many predict/update cycles, floating-point drift can make P
-        slightly non-symmetric or give it near-zero / negative eigenvalues.
-        Either of those causes scipy's Cholesky to raise:
-            LinAlgError: Internal potrf return info = [1]
-        Two cheap operations prevent this permanently:
-          1. Symmetrise  →  P = (P + Pᵀ) / 2
-          2. Diagonal floor  →  P[i,i] = max(P[i,i], min_var)
-        """
         P = ukf.P
-        P = (P + P.T) / 2                          # remove asymmetry from float drift
+        P = (P + P.T) / 2                          
         for i in range(P.shape[0]):
             if P[i, i] < min_var:
-                P[i, i] = min_var                  # guarantee positive diagonal
+                P[i, i] = min_var                  
         ukf.P = P
 
     @staticmethod
     def ukf_handler(data, ukf, high_ukf, low_ukf):
-        """
-        Updates all three UKFs with the latest bar and returns next-step predictions.
-        Calls _stabilise_P after every step so Cholesky never sees a
-        non-positive-definite matrix.
-        """
         high  = data["high"]
         low   = data["low"]
         price = data["close"]
@@ -380,9 +366,14 @@ def get_equities() -> tuple:
 
 def check_open_position(symbol: str) -> dict:
     """Returns a dict describing any open Binance Futures position for `symbol`."""
+    # PHASE 2 FIX: Symbol scrubber safely turns "BTC/USD" -> "BTCUSDT"
+    trade_symbol = symbol.replace("/", "")
+    if trade_symbol.endswith("USD"):
+        trade_symbol += "T"
+
     position_info = {
-        "is_open_position": False, "symbol": symbol,
-        "side": None, "size": 0.0, "entry_price": None,
+        "is_open_position": False, "symbol": trade_symbol,
+        "side": None, "size": 0.0, "qty_str": "", "entry_price": None,
         "unrealized_pnl": 0.0, "liquidation_price": None,
         "take_profit_price": None, "stop_loss_price": None,
     }
@@ -392,13 +383,18 @@ def check_open_position(symbol: str) -> dict:
         wallet_balance = usdt_eq
 
         position = next(
-            (p for p in positions if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
+            (p for p in positions if p["symbol"] == trade_symbol and float(p["positionAmt"]) != 0),
             None
         )
         if position:
             position_info["is_open_position"] = True
             position_info["side"]             = "BUY" if float(position["positionAmt"]) > 0 else "SELL"
             position_info["size"]             = abs(float(position["positionAmt"]))
+            
+            # PHASE 2 FIX: Extract string quantity natively to avoid float rounding limits
+            amt_str = position["positionAmt"]
+            position_info["qty_str"]          = amt_str[1:] if amt_str.startswith("-") else amt_str
+            
             position_info["entry_price"]      = float(position["entryPrice"])
             position_info["unrealized_pnl"]   = float(position["unRealizedProfit"])
             position_info["liquidation_price"] = float(position["liquidationPrice"])
@@ -408,7 +404,7 @@ def check_open_position(symbol: str) -> dict:
             if upnl >= wallet_balance * limit or upnl >= 0.6:
                 close_futures_position(position_info)
                 logger.info(
-                    f"check_open_position: auto-closed {symbol} due to profit "
+                    f"check_open_position: auto-closed {trade_symbol} due to profit "
                     f"(uPNL={upnl:.4f})"
                 )
     except Exception as e:
@@ -417,15 +413,20 @@ def check_open_position(symbol: str) -> dict:
 
 
 def close_futures_position(position_data: dict) -> dict:
-    """Closes an open Binance Futures position with a market reduceOnly order."""
+    """Closes an open Binance Futures position with a market order safely bypassing precise quantity float issues."""
     try:
         symbol     = position_data["symbol"]
         side       = position_data["side"]
-        size       = position_data["size"]
+        
+        # PHASE 2 FIX: Use explicit API string quantity to bypass -1111 Precision Over Maximum
+        qty_str = position_data.get("qty_str")
+        if not qty_str:
+            qty_str = str(position_data["size"])
+            
         close_side = "SELL" if side == "BUY" else "BUY"
         response   = binance_client.futures_create_order(
             symbol=symbol, side=close_side,
-            type="MARKET", quantity=size, reduceOnly=True
+            type="MARKET", quantity=qty_str, reduceOnly=True
         )
         logger.info(f"close_futures_position: closed {symbol} via {close_side} market order.")
         return response
@@ -693,7 +694,6 @@ class PositionGuard:
         self.monitored_positions: Set[str] = set()
         self.alert_queue       = Queue()
 
-        # FIX: `running` must be initialised here so async methods can reference it
         self.running           = False
         self.scheduler_thread  = None
         self.telegram_thread   = None
@@ -710,7 +710,6 @@ class PositionGuard:
         return {}
 
     def save_to_json(self):
-        """FIX: Saves monitored_orders to disk so the 1-minute task can read it."""
         try:
             with open(self.trade_state_file, "w") as f:
                 json.dump(self.monitored_orders, f, indent=4, default=str)
@@ -855,7 +854,6 @@ class PositionGuard:
     def _check_and_place_bracket(self, symbol: str, order_id=None):
         """Verifies a filled order has TP/SL; places them if not."""
         tp_sl_placed = False
-        # FIX: initialise position_info in scope so the fallback block can reference it
         position_info = {
             "is_open_position": False, "symbol": symbol,
             "side": None, "size": 0.0, "entry_price": None,
@@ -875,6 +873,7 @@ class PositionGuard:
                     "is_open_position": True,
                     "side":             "BUY" if float(raw_pos["positionAmt"]) > 0 else "SELL",
                     "size":             abs(float(raw_pos["positionAmt"])),
+                    "qty_str":          raw_pos["positionAmt"][1:] if raw_pos["positionAmt"].startswith("-") else raw_pos["positionAmt"],
                     "entry_price":      float(raw_pos["entryPrice"]),
                     "unrealized_pnl":   float(raw_pos["unRealizedProfit"]),
                     "liquidation_price": float(raw_pos["liquidationPrice"]),
@@ -938,7 +937,6 @@ class PositionGuard:
             # Manual TP/SL tracking safety net
             if not tp_sl_placed:
                 try:
-                    # FIX: use assignment, not comparison
                     if symbol == "ETHUSDT":
                         symbolis = "ETH/USD"
                     elif symbol == "BTCUSDT":
@@ -974,26 +972,6 @@ class PositionGuard:
             self.add_alert_to_queue(f"🚨 CRITICAL: TP/SL management failed for {symbol}: {e}")
 
     def _place_bracket_order(self, symbol: str, position_info: dict, signal: dict) -> dict:
-        """
-        Places one STOP_MARKET (SL) and one TAKE_PROFIT_MARKET (TP) order.
-
-        Binance Futures rules for these order types:
-          • timeInForce must NOT be sent — Binance rejects the order with
-            error -1106 ("Parameter 'timeInForce' sent when not required").
-          • quantity must NOT be sent when closePosition=True.
-          • workingType should be MARK_PRICE so the trigger is based on the
-            fair-value mark price rather than the last traded price, preventing
-            wick-induced early stops on low-liquidity moves.
-          • priceProtect=True makes Binance reject the order if the stopPrice
-            deviates unreasonably from the current mark price — a free sanity check.
-          • Side must be the OPPOSITE of the position:
-              Long (positionAmt > 0) → close side = SELL
-              Short (positionAmt < 0) → close side = BUY
-          • Price direction must also be validated before sending:
-              Long: SL < entry, TP > entry
-              Short: SL > entry, TP < entry
-            Sending a TP below the entry for a long will be rejected (-2021).
-        """
         sl_order = tp_order = None
         try:
             position_amt = float(position_info.get("positionAmt",
@@ -1017,7 +995,6 @@ class PositionGuard:
             tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
 
             # ── Direction validation ──────────────────────────────────────────
-            # Binance error -2021 if SL/TP are on the wrong side of the market.
             entry = float(position_info.get("entry_price",
                           position_info.get("entryPrice", 0)))
             if entry > 0:
@@ -1048,8 +1025,8 @@ class PositionGuard:
                 type         = "STOP_MARKET",
                 stopPrice    = sl_str,
                 closePosition= True,
-                workingType  = "MARK_PRICE",   # trigger on mark, not last price
-                priceProtect = True,            # reject if trigger is far from mark
+                workingType  = "MARK_PRICE",   
+                priceProtect = True,            
             )
             logger.info(f"SL placed: {symbol}  orderId={sl_order.get('orderId')}  stopPrice={sl_str}")
 
@@ -1071,11 +1048,6 @@ class PositionGuard:
         return {"sl_order": sl_order, "tp_order": tp_order, "combined": True}
 
     def _place_bracket_order_fallback(self, symbol: str, position_info: dict, signal=None) -> tuple:
-        """
-        Fallback bracket when no signal dict is available.
-        Uses conservative 0.5% TP / 0.5% SL defaults.
-        Same Binance API rules: no timeInForce, MARK_PRICE trigger.
-        """
         try:
             position_amt = float(position_info.get("positionAmt",
                                  position_info.get("size", 0)))
@@ -1135,9 +1107,7 @@ class PositionGuard:
     # ── Order registration ────────────────────────────────────────────────────
 
     def start_guard_for_order(self, signal: Dict[str, Any], order_id: int):
-        """Registers a new order for monitoring and persists to JSON."""
         symbol = signal["symbol"]
-        # FIX: store as string key so JSON round-trips cleanly
         self.monitored_orders[str(order_id)] = {
             "symbol":     symbol,
             "signal":     signal,
@@ -1152,18 +1122,6 @@ class PositionGuard:
     # ── Telegram bot runner ───────────────────────────────────────────────────
 
     async def run_telegram_bot(self):
-        """
-        Runs the Telegram bot in the current event loop.
-
-        The crash:
-            RuntimeError: This Application is not running!
-        happened because the `finally` block called `app.stop()` even when
-        `app.start()` had never succeeded.  python-telegram-bot v20+ tracks
-        its own running state and raises if you call stop() on an app that
-        was never started.
-
-        Fix: only call stop() when `self.telegram_app.running` is True.
-        """
         _app_started = False
         try:
             self.telegram_app = Application.builder().token(self.telegram_token).build()
@@ -1172,13 +1130,12 @@ class PositionGuard:
             self.telegram_app.add_handler(CommandHandler("stop",   self.stop_command))
             await self.telegram_app.initialize()
             await self.telegram_app.start()
-            _app_started = True                        # only True once start() succeeds
+            _app_started = True                        
             await self.telegram_app.updater.start_polling()
             await self.process_alert_queue()
         except Exception as e:
             logger.error(f"Telegram bot error: {e}")
         finally:
-            # Guard: only stop if the app was actually started
             if _app_started and self.telegram_app is not None:
                 try:
                     if self.telegram_app.updater and self.telegram_app.updater.running:
@@ -1194,9 +1151,9 @@ class PositionGuard:
         schedule.every(30).seconds.do(self.check_all_orders_and_positions)
         self.add_alert_to_queue("🔔 PositionGuard scheduler ONLINE.")
         logger.info("PositionGuard scheduler started.")
-        while self.running:                # FIX: respect self.running
+        while self.running:                
             schedule.run_pending()
-            time.sleep(1)                  # FIX: single sleep (was doubled)
+            time.sleep(1)                  
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1228,8 +1185,6 @@ class PositionGuard:
 # ── StateManager ──────────────────────────────────────────────────────────────
 
 class StateManager:
-    """Manages bot_state.json / bot_commands.json for external dashboard integration."""
-
     def __init__(self, state_file="bot_state.json", command_file="bot_commands.json"):
         self.state_file   = state_file
         self.command_file = command_file
@@ -1250,7 +1205,8 @@ class StateManager:
         except Exception as e:
             logger.error(f"StateManager.update_state: {e}")
 
-    def get_command(self) -> str | None:
+    # PHASE 2 FIX: Replaced "str | None" with "Optional[str]" for older Python versions
+    def get_command(self) -> Optional[str]:
         try:
             if not os.path.exists(self.command_file):
                 return None
