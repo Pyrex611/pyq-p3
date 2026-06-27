@@ -560,6 +560,12 @@ def hourly_task():
         print(f"Hourly task already ran this hour. Skipping.")
         return
 
+    # FIX: Write the timestamp immediately so a second scheduler tick within
+    # the same hour (possible if the task takes < 1 s) is blocked by the guard
+    # even before the body completes.  Previously written at the end of the
+    # function, so a crash or slow run left the guard unset.
+    update_last_run_timestamp()
+
     global ordered, sig_gened, order_changed, signal, my_signal, signals
     global eth_tracker, btc_tracker, position_closed
     global btc_withdrawal, eth_withdrawal, wallet_balance, usdt_withdrawal
@@ -816,8 +822,6 @@ def hourly_task():
     except Exception as e:
         logger.error(f"Signal execution error: {e}\n{traceback.format_exc()}")
 
-    update_last_run_timestamp()
-
 
 # ── fifteen_minute_task ───────────────────────────────────────────────────────
 
@@ -910,6 +914,13 @@ def one_minute_task():
     if has_function_run_this_minute():
         print(f"1-minute task already ran this minute. Skipping.")
         return
+
+    # FIX: Write timestamp immediately — if the scheduler fires a second time
+    # within the same minute (seen in logs at :17 and :18 of the same minute),
+    # the guard file is already written and the second call exits instantly.
+    # Previously at the very end of the function, so any mid-task exception
+    # left the guard unset and allowed the double-fire.
+    update_minute_run_timestamp()
 
     global usdt_withdrawal, btc_withdrawal, eth_withdrawal
     global btc_ordered_signal, double_order, ordered, eth_ordered_signal
@@ -1109,5 +1120,3 @@ def one_minute_task():
 
     except Exception as e:
         print(f"1-minute task fatal error: {e}\n{traceback.format_exc()}")
-
-    update_minute_run_timestamp()
