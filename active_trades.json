@@ -1,0 +1,22 @@
+{
+    "8389766221148176322": {
+        "symbol": "ETHUSDT",
+        "signal": {
+            "symbol": "ETHUSDT",
+            "order_type": "Limit",
+            "entry_price": 1575.79,
+            "order_side": "Sell",
+            "tp_price": 1567.54,
+            "sl_price": 1591.79,
+            "trigger_price": 1577.16,
+            "orderLinkId": null,
+            "current_price": 1570.2385,
+            "checked": false,
+            "current_bal": 7.1833,
+            "qty": "0.072",
+            "orderId": 8389766221148176322
+        },
+        "status": "NEW",
+        "added_time": "2026-06-29T15:00:05.846939"
+    }
+}
