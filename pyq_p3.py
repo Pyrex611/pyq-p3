@@ -656,10 +656,10 @@ def hourly_task():
             )
             in_trade = btc_tracker["in_trade"] = True
             upnl = btc_pos["unrealized_pnl"]
-            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.125 or upnl <= -0.2):
+            if upnl < 0 and (abs(upnl) >= wallet_balance): # * 0.125 or upnl <= -0.2):
                 close_futures_position(btc_pos)
                 btc_tracker["in_trade"] = False
-            if upnl >= wallet_balance * 0.2 or upnl >= 0.6:
+            if upnl >= wallet_balance * 0.2: # or upnl >= 0.6:
                 close_futures_position(btc_pos)
                 btc_tracker["in_trade"] = False
         else:
@@ -673,10 +673,10 @@ def hourly_task():
             )
             in_trade = eth_tracker["in_trade"] = True
             upnl = eth_pos["unrealized_pnl"]
-            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.1 or upnl <= -0.2):
+            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.1): # or upnl <= -0.2):
                 close_futures_position(eth_pos)
                 eth_tracker["in_trade"] = False
-            if upnl >= wallet_balance * 0.15 or upnl >= 0.6:
+            if upnl >= wallet_balance * 0.15: # or upnl >= 0.6:
                 close_futures_position(eth_pos)
                 eth_tracker["in_trade"] = False
         else:
