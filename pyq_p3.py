@@ -103,7 +103,7 @@ TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading constant ──────────────────────────────────────────────────────────
-LEVERAGE = 50
+LEVERAGE = 20
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
