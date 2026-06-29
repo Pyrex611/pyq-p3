@@ -177,3 +177,28 @@ Starting PyQuant----------------------------------------------------------------
 2026-06-26 15:28:15,007 - ERROR - SignalExecutor: qty calculation failed for BTCUSDT: HTTPSConnectionPool(host='fapi.binance.com', port=443): Max retries exceeded with url: /fapi/v1/exchangeInfo (Caused by NewConnectionError('<urllib3.connection.HTTPSConnection object at 0x000002327D3E5450>: Failed to establish a new connection: [Errno 11001] getaddrinfo failed'))
 2026-06-26 15:28:15,007 - INFO - BTC signal: {'symbol': 'BTCUSDT', 'order_type': 'Market', 'entry_price': np.float64(59999.0), 'order_side': 'Sell', 'tp_price': np.float64(59815.0), 'sl_price': np.float64(60224.0), 'trigger_price': np.float64(60029.0), 'orderLinkId': None, 'current_price': np.float64(59999.13), 'checked': False, 'current_bal': 3.0}
 2026-06-26 15:28:15,007 - INFO - BTC order: id=N/A
+2026-06-27 14:34:00,934 - INFO - 
+Starting PyQuant--------------------------------------------------------------------------------
+
+2026-06-27 14:50:20,185 - INFO - 
+Starting PyQuant--------------------------------------------------------------------------------
+
+2026-06-29 11:49:16,498 - INFO - 
+Starting PyQuant--------------------------------------------------------------------------------
+
+2026-06-29 11:49:59,459 - INFO - PositionGuard scheduler started.
+2026-06-29 11:49:59,746 - INFO - Telegram: 🔔 PositionGuard scheduler ONLINE.
+2026-06-29 12:00:00,358 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-06-29 12:00:00,589 - INFO - Cancelled all stale open orders.
+2026-06-29 12:00:00,589 - WARNING - Balance unavailable – using default $3.
+2026-06-29 12:00:01,714 - INFO - Starting Hourly Signal Services
+2026-06-29 12:00:01,824 - INFO - Starting Position Manager for ETH/USD
+2026-06-29 12:00:03,357 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1579.54), 'order_side': 'Sell', 'tp_price': np.float64(1571.68), 'sl_price': np.float64(1595.54), 'trigger_price': np.float64(1580.85), 'orderLinkId': None, 'current_price': np.float64(1572.731), 'checked': False, 'current_bal': 3.0}
+2026-06-29 12:00:03,539 - INFO - Starting Position Manager for BTC/USD
+2026-06-29 12:00:08,527 - INFO - SignalExecutor: leverage=50x for ETHUSDT
+2026-06-29 12:00:08,528 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1579.54
+2026-06-29 12:00:08,785 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-06-29 12:00:09,007 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-06-29 12:00:09,009 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1579.54), 'order_side': 'Sell', 'tp_price': np.float64(1571.68), 'sl_price': np.float64(1595.54), 'trigger_price': np.float64(1580.85), 'orderLinkId': None, 'current_price': np.float64(1572.731), 'checked': False, 'current_bal': 3.0, 'qty': '0.075'}
+2026-06-29 12:00:09,010 - INFO - ETH order: id=N/A
+2026-06-29 12:06:26,624 - INFO - ETH/USD SELL limit filled. Price:1580.4
