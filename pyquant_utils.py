@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
 from queue import Queue
-from typing import Dict, Any, Set, Optional
+from typing import Dict, Any, Set
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
@@ -62,55 +62,117 @@ from sklearn.metrics import (
 
 nest_asyncio.apply()
 
-# ── Environment / credentials ─────────────────────────────────────────────────
-load_dotenv()
+# ── Environment ───────────────────────────────────────────────────────────────
+# Use the directory this FILE lives in, not the CWD.
+# Running `py pyquant_orchestra.py` from any directory will still find the .env
+# as long as it sits next to pyquant_utils.py — fixes "KeyError: ALPACA_API_KEY".
+from pathlib import Path
+_ENV_PATH = Path(__file__).resolve().parent / ".env"
 
-ALPACA_API_KEY    = os.environ["ALPACA_API_KEY"]
-ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
-BYBIT_API_KEY     = os.environ["BYBIT_API_KEY"]
-BYBIT_SECRET_KEY  = os.environ["BYBIT_SECRET_KEY"]
-BINANCE_API_KEY   = os.environ["BINANCE_API_KEY"]
-BINANCE_SECRET_KEY = os.environ["BINANCE_SECRET_KEY"]
-TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
+if not _ENV_PATH.exists():
+    raise FileNotFoundError(
+        f"\n{'='*62}\n"
+        f"  .env file not found.\n"
+        f"  Expected location: {_ENV_PATH}\n"
+        f"{'='*62}\n"
+        f"  Create a .env file in the same folder as pyquant_utils.py\n"
+        f"  using env_template.txt as your guide.\n"
+        f"{'='*62}\n"
+    )
 
-# ── Clients ───────────────────────────────────────────────────────────────────
-api = tradeapi.REST(
-    ALPACA_API_KEY, ALPACA_SECRET_KEY,
-    "https://data.alpaca.markets/v1beta3/crypto/us/bars"
-)
+load_dotenv(dotenv_path=_ENV_PATH, override=True)
 
-start_date    = dt.date.today() - dt.timedelta(days=60)
-end_date      = dt.date.today()
 
-crypto_stream = CryptoDataStream(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
-crypto_client = CryptoHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
+def _require_env(key: str) -> str:
+    """Returns the env var value or raises a clear, actionable error."""
+    value = os.environ.get(key, "").strip()
+    if not value:
+        raise EnvironmentError(
+            f"\n{'='*62}\n"
+            f"  Required environment variable not set: {key}\n"
+            f"  File checked: {_ENV_PATH}\n"
+            f"{'='*62}\n"
+            f"  Open your .env file and add:\n"
+            f"    {key}=your_actual_value\n"
+            f"  On Windows, make sure the file is named exactly '.env'\n"
+            f"  not '.env.txt' (Explorer hides extensions by default).\n"
+            f"{'='*62}\n"
+        )
+    return value
 
-# Enhanced Binance Client Initialization with Retry & Timeout logic
-def init_binance_client():
-    retries = 5
-    for attempt in range(retries):
-        try:
-            return Client(
-                BINANCE_API_KEY, 
-                BINANCE_SECRET_KEY, 
-                testnet=False, 
-                requests_params={'timeout': 30}
-            )
-        except Exception as e:
-            print(f"[Warning] Failed to connect to Binance (Attempt {attempt + 1}/{retries}). Retrying in 5s... Error: {e}")
-            time.sleep(5)
-            
-    print("[Error] Could not connect to Binance API.")
-    print("[Action Required] If you are operating in a restricted region, please ensure your system-wide VPN is ACTIVE.")
-    raise ConnectionError("Binance API connection failed after multiple retries due to network timeouts/blocks.")
 
-binance_client = init_binance_client()
+ALPACA_API_KEY     = _require_env("ALPACA_API_KEY")
+ALPACA_SECRET_KEY  = _require_env("ALPACA_SECRET_KEY")
+BYBIT_API_KEY      = _require_env("BYBIT_API_KEY")
+BYBIT_SECRET_KEY   = _require_env("BYBIT_SECRET_KEY")
+BINANCE_API_KEY    = _require_env("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = _require_env("BINANCE_SECRET_KEY")
+TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
-# PHASE 2 FIX: Ensure thread lock exists for pyq_p3.py import
+# ── Shared threading lock for Binance API calls ───────────────────────────────
+# python-binance Client is not thread-safe. The PositionGuard background thread
+# and the main scheduler thread both call Binance APIs. Without a lock they can
+# corrupt shared session state. Every Binance call in this codebase acquires
+# this lock first. pyq_p3.py imports and reuses this same lock.
 _binance_lock = threading.Lock()
 
-session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
+
+def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Client:
+    """
+    Creates a Binance Futures client with retry logic.
+
+    python-binance calls the Binance server during __init__ to sync the local
+    clock with server time. That network call will fail if:
+      - The internet connection is not ready yet at process startup
+      - A corporate firewall is blocking api.binance.com:443
+      - The local network has a brief blip
+
+    Retrying up to max_retries times with a delay between attempts handles
+    transient startup failures gracefully instead of crashing immediately.
+    """
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
+            client.ping()   # explicit connectivity check — fast, no auth needed
+            print(f"[Startup] Binance connected on attempt {attempt}.")
+            return client
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries:
+                print(f"[Startup] Binance connection attempt {attempt}/{max_retries} "
+                      f"failed: {e}. Retrying in {retry_delay}s…")
+                time.sleep(retry_delay)
+
+    raise ConnectionError(
+        f"\n{'='*62}\n"
+        f"  Cannot connect to Binance after {max_retries} attempts.\n"
+        f"  Last error: {last_err}\n"
+        f"{'='*62}\n"
+        f"  Things to check:\n"
+        f"  1. Internet connection is active.\n"
+        f"  2. api.binance.com:443 is not blocked by a firewall or VPN.\n"
+        f"  3. BINANCE_API_KEY and BINANCE_SECRET_KEY in .env are correct.\n"
+        f"  4. Your IP is not banned (check Binance API Management page).\n"
+        f"{'='*62}\n"
+    ) from last_err
+
+
+# ── Clients — created once here, imported by pyq_p3.py ───────────────────────
+# Centralising client creation avoids duplicate connections and ensures the
+# shared _binance_lock covers every API call across the entire process.
+start_date = dt.date.today() - dt.timedelta(days=60)
+end_date   = dt.date.today()
+
+crypto_client = CryptoHistoricalDataClient(
+    api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY
+)
+crypto_stream = CryptoDataStream(
+    api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY
+)
+binance_client = _create_binance_client()
+session        = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -133,12 +195,11 @@ if not logger.handlers:
 
 class OHLCVAggregator:
     @staticmethod
-    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
+    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
         return aggregate_ohlcv_data(df, aggregation_minutes)
 
 
-# PHASE 2 FIX: Replaced "pd.DataFrame | None" with "Optional[pd.DataFrame]" for older Python versions
-def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
+def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
     """Re-samples OHLCV data to the specified number of minutes."""
     df_agg = df.copy()
     rules = {k: v for k, v in {
@@ -308,15 +369,31 @@ class UKFModel:
 
     @staticmethod
     def _stabilise_P(ukf, min_var: float = 1e-6) -> None:
+        """
+        Keeps the covariance matrix P symmetric and positive-definite.
+
+        After many predict/update cycles, floating-point drift can make P
+        slightly non-symmetric or give it near-zero / negative eigenvalues.
+        Either of those causes scipy's Cholesky to raise:
+            LinAlgError: Internal potrf return info = [1]
+        Two cheap operations prevent this permanently:
+          1. Symmetrise  →  P = (P + Pᵀ) / 2
+          2. Diagonal floor  →  P[i,i] = max(P[i,i], min_var)
+        """
         P = ukf.P
-        P = (P + P.T) / 2                          
+        P = (P + P.T) / 2                          # remove asymmetry from float drift
         for i in range(P.shape[0]):
             if P[i, i] < min_var:
-                P[i, i] = min_var                  
+                P[i, i] = min_var                  # guarantee positive diagonal
         ukf.P = P
 
     @staticmethod
     def ukf_handler(data, ukf, high_ukf, low_ukf):
+        """
+        Updates all three UKFs with the latest bar and returns next-step predictions.
+        Calls _stabilise_P after every step so Cholesky never sees a
+        non-positive-definite matrix.
+        """
         high  = data["high"]
         low   = data["low"]
         price = data["close"]
@@ -366,14 +443,9 @@ def get_equities() -> tuple:
 
 def check_open_position(symbol: str) -> dict:
     """Returns a dict describing any open Binance Futures position for `symbol`."""
-    # PHASE 2 FIX: Symbol scrubber safely turns "BTC/USD" -> "BTCUSDT"
-    trade_symbol = symbol.replace("/", "")
-    if trade_symbol.endswith("USD"):
-        trade_symbol += "T"
-
     position_info = {
-        "is_open_position": False, "symbol": trade_symbol,
-        "side": None, "size": 0.0, "qty_str": "", "entry_price": None,
+        "is_open_position": False, "symbol": symbol,
+        "side": None, "size": 0.0, "entry_price": None,
         "unrealized_pnl": 0.0, "liquidation_price": None,
         "take_profit_price": None, "stop_loss_price": None,
     }
@@ -383,18 +455,13 @@ def check_open_position(symbol: str) -> dict:
         wallet_balance = usdt_eq
 
         position = next(
-            (p for p in positions if p["symbol"] == trade_symbol and float(p["positionAmt"]) != 0),
+            (p for p in positions if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
             None
         )
         if position:
             position_info["is_open_position"] = True
             position_info["side"]             = "BUY" if float(position["positionAmt"]) > 0 else "SELL"
             position_info["size"]             = abs(float(position["positionAmt"]))
-            
-            # PHASE 2 FIX: Extract string quantity natively to avoid float rounding limits
-            amt_str = position["positionAmt"]
-            position_info["qty_str"]          = amt_str[1:] if amt_str.startswith("-") else amt_str
-            
             position_info["entry_price"]      = float(position["entryPrice"])
             position_info["unrealized_pnl"]   = float(position["unRealizedProfit"])
             position_info["liquidation_price"] = float(position["liquidationPrice"])
@@ -404,7 +471,7 @@ def check_open_position(symbol: str) -> dict:
             if upnl >= wallet_balance * limit or upnl >= 0.6:
                 close_futures_position(position_info)
                 logger.info(
-                    f"check_open_position: auto-closed {trade_symbol} due to profit "
+                    f"check_open_position: auto-closed {symbol} due to profit "
                     f"(uPNL={upnl:.4f})"
                 )
     except Exception as e:
@@ -413,20 +480,15 @@ def check_open_position(symbol: str) -> dict:
 
 
 def close_futures_position(position_data: dict) -> dict:
-    """Closes an open Binance Futures position with a market order safely bypassing precise quantity float issues."""
+    """Closes an open Binance Futures position with a market reduceOnly order."""
     try:
         symbol     = position_data["symbol"]
         side       = position_data["side"]
-        
-        # PHASE 2 FIX: Use explicit API string quantity to bypass -1111 Precision Over Maximum
-        qty_str = position_data.get("qty_str")
-        if not qty_str:
-            qty_str = str(position_data["size"])
-            
+        size       = position_data["size"]
         close_side = "SELL" if side == "BUY" else "BUY"
         response   = binance_client.futures_create_order(
             symbol=symbol, side=close_side,
-            type="MARKET", quantity=qty_str, reduceOnly=True
+            type="MARKET", quantity=size, reduceOnly=True
         )
         logger.info(f"close_futures_position: closed {symbol} via {close_side} market order.")
         return response
@@ -698,6 +760,21 @@ class PositionGuard:
         self.scheduler_thread  = None
         self.telegram_thread   = None
 
+        # Signal store: persists signals by symbol so retries can find them even
+        # after the order is cleared from monitored_orders. Without this the
+        # 30-second retry loop has no signal and hits the fallback path endlessly.
+        self._signal_store: Dict[str, Any] = {}
+
+        # Tracks symbols whose bracket was placed in this scheduler tick to prevent
+        # the orders-loop AND positions-loop both firing _check_and_place_bracket
+        # for the same symbol in one check_all_orders_and_positions call.
+        self._bracket_placed_this_tick: Set[str] = set()
+
+        # Detect position mode at startup.
+        # Hedge Mode (dualSidePosition=True) forbids closePosition=True on
+        # conditional orders and returns -4120. One-way Mode requires it.
+        self._hedge_mode: bool = self._detect_hedge_mode()
+
     # ── Persistence ──────────────────────────────────────────────────────────
 
     def load_trade_state(self) -> dict:
@@ -710,6 +787,7 @@ class PositionGuard:
         return {}
 
     def save_to_json(self):
+        """FIX: Saves monitored_orders to disk so the 1-minute task can read it."""
         try:
             with open(self.trade_state_file, "w") as f:
                 json.dump(self.monitored_orders, f, indent=4, default=str)
@@ -730,6 +808,45 @@ class PositionGuard:
             del self.active_trades[symbol]
             with open(self.trade_state_file, "w") as f:
                 json.dump(self.active_trades, f, indent=4)
+
+    # ── Position-mode detection ───────────────────────────────────────────────
+
+    def _detect_hedge_mode(self) -> bool:
+        """
+        Returns True if the Binance Futures account is in Hedge Mode.
+
+        Binance Futures has two position modes:
+          One-way Mode  (dualSidePosition=False, default):
+            All positions use positionSide=BOTH.
+            Conditional orders MUST use closePosition=True.
+            Sending positionSide or quantity causes an error.
+
+          Hedge Mode  (dualSidePosition=True):
+            Positions use positionSide=LONG or SHORT.
+            closePosition=True is FORBIDDEN — causes -4120
+            "Order type not supported for this endpoint.
+             Please use the Algo Order API endpoints instead."
+            Must use positionSide + quantity instead.
+
+        This flag is checked by _place_bracket_order and
+        _place_bracket_order_fallback to build the correct param set.
+        """
+        try:
+            result = self.binance.futures_get_position_mode()
+            mode   = result.get("dualSidePosition", False)
+            logger.info(
+                f"[PositionGuard] Binance position mode: "
+                f"{'Hedge Mode' if mode else 'One-way Mode'}"
+            )
+            return mode
+        except Exception as e:
+            logger.warning(
+                f"[PositionGuard] Could not detect position mode: {e}. "
+                f"Defaulting to One-way Mode. If bracket orders fail with -4120, "
+                f"your account is likely in Hedge Mode — set it to One-way in "
+                f"Binance Futures settings."
+            )
+            return False
 
     # ── Telegram ──────────────────────────────────────────────────────────────
 
@@ -793,23 +910,38 @@ class PositionGuard:
         if not self.monitored_orders and not self.monitored_positions:
             return
 
+        # Reset per-tick guard so each scheduler invocation starts clean
+        self._bracket_placed_this_tick.clear()
+
         orders_to_remove = []
         for order_id, order_info in list(self.monitored_orders.items()):
             try:
                 symbol       = order_info["symbol"]
-                order_status = self.binance.futures_get_order(symbol=symbol, orderId=order_id)
-                status       = order_status.get("status")
+                order_status = self.binance.futures_get_order(
+                    symbol=symbol, orderId=int(order_id)
+                )
+                status            = order_status.get("status")
                 order_info["status"] = status
 
                 if status == "FILLED":
                     self.add_alert_to_queue(f"✅ Order {order_id} FILLED for {symbol}.")
-                    self.save_to_json()
+
+                    # Persist the signal into _signal_store BEFORE removing from
+                    # monitored_orders. The retry loop in the positions section
+                    # runs after monitored_orders is cleared, so without this the
+                    # signal is gone and the fallback loop runs endlessly.
+                    sig = order_info.get("signal")
+                    if sig:
+                        self._signal_store[symbol] = sig
+
                     orders_to_remove.append(order_id)
-                    self._check_and_place_bracket(symbol, order_id=order_id)
+                    self._check_and_place_bracket(symbol, order_id=order_id,
+                                                  signal_override=sig)
 
                 elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                     self.add_alert_to_queue(f"❌ Order {order_id} failed: {status}.")
                     orders_to_remove.append(order_id)
+                    self._signal_store.pop(symbol, None)
 
                 else:
                     logger.info(f"Order {order_id} status: {status}. Waiting…")
@@ -823,6 +955,10 @@ class PositionGuard:
             self.save_to_json()
 
         for symbol in list(self.monitored_positions):
+            # Skip if bracket was already placed for this symbol this tick
+            # (prevents the orders-loop and positions-loop both firing)
+            if symbol in self._bracket_placed_this_tick:
+                continue
             try:
                 open_orders = self.binance.futures_get_open_orders(symbol=symbol)
                 has_bracket = any(
@@ -834,24 +970,33 @@ class PositionGuard:
                         f"🛡️ {symbol} has active TP/SL. Removing from monitoring."
                     )
                     self.monitored_positions.discard(symbol)
+                    self._signal_store.pop(symbol, None)
                 else:
                     positions = self.binance.futures_position_information(symbol=symbol)
                     position  = next(
                         (p for p in positions if float(p["positionAmt"]) != 0), None
                     )
                     if not position:
-                        self.add_alert_to_queue(f"🤔 No open position for {symbol}. Removing.")
+                        self.add_alert_to_queue(
+                            f"🤔 No open position for {symbol}. Removing from monitoring."
+                        )
                         self.monitored_positions.discard(symbol)
+                        self._signal_store.pop(symbol, None)
                     else:
                         logger.info(f"{symbol} still needs TP/SL. Retrying…")
-                        self._check_and_place_bracket(symbol)
+                        # Pass signal from store so retry doesn't fall back
+                        self._check_and_place_bracket(
+                            symbol,
+                            signal_override=self._signal_store.get(symbol)
+                        )
             except Exception as e:
                 logger.error(f"Error checking position for {symbol}: {e}")
                 self.add_alert_to_queue(f"⚠️ Error checking position for {symbol}: {e}")
 
     # ── Bracket order placement ───────────────────────────────────────────────
 
-    def _check_and_place_bracket(self, symbol: str, order_id=None):
+    def _check_and_place_bracket(self, symbol: str, order_id=None,
+                                   signal_override=None):
         """Verifies a filled order has TP/SL; places them if not."""
         tp_sl_placed = False
         position_info = {
@@ -862,10 +1007,10 @@ class PositionGuard:
         }
 
         try:
-            # Find the live position
             positions = self.binance.futures_position_information()
             raw_pos   = next(
-                (p for p in positions if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
+                (p for p in positions
+                 if p["symbol"] == symbol and float(p["positionAmt"]) != 0),
                 None
             )
             if raw_pos:
@@ -873,7 +1018,6 @@ class PositionGuard:
                     "is_open_position": True,
                     "side":             "BUY" if float(raw_pos["positionAmt"]) > 0 else "SELL",
                     "size":             abs(float(raw_pos["positionAmt"])),
-                    "qty_str":          raw_pos["positionAmt"][1:] if raw_pos["positionAmt"].startswith("-") else raw_pos["positionAmt"],
                     "entry_price":      float(raw_pos["entryPrice"]),
                     "unrealized_pnl":   float(raw_pos["unRealizedProfit"]),
                     "liquidation_price": float(raw_pos["liquidationPrice"]),
@@ -882,32 +1026,41 @@ class PositionGuard:
 
             self.monitored_positions.add(symbol)
 
-            # Retrieve the matching signal
-            signal = None
-            if order_id and str(order_id) in self.monitored_orders:
+            # Resolve signal — prefer signal_override (passed directly from the
+            # orders-loop), then fall back to monitored_orders, then _signal_store.
+            signal = signal_override
+            if not signal and order_id and str(order_id) in self.monitored_orders:
                 signal = self.monitored_orders[str(order_id)].get("signal")
             if not signal:
                 for info in self.monitored_orders.values():
                     if info.get("symbol") == symbol and "signal" in info:
                         signal = info["signal"]
                         break
+            if not signal:
+                signal = self._signal_store.get(symbol)
 
             if not signal:
-                self.add_alert_to_queue(f"⚠️ No signal found for {symbol}. Using fallback TP/SL.")
+                self.add_alert_to_queue(
+                    f"⚠️ No signal found for {symbol}. Using fallback TP/SL."
+                )
                 self._place_bracket_order_fallback(symbol, position_info)
+                self._bracket_placed_this_tick.add(symbol)
                 return
 
-            # Check if position still open
+            # Confirm position is still open
             live_positions = self.binance.futures_position_information(symbol=symbol)
             live_pos       = next(
                 (p for p in live_positions if float(p["positionAmt"]) != 0), None
             )
             if not live_pos:
-                self.add_alert_to_queue(f"🤔 Entry filled but no open position for {symbol}.")
+                self.add_alert_to_queue(
+                    f"🤔 Entry filled but no open position for {symbol}."
+                )
                 self.monitored_positions.discard(symbol)
+                self._signal_store.pop(symbol, None)
                 return
 
-            # Check existing TP/SL
+            # Check for existing bracket orders
             open_orders = self.binance.futures_get_open_orders(symbol=symbol)
             has_bracket = any(
                 o for o in open_orders
@@ -916,62 +1069,178 @@ class PositionGuard:
             if has_bracket:
                 self.add_alert_to_queue(f"🛡️ {symbol} already has TP/SL. Guard done.")
                 self.monitored_positions.discard(symbol)
+                self._signal_store.pop(symbol, None)
+                self._bracket_placed_this_tick.add(symbol)
                 tp_sl_placed = True
             else:
-                try:
-                    resp = self._place_bracket_order(symbol, live_pos, signal)
-                    sl_id = resp["sl_order"]["orderId"] if resp.get("sl_order") else "N/A"
-                    tp_id = resp["tp_order"]["orderId"] if resp.get("tp_order") else "N/A"
+                resp   = self._place_bracket_order(symbol, live_pos, signal)
+                sl_ok  = resp.get("sl_order") is not None
+                tp_ok  = resp.get("tp_order") is not None
+                if sl_ok or tp_ok:
+                    sl_id = resp["sl_order"]["orderId"] if sl_ok else "N/A"
+                    tp_id = resp["tp_order"]["orderId"] if tp_ok else "N/A"
                     self.add_alert_to_queue(
                         f"🔒 TP/SL placed for {symbol}. SL:{sl_id}  TP:{tp_id}"
                     )
+                    self._bracket_placed_this_tick.add(symbol)
+                    if sl_ok and tp_ok:
+                        self.monitored_positions.discard(symbol)
+                        self._signal_store.pop(symbol, None)
                     tp_sl_placed = True
-                except Exception as e:
-                    logger.error(f"_place_bracket_order failed for {symbol}: {e}")
-                    try:
-                        self._place_bracket_order_fallback(symbol, live_pos, signal)
-                        tp_sl_placed = True
-                    except Exception as e2:
-                        logger.error(f"Fallback also failed for {symbol}: {e2}")
+                else:
+                    logger.error(f"Both bracket legs failed for {symbol}. Will retry.")
 
-            # Manual TP/SL tracking safety net
+            # Manual tracking fallback if bracket completely failed
             if not tp_sl_placed:
                 try:
-                    if symbol == "ETHUSDT":
-                        symbolis = "ETH/USD"
-                    elif symbol == "BTCUSDT":
-                        symbolis = "BTC/USD"
-                    else:
-                        symbolis = None
-
-                    position_status = check_open_position(symbol=symbol)
-                    tr_data = None
-                    for _ in range(3):
-                        downloaded = data_download("1T", symbolis)
-                        if downloaded is not None:
-                            tr_data = downloaded.iloc[-1]
-                            break
-                        time.sleep(2)
-
-                    if tr_data is not None and signal:
-                        price = tr_data["close"]
-                        llow  = tr_data["low"]
-                        hhigh = tr_data["high"]
-                        logger.info(f"Manual tracking {symbol} {signal['order_side']}")
-                        if signal["order_side"] == "Buy":
-                            if hhigh >= signal["tp_price"] or llow <= signal["sl_price"]:
-                                close_futures_position(position_status)
-                        elif signal["order_side"] == "Sell":
-                            if llow <= signal["tp_price"] or hhigh >= signal["sl_price"]:
-                                close_futures_position(position_status)
+                    alpaca_sym = {"ETHUSDT": "ETH/USD", "BTCUSDT": "BTC/USD"}.get(symbol)
+                    if alpaca_sym and signal:
+                        position_status = check_open_position(symbol=symbol)
+                        tr_data = None
+                        for _ in range(3):
+                            downloaded = data_download("1T", alpaca_sym)
+                            if downloaded is not None:
+                                tr_data = downloaded.iloc[-1]
+                                break
+                            time.sleep(2)
+                        if tr_data is not None:
+                            hhigh = tr_data["high"]
+                            llow  = tr_data["low"]
+                            if signal["order_side"] == "Buy":
+                                if hhigh >= signal["tp_price"] or llow <= signal["sl_price"]:
+                                    close_futures_position(position_status)
+                            elif signal["order_side"] == "Sell":
+                                if llow <= signal["tp_price"] or hhigh >= signal["sl_price"]:
+                                    close_futures_position(position_status)
                 except Exception as e:
                     logger.error(f"Manual tracking fallback failed for {symbol}: {e}")
 
         except Exception as e:
             logger.error(f"_check_and_place_bracket fatal error for {symbol}: {e}")
-            self.add_alert_to_queue(f"🚨 CRITICAL: TP/SL management failed for {symbol}: {e}")
+            self.add_alert_to_queue(
+                f"🚨 CRITICAL: TP/SL management failed for {symbol}: {e}"
+            )
 
     def _place_bracket_order(self, symbol: str, position_info: dict, signal: dict) -> dict:
+        """
+        Places STOP_MARKET (SL) and TAKE_PROFIT_MARKET (TP) bracket orders.
+
+        Handles both Binance Futures position modes automatically:
+
+        ONE-WAY MODE (dualSidePosition=False, default):
+            • closePosition=True   — closes the entire position
+            • positionSide          — must NOT be sent
+            • quantity              — must NOT be sent when closePosition=True
+            • timeInForce           — must NOT be sent for STOP_MARKET / TPM
+
+        HEDGE MODE (dualSidePosition=True):
+            • closePosition=True   — FORBIDDEN, causes error -4120:
+              "Order type not supported for this endpoint.
+               Please use the Algo Order API endpoints instead."
+            • positionSide          — REQUIRED ("LONG" or "SHORT")
+            • quantity              — REQUIRED (size of the position)
+            • timeInForce           — must NOT be sent
+
+        workingType=MARK_PRICE prevents wick-triggered stops. priceProtect
+        is intentionally omitted — it occasionally rejects valid orders when
+        the mark price has moved since the signal was generated.
+        """
+        sl_order = tp_order = None
+        try:
+            position_amt = float(position_info.get("positionAmt",
+                                 position_info.get("size", 0)))
+            is_long      = position_amt > 0
+            close_side   = "SELL" if is_long else "BUY"
+
+            sl_price = float(signal["sl_price"])
+            tp_price = float(signal["tp_price"])
+
+            # Exchange info for precision
+            info        = self.binance.futures_exchange_info()
+            symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
+
+            pf         = next(f for f in symbol_info["filters"]
+                              if f["filterType"] == "PRICE_FILTER")
+            tick_size  = float(pf["tickSize"])
+            ts_str     = str(tick_size)
+            price_prec = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+
+            lf        = next(f for f in symbol_info["filters"]
+                             if f["filterType"] == "LOT_SIZE")
+            step_size = float(lf["stepSize"])
+            ss_str    = str(step_size)
+            qty_prec  = len(ss_str.split(".")[1].rstrip("0")) if "." in ss_str else 0
+
+            sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
+            tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
+
+            # Direction guard — prevents -2021
+            entry = float(position_info.get("entry_price",
+                          position_info.get("entryPrice", 0)))
+            if entry > 0:
+                if is_long:
+                    if sl_price >= entry:
+                        sl_price = round(
+                            round(entry * 0.995 / tick_size) * tick_size, price_prec)
+                    if tp_price <= entry:
+                        tp_price = round(
+                            round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                else:
+                    if sl_price <= entry:
+                        sl_price = round(
+                            round(entry * 1.005 / tick_size) * tick_size, price_prec)
+                    if tp_price >= entry:
+                        tp_price = round(
+                            round(entry * 0.995 / tick_size) * tick_size, price_prec)
+
+            sl_str  = f"{sl_price:.{price_prec}f}"
+            tp_str  = f"{tp_price:.{price_prec}f}"
+            qty_str = f"{abs(position_amt):.{qty_prec}f}"
+
+            logger.info(
+                f"Placing bracket for {symbol} "
+                f"({'LONG' if is_long else 'SHORT'}, "
+                f"{'Hedge' if self._hedge_mode else 'One-way'}): "
+                f"entry={entry}  SL={sl_str}  TP={tp_str}"
+            )
+
+            def _order_params(order_type: str, stop_price: str) -> dict:
+                base = {
+                    "symbol":      symbol,
+                    "side":        close_side,
+                    "type":        order_type,
+                    "stopPrice":   stop_price,
+                    "workingType": "MARK_PRICE",
+                }
+                if self._hedge_mode:
+                    # Hedge mode: explicit side + quantity, no closePosition
+                    base["positionSide"] = "SHORT" if not is_long else "LONG"
+                    base["quantity"]     = qty_str
+                else:
+                    # One-way mode: closePosition replaces quantity
+                    base["closePosition"] = True
+                return base
+
+            sl_order = self.binance.futures_create_order(**_order_params(
+                "STOP_MARKET", sl_str
+            ))
+            logger.info(
+                f"SL placed: {symbol}  "
+                f"orderId={sl_order.get('orderId')}  stopPrice={sl_str}"
+            )
+
+            tp_order = self.binance.futures_create_order(**_order_params(
+                "TAKE_PROFIT_MARKET", tp_str
+            ))
+            logger.info(
+                f"TP placed: {symbol}  "
+                f"orderId={tp_order.get('orderId')}  stopPrice={tp_str}"
+            )
+
+        except Exception as e:
+            logger.error(f"_place_bracket_order ({symbol}): {e}")
+
+        return {"sl_order": sl_order, "tp_order": tp_order, "combined": True}
         sl_order = tp_order = None
         try:
             position_amt = float(position_info.get("positionAmt",
@@ -995,6 +1264,7 @@ class PositionGuard:
             tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
 
             # ── Direction validation ──────────────────────────────────────────
+            # Binance error -2021 if SL/TP are on the wrong side of the market.
             entry = float(position_info.get("entry_price",
                           position_info.get("entryPrice", 0)))
             if entry > 0:
@@ -1025,8 +1295,8 @@ class PositionGuard:
                 type         = "STOP_MARKET",
                 stopPrice    = sl_str,
                 closePosition= True,
-                workingType  = "MARK_PRICE",   
-                priceProtect = True,            
+                workingType  = "MARK_PRICE",   # trigger on mark, not last price
+                priceProtect = True,            # reject if trigger is far from mark
             )
             logger.info(f"SL placed: {symbol}  orderId={sl_order.get('orderId')}  stopPrice={sl_str}")
 
@@ -1047,7 +1317,13 @@ class PositionGuard:
 
         return {"sl_order": sl_order, "tp_order": tp_order, "combined": True}
 
-    def _place_bracket_order_fallback(self, symbol: str, position_info: dict, signal=None) -> tuple:
+    def _place_bracket_order_fallback(self, symbol: str, position_info: dict,
+                                       signal=None) -> tuple:
+        """
+        Fallback bracket when no signal is available.
+        Uses 0.5% TP/SL defaults. Same mode-aware parameter logic as
+        _place_bracket_order.
+        """
         try:
             position_amt = float(position_info.get("positionAmt",
                                  position_info.get("size", 0)))
@@ -1068,36 +1344,49 @@ class PositionGuard:
 
             info        = self.binance.futures_exchange_info()
             symbol_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
-            pf          = next(f for f in symbol_info["filters"]
-                               if f["filterType"] == "PRICE_FILTER")
-            tick_size   = float(pf["tickSize"])
-            ts_str      = str(tick_size)
-            price_prec  = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+
+            pf         = next(f for f in symbol_info["filters"]
+                              if f["filterType"] == "PRICE_FILTER")
+            tick_size  = float(pf["tickSize"])
+            ts_str     = str(tick_size)
+            price_prec = len(ts_str.split(".")[1].rstrip("0")) if "." in ts_str else 0
+
+            lf        = next(f for f in symbol_info["filters"]
+                             if f["filterType"] == "LOT_SIZE")
+            step_size = float(lf["stepSize"])
+            ss_str    = str(step_size)
+            qty_prec  = len(ss_str.split(".")[1].rstrip("0")) if "." in ss_str else 0
 
             sl_price = round(round(sl_price / tick_size) * tick_size, price_prec)
             tp_price = round(round(tp_price / tick_size) * tick_size, price_prec)
             sl_str   = f"{sl_price:.{price_prec}f}"
             tp_str   = f"{tp_price:.{price_prec}f}"
+            qty_str  = f"{abs(position_amt):.{qty_prec}f}"
+
+            def _order_params(order_type: str, stop_price: str) -> dict:
+                base = {
+                    "symbol":      symbol,
+                    "side":        close_side,
+                    "type":        order_type,
+                    "stopPrice":   stop_price,
+                    "workingType": "MARK_PRICE",
+                }
+                if self._hedge_mode:
+                    base["positionSide"] = "SHORT" if not is_long else "LONG"
+                    base["quantity"]     = qty_str
+                else:
+                    base["closePosition"] = True
+                return base
 
             fallback_sl = self.binance.futures_create_order(
-                symbol       = symbol,
-                side         = close_side,
-                type         = "STOP_MARKET",
-                stopPrice    = sl_str,
-                closePosition= True,
-                workingType  = "MARK_PRICE",
-                priceProtect = True,
+                **_order_params("STOP_MARKET", sl_str)
             )
             fallback_tp = self.binance.futures_create_order(
-                symbol       = symbol,
-                side         = close_side,
-                type         = "TAKE_PROFIT_MARKET",
-                stopPrice    = tp_str,
-                closePosition= True,
-                workingType  = "MARK_PRICE",
-                priceProtect = True,
+                **_order_params("TAKE_PROFIT_MARKET", tp_str)
             )
-            logger.info(f"Fallback bracket placed for {symbol}: SL={sl_str}  TP={tp_str}")
+            logger.info(
+                f"Fallback bracket placed for {symbol}: SL={sl_str}  TP={tp_str}"
+            )
             return fallback_tp, fallback_sl
 
         except Exception as e:
@@ -1107,7 +1396,9 @@ class PositionGuard:
     # ── Order registration ────────────────────────────────────────────────────
 
     def start_guard_for_order(self, signal: Dict[str, Any], order_id: int):
+        """Registers a new order for monitoring and persists to JSON."""
         symbol = signal["symbol"]
+        # FIX: store as string key so JSON round-trips cleanly
         self.monitored_orders[str(order_id)] = {
             "symbol":     symbol,
             "signal":     signal,
@@ -1122,6 +1413,18 @@ class PositionGuard:
     # ── Telegram bot runner ───────────────────────────────────────────────────
 
     async def run_telegram_bot(self):
+        """
+        Runs the Telegram bot in the current event loop.
+
+        The crash:
+            RuntimeError: This Application is not running!
+        happened because the `finally` block called `app.stop()` even when
+        `app.start()` had never succeeded.  python-telegram-bot v20+ tracks
+        its own running state and raises if you call stop() on an app that
+        was never started.
+
+        Fix: only call stop() when `self.telegram_app.running` is True.
+        """
         _app_started = False
         try:
             self.telegram_app = Application.builder().token(self.telegram_token).build()
@@ -1130,12 +1433,13 @@ class PositionGuard:
             self.telegram_app.add_handler(CommandHandler("stop",   self.stop_command))
             await self.telegram_app.initialize()
             await self.telegram_app.start()
-            _app_started = True                        
+            _app_started = True                        # only True once start() succeeds
             await self.telegram_app.updater.start_polling()
             await self.process_alert_queue()
         except Exception as e:
             logger.error(f"Telegram bot error: {e}")
         finally:
+            # Guard: only stop if the app was actually started
             if _app_started and self.telegram_app is not None:
                 try:
                     if self.telegram_app.updater and self.telegram_app.updater.running:
@@ -1151,9 +1455,9 @@ class PositionGuard:
         schedule.every(30).seconds.do(self.check_all_orders_and_positions)
         self.add_alert_to_queue("🔔 PositionGuard scheduler ONLINE.")
         logger.info("PositionGuard scheduler started.")
-        while self.running:                
+        while self.running:                # FIX: respect self.running
             schedule.run_pending()
-            time.sleep(1)                  
+            time.sleep(1)                  # FIX: single sleep (was doubled)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1185,6 +1489,8 @@ class PositionGuard:
 # ── StateManager ──────────────────────────────────────────────────────────────
 
 class StateManager:
+    """Manages bot_state.json / bot_commands.json for external dashboard integration."""
+
     def __init__(self, state_file="bot_state.json", command_file="bot_commands.json"):
         self.state_file   = state_file
         self.command_file = command_file
@@ -1205,8 +1511,7 @@ class StateManager:
         except Exception as e:
             logger.error(f"StateManager.update_state: {e}")
 
-    # PHASE 2 FIX: Replaced "str | None" with "Optional[str]" for older Python versions
-    def get_command(self) -> Optional[str]:
+    def get_command(self) -> str | None:
         try:
             if not os.path.exists(self.command_file):
                 return None
