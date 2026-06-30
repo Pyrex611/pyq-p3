@@ -1,3 +1,4 @@
+from typing import Optional
 """
 pyquant_utils.py
 Shared utilities: UKF model factory, data download, signal generation,
@@ -195,11 +196,11 @@ if not logger.handlers:
 
 class OHLCVAggregator:
     @staticmethod
-    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+    def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
         return aggregate_ohlcv_data(df, aggregation_minutes)
 
 
-def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> pd.DataFrame | None:
+def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int) -> Optional[pd.DataFrame]:
     """Re-samples OHLCV data to the specified number of minutes."""
     df_agg = df.copy()
     rules = {k: v for k, v in {
@@ -1511,7 +1512,7 @@ class StateManager:
         except Exception as e:
             logger.error(f"StateManager.update_state: {e}")
 
-    def get_command(self) -> str | None:
+    def get_command(self) -> Optional[str]:
         try:
             if not os.path.exists(self.command_file):
                 return None
