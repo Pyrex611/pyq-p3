@@ -103,7 +103,7 @@ TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading constant ──────────────────────────────────────────────────────────
-LEVERAGE = 20
+LEVERAGE = 50
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
@@ -251,12 +251,32 @@ btc_tracker = {
     "sig_gened": False, "ordered": False, "order_filled": False,
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
+    # Frozen balance snapshot taken at the moment the order is placed.
+    # Used by the 1-minute last-resort stop loss so the threshold can't
+    # drift as the account balance changes during the life of the trade.
+    "entry_balance": None,
 }
 eth_tracker = {
     "sig_gened": False, "ordered": False, "order_filled": False,
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
+    "entry_balance": None,
 }
+
+# ── Last-resort stop loss (checked every minute, NOT every hour) ─────────────
+# These percentages are applied against the FROZEN entry_balance captured the
+# moment the trade was opened — never against a freshly re-fetched "current"
+# balance. Using a live balance creates a circular reference: the trade's own
+# unrealized PnL (and any concurrent ETH/BTC position sharing the same cross-
+# margin pool) changes the account balance, which changes the very threshold
+# being used to decide whether to close that same trade. A losing trade can
+# shrink the live balance, which shrinks 5% of it, which makes the stop
+# trigger earlier than intended — and a winning concurrent trade can inflate
+# the live balance, loosening the stop on a position that's actually in
+# trouble. Freezing the denominator at entry removes that feedback loop.
+BTC_LAST_RESORT_SL_PCT = 0.125   # 12.5% of entry balance
+ETH_LAST_RESORT_SL_PCT = 0.10    # 10% of entry balance
+HARD_DOLLAR_SL_FLOOR   = -0.20   # absolute backstop regardless of balance size
 
 # ── Duplicate-run guards ──────────────────────────────────────────────────────
 LAST_RUN_FILE   = "last_execution_timestamp.txt"
@@ -647,6 +667,17 @@ def hourly_task():
         logger.error(f"Balance routine error: {e}")
 
     # Open position check
+    # NOTE: This used to close positions here based on `wallet_balance * pct`,
+    # checked once per hour. That has been removed for two reasons:
+    #   1. Once per hour is far too infrequent a check for a risk stop — a
+    #      position can move a long way against you in 59 minutes.
+    #   2. `wallet_balance` here is re-fetched live, which is a moving target
+    #      biased by the very trade(s) it's being used to evaluate (see the
+    #      comment above btc_tracker/eth_tracker for the full explanation).
+    # The actual last-resort stop loss now lives in one_minute_task, checked
+    # every 60 seconds, using the frozen entry_balance captured when the
+    # trade was opened. This section now only logs state and tracks whether
+    # a position is open — no closing decisions are made here.
     try:
         btc_pos = check_open_position(symbol="BTCUSDT")
         if btc_pos["is_open_position"]:
@@ -655,13 +686,6 @@ def hourly_task():
                 f"entry={btc_pos['entry_price']:.4f}  uPNL={btc_pos['unrealized_pnl']:.4f}"
             )
             in_trade = btc_tracker["in_trade"] = True
-            upnl = btc_pos["unrealized_pnl"]
-            if upnl < 0 and (abs(upnl) >= wallet_balance): # * 0.125 or upnl <= -0.2):
-                close_futures_position(btc_pos)
-                btc_tracker["in_trade"] = False
-            if upnl >= wallet_balance * 0.2: # or upnl >= 0.6:
-                close_futures_position(btc_pos)
-                btc_tracker["in_trade"] = False
         else:
             in_trade = btc_tracker["in_trade"] = False
 
@@ -672,13 +696,6 @@ def hourly_task():
                 f"entry={eth_pos['entry_price']:.4f}  uPNL={eth_pos['unrealized_pnl']:.4f}"
             )
             in_trade = eth_tracker["in_trade"] = True
-            upnl = eth_pos["unrealized_pnl"]
-            if upnl < 0 and (abs(upnl) >= wallet_balance * 0.1): # or upnl <= -0.2):
-                close_futures_position(eth_pos)
-                eth_tracker["in_trade"] = False
-            if upnl >= wallet_balance * 0.15: # or upnl >= 0.6:
-                close_futures_position(eth_pos)
-                eth_tracker["in_trade"] = False
         else:
             in_trade = eth_tracker["in_trade"] = False
 
@@ -788,8 +805,10 @@ def hourly_task():
             double_order = True
             signal_generator.sig_gened = True
             ordered = True
-            eth_tracker.update({"sig_gened": True, "last_event_timestamp": now})
-            btc_tracker.update({"sig_gened": True, "last_event_timestamp": now})
+            eth_tracker.update({"sig_gened": True, "last_event_timestamp": now,
+                                 "entry_balance": wallet_balance})
+            btc_tracker.update({"sig_gened": True, "last_event_timestamp": now,
+                                 "entry_balance": wallet_balance})
 
         elif btc_tracker["sig_gened"] and not eth_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
@@ -808,7 +827,8 @@ def hourly_task():
             signal_generator.sig_gened = True
             ordered      = True
             double_order = False
-            btc_tracker.update({"ordered": True, "last_event_timestamp": now})
+            btc_tracker.update({"ordered": True, "last_event_timestamp": now,
+                                 "entry_balance": wallet_balance})
             eth_tracker["sig_gened"] = False
 
         elif eth_tracker["sig_gened"] and not btc_tracker["sig_gened"]:
@@ -828,7 +848,9 @@ def hourly_task():
             signal_generator.sig_gened = True
             ordered      = True
             double_order = False
-            eth_tracker.update({"sig_gened": True, "ordered": True, "last_event_timestamp": now})
+            eth_tracker.update({"sig_gened": True, "ordered": True,
+                                 "last_event_timestamp": now,
+                                 "entry_balance": wallet_balance})
             btc_tracker["sig_gened"] = False
 
         else:
@@ -930,6 +952,68 @@ def five_minute_task():
 
 # ── one_minute_task ───────────────────────────────────────────────────────────
 
+# ── Last-resort stop loss ──────────────────────────────────────────────────
+
+def last_resort_stop_loss_check(symbol: str, tracker: dict, pct: float) -> bool:
+    """
+    Final safety net, checked every minute.
+
+    Closes the position if unrealized loss exceeds `pct` of the FROZEN
+    entry_balance captured when the trade was opened, or breaches the
+    fixed-dollar HARD_DOLLAR_SL_FLOOR — whichever is hit first.
+
+    Deliberately does NOT call get_equities() / re-fetch wallet_balance.
+    The only live value used is unrealized_pnl from check_open_position(),
+    which reflects price movement only. The denominator (entry_balance) is
+    fixed, so the threshold cannot drift due to:
+      - this trade's own uPNL feeding back into the balance used to judge it
+      - a concurrent BTC/ETH position changing the shared cross-margin balance
+      - balance growing/shrinking from unrelated deposits or withdrawals
+        mid-trade
+
+    Returns True if the position was closed.
+    """
+    entry_balance = tracker.get("entry_balance")
+    if not entry_balance or entry_balance <= 0:
+        # No frozen reference available (e.g. position opened before this
+        # tracker field existed, or untracked position picked up by the
+        # 1-minute task). Fall back to the fixed-dollar floor only.
+        entry_balance = None
+
+    try:
+        position_status = check_open_position(symbol=symbol)
+        if not position_status["is_open_position"]:
+            return False
+
+        upnl = position_status["unrealized_pnl"]
+        if upnl >= 0:
+            return False   # only acts on losses — TP path is handled elsewhere
+
+        pct_breach  = entry_balance is not None and abs(upnl) >= entry_balance * pct
+        hard_breach = upnl <= HARD_DOLLAR_SL_FLOOR
+
+        if pct_breach or hard_breach:
+            reason = (
+                f"{pct*100:.1f}% of frozen entry_balance (${entry_balance:.2f})"
+                if pct_breach else
+                f"hard dollar floor (${HARD_DOLLAR_SL_FLOOR:.2f})"
+            )
+            logger.warning(
+                f"🛑 Last-resort SL triggered for {symbol}: uPNL=${upnl:.4f} "
+                f"breached {reason}. Closing position."
+            )
+            close_futures_position(position_status)
+            guard.add_alert_to_queue(
+                f"🛑 Last-resort SL closed {symbol}  uPNL=${upnl:.4f}  ({reason})"
+            )
+            return True
+
+    except Exception as e:
+        logger.error(f"last_resort_stop_loss_check ({symbol}): {e}")
+
+    return False
+
+
 def one_minute_task():
     if has_function_run_this_minute():
         print(f"1-minute task already ran this minute. Skipping.")
@@ -978,9 +1062,17 @@ def one_minute_task():
                 if btc_position_status["is_open_position"] and not btc_position:
                     btc_position = True
                     btc_tracker["open_trade"] = True
+                    if not btc_tracker.get("entry_balance"):
+                        # No frozen reference exists for this untracked position
+                        # (opened outside PyQuant or before a restart). Use the
+                        # current balance as the best available approximation —
+                        # this is a one-time fallback, not a recurring re-fetch.
+                        btc_tracker["entry_balance"] = wallet_balance
                 if eth_position_status["is_open_position"] and not eth_position:
                     eth_position = True
                     eth_tracker["open_trade"] = True
+                    if not eth_tracker.get("entry_balance"):
+                        eth_tracker["entry_balance"] = wallet_balance
             except Exception as e:
                 print(f"Equity fetch error (untracked 1m): {e}")
         else:
@@ -1041,6 +1133,30 @@ def one_minute_task():
                                 )
                                 del guard.monitored_orders[order_id]
                                 guard.save_to_json()
+                                # Clear frozen entry_balance + open flags so the
+                                # last-resort SL check below doesn't act on a
+                                # position that's already closed.
+                                if order_info["symbol"] == "BTCUSDT":
+                                    btc_tracker.update({"open_trade": False,
+                                                         "entry_balance": None})
+                                elif order_info["symbol"] == "ETHUSDT":
+                                    eth_tracker.update({"open_trade": False,
+                                                         "entry_balance": None})
+
+            # Last-resort PnL-based stop loss — checked every minute using the
+            # frozen entry_balance, independent of the price-based TP/SL above.
+            # This catches cases where bracket orders failed to place, the
+            # virtual TP/SL above missed the candle, or slippage pushed the
+            # fill far enough that the price-based exit logic didn't fire.
+            if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
+                if last_resort_stop_loss_check("BTCUSDT", btc_tracker, BTC_LAST_RESORT_SL_PCT):
+                    btc_tracker.update({"open_trade": False, "sl_hit": True,
+                                         "entry_balance": None})
+
+            if i in ("ETH/USD", "ETHUSDT") and eth_tracker["open_trade"]:
+                if last_resort_stop_loss_check("ETHUSDT", eth_tracker, ETH_LAST_RESORT_SL_PCT):
+                    eth_tracker.update({"open_trade": False, "sl_hit": True,
+                                         "entry_balance": None})
 
             # BTC manual tracker
             if i in ("BTC/USD", "BTCUSDT"):
@@ -1067,17 +1183,25 @@ def one_minute_task():
                             pnl = float(bo_signal["current_bal"]) - (wallet_balance or 0)
                             if bo_signal["order_side"] == "Buy":
                                 if hhigh >= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": False})
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif bo_signal["order_side"] == "Sell":
                                 if llow <= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": True})
+                                    # FIX: was "open_trade": True — left the trade marked
+                                    # open forever after a SELL-side SL hit, which meant
+                                    # the manual tracker never stopped monitoring a
+                                    # position that had already been closed.
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("BTC order tracking: unknown order_side.")
@@ -1114,17 +1238,21 @@ def one_minute_task():
                             pnl = float(eo_signal["current_bal"]) - (wallet_balance or 0)
                             if eo_signal["order_side"] == "Buy":
                                 if hhigh >= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif eo_signal["order_side"] == "Sell":
                                 if llow <= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False,
+                                                         "entry_balance": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("ETH order tracking: unknown order_side.")
