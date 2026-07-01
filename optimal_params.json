@@ -1,7 +1,7 @@
 {
-    "strict_btc": 0.00275,
+    "strict_btc": 0.0045,
     "stricts_btc": 0.006,
-    "strict_eth": 0.0045,
+    "strict_eth": 0.0035,
     "stricts_eth": 0.008,
-    "best_returns": 1633.8523538437596
+    "best_returns": 2105.7912077257215
 }
