@@ -7,7 +7,7 @@ All post-signal execution has been fixed:
   - Guard initialised here; circular import from p3_orchestra removed
   - signal_executor returns (signal, response, ordered) 3-tuple consistently
   - Response dict logging fixed (.text removed)
-  - leverage defined as module constant (50x as per original)
+  - leverage defined as module constant (20x as per original)
 """
 
 # ── Standard library ──────────────────────────────────────────────────────────
@@ -276,7 +276,7 @@ eth_tracker = {
 # trouble. Freezing the denominator at entry removes that feedback loop.
 BTC_LAST_RESORT_SL_PCT = 0.125   # 12.5% of entry balance
 ETH_LAST_RESORT_SL_PCT = 0.10    # 10% of entry balance
-HARD_DOLLAR_SL_FLOOR   = -0.20   # absolute backstop regardless of balance size
+HARD_DOLLAR_SL_FLOOR   = -100   # absolute backstop regardless of balance size
 
 # ── Duplicate-run guards ──────────────────────────────────────────────────────
 LAST_RUN_FILE   = "last_execution_timestamp.txt"
