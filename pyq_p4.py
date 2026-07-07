@@ -1,13 +1,61 @@
 """
-pyq_p3.py
-PyQuant live trading module.
-Prediction/signal-generation logic is UNTOUCHED.
-All post-signal execution has been fixed:
-  - API keys from .env (no hardcoded credentials)
-  - Guard initialised here; circular import from p3_orchestra removed
-  - signal_executor returns (signal, response, ordered) 3-tuple consistently
-  - Response dict logging fixed (.text removed)
-  - leverage defined as module constant (20x as per original)
+pyq_p4.py
+PyQuant live trading module — major refactor integrating the validated
+pyquant_walkforward_v4.py backtest design into live production.
+
+CHANGES FROM pyq_p3.py
+─────────────────────
+1. LEVERAGE reduced from 50x to 10x, matching the walk-forward backtest
+   that produced +1060% / 91.4% win rate / Sharpe 15.26 / max drawdown 28.28%.
+   Every risk figure in this file assumes 10x; do not raise it without
+   re-validating in the backtest first — the SL widths and last-resort
+   thresholds below are all calibrated against this leverage.
+
+2. ATR-adaptive stop loss. hourly_task now fetches the last ~20 hourly bars
+   per symbol (fetch_recent_bars in pyquant_utils.py), computes a live ATR
+   (compute_atr, Wilder's method), and passes it plus the current atr_mult
+   (from optimal_params.json, written by the new Bayesian grid_search.py)
+   into SignalGenerator.generate_signal(). SL price becomes
+   entry ± max(atr_mult × ATR, floor) instead of the old fixed $225/$16
+   offset — this is the exact mechanism validated in the backtest.
+
+3. BTC and ETH now trade fully independently. The old code generated and
+   could act on signals for both symbols every hour regardless of whether
+   either already had an open position. This refactor adds an explicit
+   check_open_position() gate per symbol BEFORE generating a new signal —
+   a symbol with an open trade is skipped for new signal generation until
+   it closes, while the OTHER symbol is never blocked by it. This matches
+   the independent per-symbol design validated in pyquant_walkforward_v4.py
+   (previously, a walkforward-side version of this same bug — `if in_b or
+   in_e: continue` — was found and fixed there; this is the live-system
+   equivalent of that fix).
+
+4. Dynamic last-resort stop loss. The old fixed 12.5% / 10%-of-balance
+   last-resort thresholds were calibrated against the old fixed $225/$16
+   SL. With ATR-adaptive SL now potentially wider (or narrower) depending
+   on market conditions, a fixed balance percentage could fire BEFORE the
+   real bracket SL ever would, turning a backstop into a competing, tighter
+   constraint. The last-resort threshold is now 1.5x the EXPECTED MAX LOSS
+   implied by that specific signal's own SL distance (computed at signal
+   generation time and stored in the signal dict), so it always scales with
+   whatever SL width was actually used and only fires as a genuine backstop
+   for bracket-placement failures, never as a routine competing exit.
+
+5. Dead Bybit TP/SL code removed. The original architecture description
+   named Bybit for TP/SL management, but that role has been fully replaced
+   by Binance's Algo Order API (see PositionGuard._place_bracket_order in
+   pyquant_utils.py) since Binance migrated all conditional orders off the
+   old endpoint on 2025-12-09. The Bybit HTTP helpers (genSignature,
+   HTTP_Request) and open_tp_sl_position() were never called anywhere in
+   the live task flow after that migration and have been removed to reduce
+   startup latency, failure surface, and complexity. The Bybit `session`
+   client still exists in pyquant_utils.py for architectural compatibility
+   / potential future use, but nothing in this file depends on it.
+
+Everything else — env loading, shared clients, PositionGuard integration,
+duplicate-run guards, the manual 1-minute tracker, virtual TP/SL safeguard,
+signal_executor's 3-tuple return — is carried forward unchanged from the
+fixes already validated in pyq_p3.py.
 """
 
 # ── Standard library ──────────────────────────────────────────────────────────
@@ -18,9 +66,6 @@ import time
 import logging
 import threading
 import traceback
-import hashlib
-import hmac
-import websocket
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
 from queue import Queue
@@ -29,9 +74,7 @@ from typing import Dict, Any, Set
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
 import pandas as pd
-import requests
 import asyncio
-import matplotlib.pyplot as plt
 import nest_asyncio
 from dotenv import load_dotenv
 
@@ -48,8 +91,6 @@ from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.data.live.crypto import CryptoDataStream
 
-from pybit.unified_trading import HTTP
-
 from binance.client import Client
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -58,26 +99,21 @@ from sklearn.metrics import (
     mean_absolute_error, r2_score
 )
 
-# FIX: Import PositionGuard directly from pyquant_utils.
-# REMOVED: `from p3_orchestra import guard` which caused a circular import:
-# pyquant_orchestra imports from pyq_p3 → pyq_p3 importing back from
-# pyquant_orchestra created a mutual dependency that prevented either from loading.
-from pyquant_utils import (
+from p4_utils import (
     UKFModel, get_equities, SignalGenerator, PositionGuard,
     data_download, aggregate_ohlcv_data,
     check_open_position, close_futures_position,
+    compute_atr, fetch_recent_bars,
     # Shared clients — created once in pyquant_utils with retry logic.
-    # Importing them here means pyq_p3 and pyquant_utils use the exact
-    # same objects, so _binance_lock covers every Binance call in the process.
-    binance_client, crypto_client, session, _binance_lock,
+    # NOTE: the Bybit `session` client is intentionally NOT imported here —
+    # TP/SL management is fully handled by Binance's Algo Order API via
+    # PositionGuard (see p4_utils.py), so nothing in this file needs it.
+    binance_client, crypto_client, _binance_lock,
 )
 
 nest_asyncio.apply()
 
 # ── Environment ───────────────────────────────────────────────────────────────
-# pyquant_utils already loaded the .env on import.  We call load_dotenv again
-# here with the same explicit path so pyq_p3.py can also be run / tested
-# standalone without going through pyquant_orchestra.py.
 from pathlib import Path as _Path
 _ENV_PATH = _Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=_ENV_PATH, override=True)
@@ -103,7 +139,14 @@ TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading constant ──────────────────────────────────────────────────────────
-LEVERAGE = 20
+# CHANGED from 50 to 15 — matches the validated walk-forward backtest exactly.
+# Every SL/last-resort threshold in this file assumes this value.
+LEVERAGE = 15
+
+# ATR configuration — must match pyquant_walkforward_v4.py / grid_search.py
+ATR_LOOKBACK_HOURS = 20   # bars fetched; only need 15 for a 14-period ATR,
+                          # 20 gives a buffer against a thin/missing bar
+ATR_PERIOD         = 14
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
@@ -111,63 +154,10 @@ api = tradeapi.REST(
     "https://data.alpaca.markets/v1beta3/crypto/us/bars"
 )
 
-BYBIT_BASE_URL = "https://api.bybit.com"
-session = HTTP(api_key=BYBIT_API_KEY, api_secret=BYBIT_SECRET_KEY)
-
 start_date    = dt.date.today() - dt.timedelta(days=60)
 end_date      = dt.date.today()
 
 crypto_stream  = CryptoDataStream(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
-crypto_client  = CryptoHistoricalDataClient(api_key=ALPACA_API_KEY, secret_key=ALPACA_SECRET_KEY)
-binance_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
-
-# ── Bybit raw-HTTP helper (kept for compatibility) ────────────────────────────
-_http_session = requests.Session()
-_recv_window  = str(50000)
-
-
-def genSignature(payload: str, time_stamp: str) -> str:
-    param_str = time_stamp + BYBIT_API_KEY + _recv_window + str(payload)
-    return hmac.new(
-        BYBIT_SECRET_KEY.encode("utf-8"),
-        param_str.encode("utf-8"),
-        hashlib.sha256
-    ).hexdigest()
-
-
-def HTTP_Request(endPoint: str, method: str, payload: str, Info: str):
-    time_stamp = str(int(time.time() * 1000))
-    headers = {
-        "X-BAPI-API-KEY":     BYBIT_API_KEY,
-        "X-BAPI-SIGN":        genSignature(payload, time_stamp),
-        "X-BAPI-SIGN-TYPE":   "2",
-        "X-BAPI-TIMESTAMP":   time_stamp,
-        "X-BAPI-RECV-WINDOW": _recv_window,
-        "Content-Type":       "application/json",
-    }
-    if method == "POST":
-        return _http_session.request(method, BYBIT_BASE_URL + endPoint,
-                                     headers=headers, data=payload).text
-    return _http_session.request(method, BYBIT_BASE_URL + endPoint + "?" + payload,
-                                 headers=headers).text
-
-
-# Fetch Bybit withdrawal info at startup (best-effort)
-btc_withdrawal = eth_withdrawal = usdt_withdrawal = None
-try:
-    HTTP_Request("/v5/account/info", "GET", "", "Info")
-    response_text = HTTP_Request(
-        "/v5/account/withdrawal", "GET", "coinName=BTC,ETH,USDT", "Withdrawal"
-    )
-    if response_text:
-        _data = json.loads(response_text)
-        if _data.get("retCode") == 0:
-            aw_map          = _data["result"]["availableWithdrawalMap"]
-            btc_withdrawal  = aw_map.get("BTC")
-            eth_withdrawal  = aw_map.get("ETH")
-            usdt_withdrawal = aw_map.get("USDT")
-except Exception as _e:
-    print(f"Bybit withdrawal info unavailable at startup: {_e}")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -175,7 +165,7 @@ logger.setLevel(logging.INFO)
 
 _console_h = logging.StreamHandler()
 _console_h.setLevel(logging.INFO)
-_file_h = logging.FileHandler("pyq_p3.log")
+_file_h = logging.FileHandler("pyq_p4.log")
 _file_h.setLevel(logging.DEBUG)
 _fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 _console_h.setFormatter(_fmt)
@@ -184,7 +174,7 @@ if not logger.handlers:
     logger.addHandler(_console_h)
     logger.addHandler(_file_h)
 
-logger.info("\nStarting PyQuant" + "-" * 80 + "\n")
+logger.info("\nStarting PyQuant p4" + "-" * 80 + "\n")
 
 # ── UKF model setup ───────────────────────────────────────────────────────────
 ukf_model = UKFModel(crypto_client, start_date)
@@ -203,7 +193,7 @@ eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models
 # ── Signal generator ──────────────────────────────────────────────────────────
 signal_generator = SignalGenerator()
 
-# ── PositionGuard — initialised here, no circular import ─────────────────────
+# ── PositionGuard ──────────────────────────────────────────────────────────────
 guard = PositionGuard(
     binance_client=binance_client,
     telegram_token=TELEGRAM_TOKEN,
@@ -251,32 +241,30 @@ btc_tracker = {
     "sig_gened": False, "ordered": False, "order_filled": False,
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
-    # Frozen balance snapshot taken at the moment the order is placed.
-    # Used by the 1-minute last-resort stop loss so the threshold can't
-    # drift as the account balance changes during the life of the trade.
+    # Frozen balance snapshot at order-placement time (unchanged from p3).
     "entry_balance": None,
+    # NEW — the dollar loss expected if THIS signal's own SL is hit, computed
+    # at signal-generation time from its actual (fixed or ATR-based) SL
+    # distance. Drives the dynamic last-resort check below instead of a
+    # fixed % of balance.
+    "expected_max_loss": None,
 }
 eth_tracker = {
     "sig_gened": False, "ordered": False, "order_filled": False,
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
     "entry_balance": None,
+    "expected_max_loss": None,
 }
 
-# ── Last-resort stop loss (checked every minute, NOT every hour) ─────────────
-# These percentages are applied against the FROZEN entry_balance captured the
-# moment the trade was opened — never against a freshly re-fetched "current"
-# balance. Using a live balance creates a circular reference: the trade's own
-# unrealized PnL (and any concurrent ETH/BTC position sharing the same cross-
-# margin pool) changes the account balance, which changes the very threshold
-# being used to decide whether to close that same trade. A losing trade can
-# shrink the live balance, which shrinks 5% of it, which makes the stop
-# trigger earlier than intended — and a winning concurrent trade can inflate
-# the live balance, loosening the stop on a position that's actually in
-# trouble. Freezing the denominator at entry removes that feedback loop.
-BTC_LAST_RESORT_SL_PCT = 0.125   # 12.5% of entry balance
-ETH_LAST_RESORT_SL_PCT = 0.10    # 10% of entry balance
-HARD_DOLLAR_SL_FLOOR   = -100   # absolute backstop regardless of balance size
+# ── Last-resort stop loss constants ──────────────────────────────────────────
+# CHANGED: no longer a fixed % of entry_balance (that was calibrated against
+# the old fixed $225/$16 SL and could fire before a wider ATR-based bracket
+# SL ever would). The multiplier below is applied to each trade's OWN
+# expected_max_loss (stored per-trade in the tracker), so the last-resort
+# always scales with whatever SL width was actually used this trade.
+LAST_RESORT_MULTIPLIER = 1.5
+HARD_DOLLAR_SL_FLOOR    = -0.20   # absolute backstop regardless of position size
 
 # ── Duplicate-run guards ──────────────────────────────────────────────────────
 LAST_RUN_FILE   = "last_execution_timestamp.txt"
@@ -350,31 +338,26 @@ def handle_api_response(response: dict, action_description: str):
     return None
 
 
-# ── open_tp_sl_position ───────────────────────────────────────────────────────
+# ── ATR fetch helper ──────────────────────────────────────────────────────────
 
-def open_tp_sl_position(tp_price, sl_price, symbol: str) -> bool:
-    """Sets TP/SL on a Bybit position using the module-level session."""
-    attempts, max_attempts = 0, 3
-    while attempts < max_attempts:
-        try:
-            response = session.set_trading_stop(
-                category="linear", symbol=symbol,
-                takeProfit=tp_price, stopLoss=sl_price,
-                tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice",
-                tpslMode="Full", tpOrderType="Market", slOrderType="Market",
-                positionIdx=0,
-            )
-            if response and response.get("retCode") == 0:
-                logger.info(f"TP/SL set for {symbol}: tp={tp_price}  sl={sl_price}")
-                return True
-            logger.warning(f"TP/SL set failed for {symbol}: {response}")
-        except Exception as e:
-            logger.error(f"open_tp_sl_position ({symbol}): {e}")
-        attempts += 1
-        logger.info(f"Retrying TP/SL ({attempts}/{max_attempts}) in 5s…")
-        time.sleep(5)
-    logger.error(f"Giving up TP/SL for {symbol} after {max_attempts} attempts.")
-    return False
+def get_live_atr(symbol_alpaca: str) -> float:
+    """
+    Fetches the last ATR_LOOKBACK_HOURS of hourly bars and computes ATR.
+    Returns 0.0 on any failure — SignalGenerator._calculate_sl_price falls
+    back to the fixed $225/$16 offset when atr=0.0, so a fetch failure
+    degrades to the old fixed-SL behaviour rather than blocking the signal
+    or leaving a trade without a stop loss.
+    """
+    try:
+        df = fetch_recent_bars(symbol_alpaca, hours=ATR_LOOKBACK_HOURS)
+        if df is None or len(df) < 2:
+            logger.warning(f"get_live_atr: insufficient bars for {symbol_alpaca} "
+                           f"— falling back to fixed SL offset.")
+            return 0.0
+        return compute_atr(df, period=ATR_PERIOD)
+    except Exception as e:
+        logger.error(f"get_live_atr ({symbol_alpaca}): {e}")
+        return 0.0
 
 
 # ── signal_executor ───────────────────────────────────────────────────────────
@@ -382,14 +365,11 @@ def open_tp_sl_position(tp_price, sl_price, symbol: str) -> bool:
 def signal_executor(signal: dict, trade_val: float):
     """
     Places a Binance Futures entry order from a signal dict.
-
-    Always returns a 3-tuple: (signal, response, ordered)
-      ordered = True on success, False on any failure.
+    Always returns a 3-tuple: (signal, response, ordered).
     """
     global ordered, signals
     response = None
 
-    # Set leverage
     try:
         binance_client.futures_change_leverage(symbol=signal["symbol"], leverage=LEVERAGE)
         logger.info(f"SignalExecutor: leverage={LEVERAGE}x for {signal['symbol']}")
@@ -408,9 +388,7 @@ def signal_executor(signal: dict, trade_val: float):
 
     logger.info(f"SignalExecutor: {symbol} {order_side} {order_type} @ {entry_price}")
 
-    # Quantity calculation
     try:
-        # FIX: futures_exchange_info() takes no symbol argument; filter afterwards
         exchange_info = binance_client.futures_exchange_info()
         symbol_info   = next(
             (s for s in exchange_info["symbols"] if s["symbol"] == symbol), None
@@ -437,7 +415,6 @@ def signal_executor(signal: dict, trade_val: float):
         ordered = False
         return signal, response, ordered
 
-    # Build order params
     order_params: dict = {
         "symbol": symbol, "side": order_side,
         "type": order_type, "quantity": quantity_str,
@@ -456,7 +433,6 @@ def signal_executor(signal: dict, trade_val: float):
         order_params["price"]       = entry_str
         order_params["timeInForce"] = "GTC"
 
-    # Place order
     try:
         logger.info(f"SignalExecutor: placing {order_type} for {symbol}…")
         response = binance_client.futures_create_order(**order_params)
@@ -471,7 +447,7 @@ def signal_executor(signal: dict, trade_val: float):
         return signal, response, ordered
 
 
-# ── price_tracker / order_editor ─────────────────────────────────────────────
+# ── price_tracker / order_editor (kept for compatibility, not in default flow) ─
 
 def price_tracker(signal, pred, high_pred, low_pred, price, the_symbol):
     """Detects entry drift and updates signal if price conditions shift."""
@@ -539,10 +515,7 @@ def order_editor(order_changes: dict):
 # ── position_manager ──────────────────────────────────────────────────────────
 
 def position_manager(symbol: str, data):
-    """
-    Checks open position against UKF trend/pct_diff.
-    Closes on reversal, loss limit, or if TP was already reached post-fill.
-    """
+    """Checks open position against UKF trend/pct_diff. Closes on reversal or loss limit."""
     global in_trade, signals, eth_tracker, btc_tracker
 
     logger.info(f"Starting Position Manager for {symbol}")
@@ -573,7 +546,6 @@ def position_manager(symbol: str, data):
                     close_futures_position(position_status)
                     logger.info(f"PM: closed {symbol} SELL on loss limit.")
 
-            # Post-fill TP alignment check
             sig = None
             if signals and symbol == signals[-1]["symbol"] and not signals[-1].get("checked"):
                 signals[-1]["checked"] = True
@@ -593,6 +565,69 @@ def position_manager(symbol: str, data):
         logger.error(f"position_manager ({symbol}): {e}")
 
 
+# ── Dynamic last-resort stop loss ────────────────────────────────────────────
+
+def last_resort_stop_loss_check(symbol: str, tracker: dict) -> bool:
+    """
+    Final safety net, checked every minute.
+
+    CHANGED from a fixed % of entry_balance to a DYNAMIC threshold:
+    1.5 x tracker['expected_max_loss'], where expected_max_loss is the
+    dollar loss THIS SPECIFIC TRADE would realize if its own SL price were
+    hit — computed at signal-generation time using its actual SL distance
+    (whether ATR-based or the fixed fallback).
+
+    Why this changed: the old fixed 12.5%/10%-of-balance thresholds were
+    calibrated against the old fixed $225 (BTC) / $16 (ETH) SL offsets. With
+    ATR-adaptive SL now potentially much wider during volatile periods, a
+    fixed balance percentage could be tighter in dollar terms than the
+    bracket SL itself — meaning this "last resort" would routinely fire
+    BEFORE the real bracket order ever would, turning a backstop into a
+    competing, premature exit. Scaling the threshold to each trade's own
+    expected_max_loss (with a 1.5x safety margin) guarantees this check
+    only fires as a genuine backstop for bracket-placement failures.
+
+    HARD_DOLLAR_SL_FLOOR remains as an absolute backstop for the case where
+    expected_max_loss wasn't stored (e.g. an untracked position picked up
+    from the exchange with no known signal history).
+    """
+    expected_max_loss = tracker.get("expected_max_loss")
+
+    try:
+        position_status = check_open_position(symbol=symbol)
+        if not position_status["is_open_position"]:
+            return False
+
+        upnl = position_status["unrealized_pnl"]
+        if upnl >= 0:
+            return False
+
+        dynamic_breach = (expected_max_loss is not None and expected_max_loss > 0
+                          and abs(upnl) >= LAST_RESORT_MULTIPLIER * expected_max_loss)
+        hard_breach = upnl <= HARD_DOLLAR_SL_FLOOR
+
+        if dynamic_breach or hard_breach:
+            reason = (
+                f"{LAST_RESORT_MULTIPLIER}x expected max loss (${expected_max_loss:.4f})"
+                if dynamic_breach else
+                f"hard dollar floor (${HARD_DOLLAR_SL_FLOOR:.2f})"
+            )
+            logger.warning(
+                f"🛑 Last-resort SL triggered for {symbol}: uPNL=${upnl:.4f} "
+                f"breached {reason}. Closing position."
+            )
+            close_futures_position(position_status)
+            guard.add_alert_to_queue(
+                f"🛑 Last-resort SL closed {symbol}  uPNL=${upnl:.4f}  ({reason})"
+            )
+            return True
+
+    except Exception as e:
+        logger.error(f"last_resort_stop_loss_check ({symbol}): {e}")
+
+    return False
+
+
 # ── hourly_task ───────────────────────────────────────────────────────────────
 
 def hourly_task():
@@ -600,20 +635,15 @@ def hourly_task():
         print(f"Hourly task already ran this hour. Skipping.")
         return
 
-    # FIX: Write the timestamp immediately so a second scheduler tick within
-    # the same hour (possible if the task takes < 1 s) is blocked by the guard
-    # even before the body completes.  Previously written at the end of the
-    # function, so a crash or slow run left the guard unset.
     update_last_run_timestamp()
 
     global ordered, sig_gened, order_changed, signal, my_signal, signals
     global eth_tracker, btc_tracker, position_closed
-    global btc_withdrawal, eth_withdrawal, wallet_balance, usdt_withdrawal
+    global wallet_balance
     global btc_ordered_signal, eth_ordered_signal
     global bo_declared, eo_declared, in_trade, double_order
     global btc_balance, eth_balance
 
-    # Reset cycle state
     sig_gened               = False
     signal_generator.sig_gened = False
     ordered                 = False
@@ -649,7 +679,6 @@ def hourly_task():
                 logger.error(f"Error getting balance: {e}")
                 time.sleep(2)
 
-        # Cancel stale open orders per symbol
         try:
             open_orders         = binance_client.futures_get_open_orders()
             symbols_with_orders = {o["symbol"] for o in open_orders}
@@ -666,18 +695,7 @@ def hourly_task():
     except Exception as e:
         logger.error(f"Balance routine error: {e}")
 
-    # Open position check
-    # NOTE: This used to close positions here based on `wallet_balance * pct`,
-    # checked once per hour. That has been removed for two reasons:
-    #   1. Once per hour is far too infrequent a check for a risk stop — a
-    #      position can move a long way against you in 59 minutes.
-    #   2. `wallet_balance` here is re-fetched live, which is a moving target
-    #      biased by the very trade(s) it's being used to evaluate (see the
-    #      comment above btc_tracker/eth_tracker for the full explanation).
-    # The actual last-resort stop loss now lives in one_minute_task, checked
-    # every 60 seconds, using the frozen entry_balance captured when the
-    # trade was opened. This section now only logs state and tracks whether
-    # a position is open — no closing decisions are made here.
+    # Secondary last-resort backstop (primary check is the 1-minute task)
     try:
         btc_pos = check_open_position(symbol="BTCUSDT")
         if btc_pos["is_open_position"]:
@@ -686,6 +704,11 @@ def hourly_task():
                 f"entry={btc_pos['entry_price']:.4f}  uPNL={btc_pos['unrealized_pnl']:.4f}"
             )
             in_trade = btc_tracker["in_trade"] = True
+            if btc_tracker["open_trade"]:
+                if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
+                    btc_tracker.update({"open_trade": False, "sl_hit": True,
+                                         "entry_balance": None, "expected_max_loss": None})
+                    in_trade = btc_tracker["in_trade"] = False
         else:
             in_trade = btc_tracker["in_trade"] = False
 
@@ -696,6 +719,11 @@ def hourly_task():
                 f"entry={eth_pos['entry_price']:.4f}  uPNL={eth_pos['unrealized_pnl']:.4f}"
             )
             in_trade = eth_tracker["in_trade"] = True
+            if eth_tracker["open_trade"]:
+                if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
+                    eth_tracker.update({"open_trade": False, "sl_hit": True,
+                                         "entry_balance": None, "expected_max_loss": None})
+                    in_trade = eth_tracker["in_trade"] = False
         else:
             in_trade = eth_tracker["in_trade"] = False
 
@@ -704,11 +732,34 @@ def hourly_task():
 
     position_closed = False
 
+    # Read the current atr_mult once per cycle (written daily by grid_search.py)
+    atr_mult = signal_generator.load_params().get("atr_mult", 1.8)
+
     # Signal generation
     logger.info("Starting Hourly Signal Services")
     try:
         for symbol in symbols_list:
+            trade_symbol = "BTCUSDT" if symbol in ("BTC/USD", "BTCUSDT") else "ETHUSDT"
             ukf_data = ukf_mapping.get(symbol)
+
+            # FIX (independent per-symbol trading, matching the walk-forward
+            # validation): a symbol that already has an open position is
+            # skipped for NEW signal generation this hour. This never blocks
+            # the OTHER symbol — BTC being open has no bearing on whether ETH
+            # can open its own new trade this cycle, and vice versa. Without
+            # this gate, a symbol could stack a second entry order on top of
+            # an already-open position.
+            already_open = check_open_position(symbol=trade_symbol)["is_open_position"]
+            if already_open:
+                logger.info(f"{symbol} already has an open position — "
+                            f"skipping new signal generation this hour.")
+                if symbol in ("BTC/USD", "BTCUSDT"):
+                    btc_signal = None
+                    btc_tracker.update({"sig_gened": False, "ordered": False})
+                else:
+                    eth_signal = None
+                    eth_tracker.update({"sig_gened": False, "ordered": False})
+                continue
 
             ddata = None
             while ddata is None:
@@ -727,7 +778,6 @@ def hourly_task():
 
             try:
                 position_manager(symbol, ddata)
-                # Hourly ETH TP threshold
                 if symbol in ("ETH/USD", "ETHUSDT"):
                     eth_ps = check_open_position(symbol="ETHUSDT")
                     if eth_ps["is_open_position"]:
@@ -743,6 +793,9 @@ def hourly_task():
             except Exception as e:
                 logger.error(f"position_manager / hourly threshold error: {e}")
 
+            # NEW — fetch live ATR for this symbol before generating the signal
+            atr_val = get_live_atr(symbol)
+
             if ukf_data:
                 try:
                     pred, high_pred, low_pred = UKFModel.ukf_handler(
@@ -750,7 +803,8 @@ def hourly_task():
                         ukf_data["ukf"], ukf_data["high_ukf"], ukf_data["low_ukf"]
                     )
                     my_signal = signal_generator.generate_signal(
-                        price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance
+                        price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance,
+                        atr=atr_val, atr_mult=atr_mult
                     )
                 except Exception as e:
                     print(f"Signal generation error for {symbol}: {e}")
@@ -796,7 +850,6 @@ def hourly_task():
             except Exception as e:
                 logger.error(f"ETH order execution error: {e}")
 
-            # FIX: eth_response is a dict, not requests.Response — log orderId not .text
             if eth_ordered:
                 logger.info(f"ETH order placed: id={eth_response.get('orderId') if eth_response else 'N/A'}")
             else:
@@ -806,9 +859,11 @@ def hourly_task():
             signal_generator.sig_gened = True
             ordered = True
             eth_tracker.update({"sig_gened": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance})
+                                 "entry_balance": wallet_balance,
+                                 "expected_max_loss": eth_signal.get("expected_max_loss")})
             btc_tracker.update({"sig_gened": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance})
+                                 "entry_balance": wallet_balance,
+                                 "expected_max_loss": btc_signal.get("expected_max_loss")})
 
         elif btc_tracker["sig_gened"] and not eth_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
@@ -819,7 +874,6 @@ def hourly_task():
             except Exception as e:
                 logger.error(f"BTC guard start error: {e}")
 
-            # FIX: dict logging
             logger.info(f"BTC signal: {btc_ordered_signal}")
             logger.info(f"BTC order: id={btc_response.get('orderId') if btc_response else 'N/A'}")
 
@@ -828,7 +882,8 @@ def hourly_task():
             ordered      = True
             double_order = False
             btc_tracker.update({"ordered": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance})
+                                 "entry_balance": wallet_balance,
+                                 "expected_max_loss": btc_signal.get("expected_max_loss")})
             eth_tracker["sig_gened"] = False
 
         elif eth_tracker["sig_gened"] and not btc_tracker["sig_gened"]:
@@ -840,7 +895,6 @@ def hourly_task():
             except Exception as e:
                 logger.error(f"ETH guard start error: {e}")
 
-            # FIX: dict logging
             logger.info(f"ETH signal: {eth_ordered_signal}")
             logger.info(f"ETH order: id={eth_response.get('orderId') if eth_response else 'N/A'}")
 
@@ -850,7 +904,8 @@ def hourly_task():
             double_order = False
             eth_tracker.update({"sig_gened": True, "ordered": True,
                                  "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance})
+                                 "entry_balance": wallet_balance,
+                                 "expected_max_loss": eth_signal.get("expected_max_loss")})
             btc_tracker["sig_gened"] = False
 
         else:
@@ -952,81 +1007,13 @@ def five_minute_task():
 
 # ── one_minute_task ───────────────────────────────────────────────────────────
 
-# ── Last-resort stop loss ──────────────────────────────────────────────────
-
-def last_resort_stop_loss_check(symbol: str, tracker: dict, pct: float) -> bool:
-    """
-    Final safety net, checked every minute.
-
-    Closes the position if unrealized loss exceeds `pct` of the FROZEN
-    entry_balance captured when the trade was opened, or breaches the
-    fixed-dollar HARD_DOLLAR_SL_FLOOR — whichever is hit first.
-
-    Deliberately does NOT call get_equities() / re-fetch wallet_balance.
-    The only live value used is unrealized_pnl from check_open_position(),
-    which reflects price movement only. The denominator (entry_balance) is
-    fixed, so the threshold cannot drift due to:
-      - this trade's own uPNL feeding back into the balance used to judge it
-      - a concurrent BTC/ETH position changing the shared cross-margin balance
-      - balance growing/shrinking from unrelated deposits or withdrawals
-        mid-trade
-
-    Returns True if the position was closed.
-    """
-    entry_balance = tracker.get("entry_balance")
-    if not entry_balance or entry_balance <= 0:
-        # No frozen reference available (e.g. position opened before this
-        # tracker field existed, or untracked position picked up by the
-        # 1-minute task). Fall back to the fixed-dollar floor only.
-        entry_balance = None
-
-    try:
-        position_status = check_open_position(symbol=symbol)
-        if not position_status["is_open_position"]:
-            return False
-
-        upnl = position_status["unrealized_pnl"]
-        if upnl >= 0:
-            return False   # only acts on losses — TP path is handled elsewhere
-
-        pct_breach  = entry_balance is not None and abs(upnl) >= entry_balance * pct
-        hard_breach = upnl <= HARD_DOLLAR_SL_FLOOR
-
-        if pct_breach or hard_breach:
-            reason = (
-                f"{pct*100:.1f}% of frozen entry_balance (${entry_balance:.2f})"
-                if pct_breach else
-                f"hard dollar floor (${HARD_DOLLAR_SL_FLOOR:.2f})"
-            )
-            logger.warning(
-                f"🛑 Last-resort SL triggered for {symbol}: uPNL=${upnl:.4f} "
-                f"breached {reason}. Closing position."
-            )
-            close_futures_position(position_status)
-            guard.add_alert_to_queue(
-                f"🛑 Last-resort SL closed {symbol}  uPNL=${upnl:.4f}  ({reason})"
-            )
-            return True
-
-    except Exception as e:
-        logger.error(f"last_resort_stop_loss_check ({symbol}): {e}")
-
-    return False
-
-
 def one_minute_task():
     if has_function_run_this_minute():
         print(f"1-minute task already ran this minute. Skipping.")
         return
 
-    # FIX: Write timestamp immediately — if the scheduler fires a second time
-    # within the same minute (seen in logs at :17 and :18 of the same minute),
-    # the guard file is already written and the second call exits instantly.
-    # Previously at the very end of the function, so any mid-task exception
-    # left the guard unset and allowed the double-fire.
     update_minute_run_timestamp()
 
-    global usdt_withdrawal, btc_withdrawal, eth_withdrawal
     global btc_ordered_signal, double_order, ordered, eth_ordered_signal
     global btc_tracker, eth_tracker
     global btc_balance, eth_balance, wallet_balance
@@ -1063,16 +1050,21 @@ def one_minute_task():
                     btc_position = True
                     btc_tracker["open_trade"] = True
                     if not btc_tracker.get("entry_balance"):
-                        # No frozen reference exists for this untracked position
-                        # (opened outside PyQuant or before a restart). Use the
-                        # current balance as the best available approximation —
-                        # this is a one-time fallback, not a recurring re-fetch.
                         btc_tracker["entry_balance"] = wallet_balance
+                    if not btc_tracker.get("expected_max_loss"):
+                        # No signal history for this untracked position — fall
+                        # back to the hard dollar floor only (dynamic_breach
+                        # in last_resort_stop_loss_check requires a positive
+                        # expected_max_loss, so leaving this None is safe and
+                        # simply skips straight to the hard floor check).
+                        btc_tracker["expected_max_loss"] = None
                 if eth_position_status["is_open_position"] and not eth_position:
                     eth_position = True
                     eth_tracker["open_trade"] = True
                     if not eth_tracker.get("entry_balance"):
                         eth_tracker["entry_balance"] = wallet_balance
+                    if not eth_tracker.get("expected_max_loss"):
+                        eth_tracker["expected_max_loss"] = None
             except Exception as e:
                 print(f"Equity fetch error (untracked 1m): {e}")
         else:
@@ -1133,30 +1125,25 @@ def one_minute_task():
                                 )
                                 del guard.monitored_orders[order_id]
                                 guard.save_to_json()
-                                # Clear frozen entry_balance + open flags so the
-                                # last-resort SL check below doesn't act on a
-                                # position that's already closed.
                                 if order_info["symbol"] == "BTCUSDT":
                                     btc_tracker.update({"open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None,
+                                                         "expected_max_loss": None})
                                 elif order_info["symbol"] == "ETHUSDT":
                                     eth_tracker.update({"open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None,
+                                                         "expected_max_loss": None})
 
-            # Last-resort PnL-based stop loss — checked every minute using the
-            # frozen entry_balance, independent of the price-based TP/SL above.
-            # This catches cases where bracket orders failed to place, the
-            # virtual TP/SL above missed the candle, or slippage pushed the
-            # fill far enough that the price-based exit logic didn't fire.
+            # Dynamic last-resort PnL-based stop loss (see docstring above)
             if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
-                if last_resort_stop_loss_check("BTCUSDT", btc_tracker, BTC_LAST_RESORT_SL_PCT):
+                if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
                     btc_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None})
+                                         "entry_balance": None, "expected_max_loss": None})
 
             if i in ("ETH/USD", "ETHUSDT") and eth_tracker["open_trade"]:
-                if last_resort_stop_loss_check("ETHUSDT", eth_tracker, ETH_LAST_RESORT_SL_PCT):
+                if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
                     eth_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None})
+                                         "entry_balance": None, "expected_max_loss": None})
 
             # BTC manual tracker
             if i in ("BTC/USD", "BTCUSDT"):
@@ -1184,24 +1171,20 @@ def one_minute_task():
                             if bo_signal["order_side"] == "Buy":
                                 if hhigh >= bo_signal["tp_price"]:
                                     btc_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= bo_signal["sl_price"]:
                                     btc_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif bo_signal["order_side"] == "Sell":
                                 if llow <= bo_signal["tp_price"]:
                                     btc_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= bo_signal["sl_price"]:
-                                    # FIX: was "open_trade": True — left the trade marked
-                                    # open forever after a SELL-side SL hit, which meant
-                                    # the manual tracker never stopped monitoring a
-                                    # position that had already been closed.
                                     btc_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("BTC order tracking: unknown order_side.")
@@ -1239,20 +1222,20 @@ def one_minute_task():
                             if eo_signal["order_side"] == "Buy":
                                 if hhigh >= eo_signal["tp_price"]:
                                     eth_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= eo_signal["sl_price"]:
                                     eth_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif eo_signal["order_side"] == "Sell":
                                 if llow <= eo_signal["tp_price"]:
                                     eth_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= eo_signal["sl_price"]:
                                     eth_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None})
+                                                         "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("ETH order tracking: unknown order_side.")
