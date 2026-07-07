@@ -99,7 +99,7 @@ from sklearn.metrics import (
     mean_absolute_error, r2_score
 )
 
-from pyquant_utils import (
+from p4_utils import (
     UKFModel, get_equities, SignalGenerator, PositionGuard,
     data_download, aggregate_ohlcv_data,
     check_open_position, close_futures_position,
@@ -107,7 +107,7 @@ from pyquant_utils import (
     # Shared clients — created once in pyquant_utils with retry logic.
     # NOTE: the Bybit `session` client is intentionally NOT imported here —
     # TP/SL management is fully handled by Binance's Algo Order API via
-    # PositionGuard (see pyquant_utils.py), so nothing in this file needs it.
+    # PositionGuard (see p4_utils.py), so nothing in this file needs it.
     binance_client, crypto_client, _binance_lock,
 )
 
@@ -139,9 +139,9 @@ TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading constant ──────────────────────────────────────────────────────────
-# CHANGED from 50 to 10 — matches the validated walk-forward backtest exactly.
+# CHANGED from 50 to 15 — matches the validated walk-forward backtest exactly.
 # Every SL/last-resort threshold in this file assumes this value.
-LEVERAGE = 10
+LEVERAGE = 15
 
 # ATR configuration — must match pyquant_walkforward_v4.py / grid_search.py
 ATR_LOOKBACK_HOURS = 20   # bars fetched; only need 15 for a 14-period ATR,
