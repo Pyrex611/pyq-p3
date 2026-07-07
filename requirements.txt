@@ -1,15 +1,49 @@
-numpy
-pandas
-scikit-learn
-matplotlib
-filterpy
-nest-asyncio
-schedule
-requests
-websocket-client
-python-dotenv
-alpaca-trade-api
-alpaca-py
-pybit
-python-binance
-python-telegram-bot
+# ============================================================
+# PyQuant — Python Dependencies
+# Install with: pip install -r requirements.txt
+# Requires Python >= 3.11
+# ============================================================
+
+# ── Core numerical / data ─────────────────────────────────────
+numpy>=1.26.0
+pandas>=2.1.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+
+# ── Kalman Filter ─────────────────────────────────────────────
+filterpy>=1.4.5
+
+# ── Bayesian parameter optimization (grid_search.py) ──────────
+# Replaces the old blind grid search — falls back automatically to a
+# grid-based search if this package is missing, but installing it is
+# strongly recommended: ~150 trials vs 2,744 combinations, same or
+# better parameter quality, ~85% faster daily optimizer runtime.
+optuna>=4.0.0
+
+# ── Async / scheduling ────────────────────────────────────────
+nest-asyncio>=1.6.0
+schedule>=1.2.1
+
+# ── HTTP / networking ─────────────────────────────────────────
+requests>=2.31.0
+websocket-client>=1.7.0
+
+# ── Environment / config ──────────────────────────────────────
+python-dotenv>=1.0.1
+
+# ── Alpaca (market data — two packages, both required) ────────
+# alpaca-trade-api  →  provides alpaca_trade_api (REST, Stream)
+# alpaca-py         →  provides alpaca.trading, alpaca.data, alpaca.data.live
+alpaca-trade-api>=3.0.2
+alpaca-py>=0.20.0
+
+# ── Bybit ─────────────────────────────────────────────────────
+pybit>=5.7.0
+
+# ── Binance Futures ───────────────────────────────────────────
+python-binance>=1.0.19
+
+# ── Telegram bot notifications ────────────────────────────────
+# v20+ uses the async Application builder used in PositionGuard
+python-telegram-bot>=20.8
+
