@@ -8102,3 +8102,167 @@ Starting PyQuant----------------------------------------------------------------
 2026-07-02 14:32:03,628 - INFO - Order 8389766223829155257 status: NEW. Waiting…
 2026-07-02 14:32:33,883 - INFO - Order 8389766223829155257 status: NEW. Waiting…
 2026-07-02 14:32:34,028 - INFO - Order 8389766223829155257 status: NEW. Waiting…
+2026-07-02 14:33:04,284 - INFO - Order 8389766223829155257 status: NEW. Waiting…
+2026-07-07 18:34:02,298 - INFO - 
+Starting PyQuant--------------------------------------------------------------------------------
+
+2026-07-07 18:34:47,490 - INFO - [PositionGuard] Binance position mode: One-way Mode
+2026-07-07 18:34:47,492 - INFO - PositionGuard scheduler started.
+2026-07-07 18:34:47,895 - INFO - Telegram: 🔔 PositionGuard scheduler ONLINE.
+2026-07-07 18:35:18,556 - INFO - Telegram: ❌ Order 8389766223829155257 failed: CANCELED.
+2026-07-07 18:35:18,814 - INFO - Telegram: ❌ Order 8389766223829155257 failed: CANCELED.
+2026-07-07 19:00:00,233 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-07 19:00:00,464 - INFO - Cancelled all stale open orders.
+2026-07-07 19:00:00,464 - WARNING - Balance unavailable – using default $3.
+2026-07-07 19:00:03,511 - INFO - Starting Hourly Signal Services
+2026-07-07 19:00:03,628 - INFO - Starting Position Manager for ETH/USD
+2026-07-07 19:00:09,172 - INFO - Starting Position Manager for BTC/USD
+2026-07-07 19:00:09,661 - INFO - No signal from either coin this hour.
+2026-07-07 20:00:01,972 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-07 20:00:02,968 - INFO - Cancelled all stale open orders.
+2026-07-07 20:00:02,968 - WARNING - Balance unavailable – using default $3.
+2026-07-07 20:00:05,392 - INFO - Starting Hourly Signal Services
+2026-07-07 20:00:05,505 - INFO - Starting Position Manager for ETH/USD
+2026-07-07 20:00:06,835 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1791.35), 'order_side': 'Sell', 'tp_price': np.float64(1784.5), 'sl_price': np.float64(1807.35), 'trigger_price': np.float64(1792.49), 'orderLinkId': None, 'current_price': np.float64(1789.233), 'checked': False, 'current_bal': 3.0}
+2026-07-07 20:00:07,124 - INFO - Starting Position Manager for BTC/USD
+2026-07-07 20:00:07,798 - INFO - SignalExecutor: leverage=20x for ETHUSDT
+2026-07-07 20:00:07,799 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1791.35
+2026-07-07 20:00:08,050 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-07 20:00:08,277 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-07 20:00:08,279 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1791.35), 'order_side': 'Sell', 'tp_price': np.float64(1784.5), 'sl_price': np.float64(1807.35), 'trigger_price': np.float64(1792.49), 'orderLinkId': None, 'current_price': np.float64(1789.233), 'checked': False, 'current_bal': 3.0, 'qty': '0.026'}
+2026-07-07 20:00:08,279 - INFO - ETH order: id=N/A
+2026-07-07 21:00:00,777 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-07 21:00:01,084 - INFO - Cancelled all stale open orders.
+2026-07-07 21:00:01,084 - WARNING - Balance unavailable – using default $3.
+2026-07-07 21:00:02,035 - INFO - Starting Hourly Signal Services
+2026-07-07 21:00:02,139 - INFO - Starting Position Manager for ETH/USD
+2026-07-07 21:00:03,155 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1785.06), 'order_side': 'Sell', 'tp_price': np.float64(1778.38), 'sl_price': np.float64(1801.06), 'trigger_price': np.float64(1786.17), 'orderLinkId': None, 'current_price': np.float64(1782.3645), 'checked': False, 'current_bal': 3.0}
+2026-07-07 21:00:03,269 - INFO - Starting Position Manager for BTC/USD
+2026-07-07 21:00:04,017 - INFO - SignalExecutor: leverage=20x for ETHUSDT
+2026-07-07 21:00:04,017 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1785.06
+2026-07-07 21:00:04,276 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-07 21:00:04,497 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-07 21:00:04,499 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1785.06), 'order_side': 'Sell', 'tp_price': np.float64(1778.38), 'sl_price': np.float64(1801.06), 'trigger_price': np.float64(1786.17), 'orderLinkId': None, 'current_price': np.float64(1782.3645), 'checked': False, 'current_bal': 3.0, 'qty': '0.026'}
+2026-07-07 21:00:04,499 - INFO - ETH order: id=N/A
+2026-07-07 21:01:46,886 - INFO - ETH/USD SELL limit filled. Price:1785.815
+2026-07-07 21:18:29,884 - INFO - ETH/USD TP hit. Price:1777.1535  PNL:3.0
+2026-07-07 22:00:01,093 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-07 22:00:02,276 - INFO - Cancelled all stale open orders.
+2026-07-07 22:00:02,276 - WARNING - Balance unavailable – using default $3.
+2026-07-07 22:00:03,341 - INFO - Starting Hourly Signal Services
+2026-07-07 22:00:03,434 - INFO - Starting Position Manager for ETH/USD
+2026-07-07 22:00:05,231 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1782.68), 'order_side': 'Sell', 'tp_price': np.float64(1768.19), 'sl_price': np.float64(1798.68), 'trigger_price': np.float64(1785.09), 'orderLinkId': None, 'current_price': np.float64(1773.06), 'checked': False, 'current_bal': 3.0}
+2026-07-07 22:00:05,363 - INFO - Starting Position Manager for BTC/USD
+2026-07-07 22:00:07,720 - INFO - SignalExecutor: leverage=20x for ETHUSDT
+2026-07-07 22:00:07,720 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1782.68
+2026-07-07 22:00:07,973 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-07 22:00:08,199 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-07 22:00:08,201 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1782.68), 'order_side': 'Sell', 'tp_price': np.float64(1768.19), 'sl_price': np.float64(1798.68), 'trigger_price': np.float64(1785.09), 'orderLinkId': None, 'current_price': np.float64(1773.06), 'checked': False, 'current_bal': 3.0, 'qty': '0.026'}
+2026-07-07 22:00:08,201 - INFO - ETH order: id=N/A
+2026-07-07 23:00:00,358 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-07 23:00:00,592 - INFO - Cancelled all stale open orders.
+2026-07-07 23:00:00,592 - WARNING - Balance unavailable – using default $3.
+2026-07-07 23:00:02,925 - INFO - Starting Hourly Signal Services
+2026-07-07 23:00:03,034 - INFO - Starting Position Manager for ETH/USD
+2026-07-07 23:00:04,955 - INFO - Starting Position Manager for BTC/USD
+2026-07-07 23:00:05,406 - INFO - No signal from either coin this hour.
+2026-07-08 00:00:00,994 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:03,008 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 00:00:03,093 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:03,306 - INFO - Cancelled all stale open orders.
+2026-07-08 00:00:03,306 - WARNING - Balance unavailable – using default $3.
+2026-07-08 00:00:04,235 - INFO - Starting Hourly Signal Services
+2026-07-08 00:00:05,180 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:07,268 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:09,359 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:11,445 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:13,558 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:15,668 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:17,762 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:19,852 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:21,939 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:24,026 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:26,111 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:28,219 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:30,307 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:32,395 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:34,481 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:36,569 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:38,662 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:40,753 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:42,842 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:44,926 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:47,031 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:49,137 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:51,242 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:53,333 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:55,436 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:57,535 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:00:59,625 - ERROR - aggregate_ohlcv_data: no standard OHLCV columns found.
+2026-07-08 00:01:00,835 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 00:01:01,992 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 00:01:02,457 - INFO - No signal from either coin this hour.
+2026-07-08 02:08:34,378 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 02:08:34,618 - INFO - Cancelled all stale open orders.
+2026-07-08 02:08:34,619 - WARNING - Balance unavailable – using default $3.
+2026-07-08 02:08:35,528 - INFO - Starting Hourly Signal Services
+2026-07-08 02:08:35,629 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 02:08:36,668 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 02:08:37,143 - INFO - No signal from either coin this hour.
+2026-07-08 03:00:00,271 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 03:00:00,504 - INFO - Cancelled all stale open orders.
+2026-07-08 03:00:00,504 - WARNING - Balance unavailable – using default $3.
+2026-07-08 03:00:08,933 - INFO - Starting Hourly Signal Services
+2026-07-08 03:00:09,024 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 03:00:10,007 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 03:00:10,456 - INFO - No signal from either coin this hour.
+2026-07-08 04:00:00,400 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 04:00:00,718 - INFO - Cancelled all stale open orders.
+2026-07-08 04:00:00,718 - WARNING - Balance unavailable – using default $3.
+2026-07-08 04:00:02,903 - INFO - Starting Hourly Signal Services
+2026-07-08 04:00:02,996 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 04:00:04,034 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1756.24), 'order_side': 'Sell', 'tp_price': np.float64(1744.99), 'sl_price': np.float64(1772.24), 'trigger_price': np.float64(1758.11), 'orderLinkId': None, 'current_price': np.float64(1750.355), 'checked': False, 'current_bal': 3.0}
+2026-07-08 04:00:04,122 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 04:00:05,421 - INFO - SignalExecutor: leverage=20x for ETHUSDT
+2026-07-08 04:00:05,422 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1756.24
+2026-07-08 04:00:05,671 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-08 04:00:05,893 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-08 04:00:05,895 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1756.24), 'order_side': 'Sell', 'tp_price': np.float64(1744.99), 'sl_price': np.float64(1772.24), 'trigger_price': np.float64(1758.11), 'orderLinkId': None, 'current_price': np.float64(1750.355), 'checked': False, 'current_bal': 3.0, 'qty': '0.027'}
+2026-07-08 04:00:05,895 - INFO - ETH order: id=N/A
+2026-07-08 04:24:34,690 - INFO - ETH/USD SELL limit filled. Price:1756.305
+2026-07-08 05:00:00,467 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 05:00:00,789 - INFO - Cancelled all stale open orders.
+2026-07-08 05:00:00,789 - WARNING - Balance unavailable – using default $3.
+2026-07-08 05:00:11,995 - ERROR - get_equities: HTTPSConnectionPool(host='fapi.binance.com', port=443): Read timed out. (read timeout=10)
+2026-07-08 05:00:12,448 - INFO - Starting Hourly Signal Services
+2026-07-08 05:00:12,542 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 05:00:13,568 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 05:00:14,449 - INFO - BTC/USD signal: {'symbol': 'BTCUSDT', 'order_type': 'Limit', 'entry_price': np.float64(62761.0), 'order_side': 'Sell', 'tp_price': np.float64(62599.0), 'sl_price': np.float64(62986.0), 'trigger_price': np.float64(62788.0), 'orderLinkId': None, 'current_price': np.float64(62747.3525), 'checked': False, 'current_bal': 3.0}
+2026-07-08 05:00:14,682 - INFO - SignalExecutor: leverage=20x for BTCUSDT
+2026-07-08 05:00:14,682 - INFO - SignalExecutor: BTCUSDT SELL LIMIT @ 62761.0
+2026-07-08 05:00:15,145 - INFO - SignalExecutor: placing LIMIT for BTCUSDT…
+2026-07-08 05:00:15,367 - ERROR - SignalExecutor: order placement failed for BTCUSDT: APIError(code=-4003): Quantity less than or equal to zero.
+2026-07-08 05:00:15,369 - INFO - BTC signal: {'symbol': 'BTCUSDT', 'order_type': 'Limit', 'entry_price': np.float64(62761.0), 'order_side': 'Sell', 'tp_price': np.float64(62599.0), 'sl_price': np.float64(62986.0), 'trigger_price': np.float64(62788.0), 'orderLinkId': None, 'current_price': np.float64(62747.3525), 'checked': False, 'current_bal': 3.0, 'qty': '0.000'}
+2026-07-08 05:00:15,370 - INFO - BTC order: id=N/A
+2026-07-08 05:01:02,056 - INFO - BTC/USD SELL limit filled. Price:62765.3
+2026-07-08 05:40:53,108 - INFO - BTC/USD TP hit. Price:62599.895  PNL:3.0
+2026-07-08 06:00:00,419 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 06:00:00,730 - INFO - Cancelled all stale open orders.
+2026-07-08 06:00:00,730 - WARNING - Balance unavailable – using default $3.
+2026-07-08 06:00:06,106 - INFO - Starting Hourly Signal Services
+2026-07-08 06:00:06,209 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 06:00:09,513 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 06:00:12,675 - INFO - BTC/USD signal: {'symbol': 'BTCUSDT', 'order_type': 'Limit', 'entry_price': np.float64(62725.0), 'order_side': 'Sell', 'tp_price': np.float64(62495.0), 'sl_price': np.float64(62950.0), 'trigger_price': np.float64(62763.0), 'orderLinkId': None, 'current_price': np.float64(62597.7025), 'checked': False, 'current_bal': 3.0}
+2026-07-08 06:00:12,894 - INFO - SignalExecutor: leverage=20x for BTCUSDT
+2026-07-08 06:00:12,894 - INFO - SignalExecutor: BTCUSDT SELL LIMIT @ 62725.0
+2026-07-08 06:00:13,626 - INFO - SignalExecutor: placing LIMIT for BTCUSDT…
+2026-07-08 06:00:13,844 - ERROR - SignalExecutor: order placement failed for BTCUSDT: APIError(code=-4003): Quantity less than or equal to zero.
+2026-07-08 06:00:13,846 - INFO - BTC signal: {'symbol': 'BTCUSDT', 'order_type': 'Limit', 'entry_price': np.float64(62725.0), 'order_side': 'Sell', 'tp_price': np.float64(62495.0), 'sl_price': np.float64(62950.0), 'trigger_price': np.float64(62763.0), 'orderLinkId': None, 'current_price': np.float64(62597.7025), 'checked': False, 'current_bal': 3.0, 'qty': '0.000'}
+2026-07-08 06:00:13,846 - INFO - BTC order: id=N/A
+2026-07-08 07:00:00,249 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-08 07:00:00,482 - INFO - Cancelled all stale open orders.
+2026-07-08 07:00:00,482 - WARNING - Balance unavailable – using default $3.
+2026-07-08 07:00:03,446 - INFO - Starting Hourly Signal Services
+2026-07-08 07:00:03,557 - INFO - Starting Position Manager for ETH/USD
+2026-07-08 07:00:04,646 - INFO - Starting Position Manager for BTC/USD
+2026-07-08 07:00:05,129 - INFO - No signal from either coin this hour.
