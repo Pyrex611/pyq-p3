@@ -11,6 +11,7 @@ CRITICAL API NOTE (2025-12-09):
   Cancel:       DELETE /fapi/v1/algoOrder with algoId
   All bracket order placement in this file uses the new endpoint exclusively.
 """
+from __future__ import annotations
 
 import os, json, math, time, logging, hashlib, hmac, threading, traceback
 from datetime import datetime, timedelta, timezone
