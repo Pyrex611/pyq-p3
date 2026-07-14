@@ -8266,3 +8266,7 @@ Starting PyQuant----------------------------------------------------------------
 2026-07-08 07:00:03,557 - INFO - Starting Position Manager for ETH/USD
 2026-07-08 07:00:04,646 - INFO - Starting Position Manager for BTC/USD
 2026-07-08 07:00:05,129 - INFO - No signal from either coin this hour.
+2026-07-08 07:29:48,339 - INFO - [PositionGuard] Mode confirmed (attempt 1): ONE-WAY
+2026-07-08 07:29:48,342 - INFO - PositionGuard scheduler started (private scheduler instance).
+2026-07-08 07:31:16,657 - INFO - [PositionGuard] Mode confirmed (attempt 1): ONE-WAY
+2026-07-08 07:31:16,660 - INFO - PositionGuard scheduler started (private scheduler instance).
