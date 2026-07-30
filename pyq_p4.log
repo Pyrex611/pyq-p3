@@ -3259,3 +3259,660 @@ Starting PyQuant p4-------------------------------------------------------------
 2026-07-27 04:02:02,638 - INFO - Starting Position Manager for ETH/USD
 2026-07-27 04:02:04,181 - INFO - Starting Position Manager for BTC/USD
 2026-07-27 04:02:04,726 - INFO - No signal from either coin this hour.
+2026-07-27 05:02:00,309 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 05:02:00,532 - INFO - Cancelled all stale open orders.
+2026-07-27 05:02:00,533 - WARNING - Balance unavailable – using default $3.
+2026-07-27 05:02:01,446 - INFO - Starting Hourly Signal Services
+2026-07-27 05:02:01,989 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 05:02:03,528 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 05:02:04,081 - INFO - No signal from either coin this hour.
+2026-07-27 06:02:00,710 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 06:02:00,928 - INFO - Cancelled all stale open orders.
+2026-07-27 06:02:00,928 - WARNING - Balance unavailable – using default $3.
+2026-07-27 06:02:01,848 - INFO - Starting Hourly Signal Services
+2026-07-27 06:02:02,391 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 06:02:03,945 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 06:02:04,497 - INFO - No signal from either coin this hour.
+2026-07-27 07:02:00,845 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 07:02:01,064 - INFO - Cancelled all stale open orders.
+2026-07-27 07:02:01,064 - WARNING - Balance unavailable – using default $3.
+2026-07-27 07:02:01,981 - INFO - Starting Hourly Signal Services
+2026-07-27 07:02:02,529 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 07:02:04,069 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 07:02:04,615 - INFO - No signal from either coin this hour.
+2026-07-27 08:02:00,927 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 08:02:01,151 - INFO - Cancelled all stale open orders.
+2026-07-27 08:02:01,152 - WARNING - Balance unavailable – using default $3.
+2026-07-27 08:02:02,057 - INFO - Starting Hourly Signal Services
+2026-07-27 08:02:02,672 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 08:02:04,304 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 08:02:04,870 - INFO - No signal from either coin this hour.
+2026-07-27 09:02:00,877 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 09:02:01,101 - INFO - Cancelled all stale open orders.
+2026-07-27 09:02:01,102 - WARNING - Balance unavailable – using default $3.
+2026-07-27 09:02:02,018 - INFO - Starting Hourly Signal Services
+2026-07-27 09:02:02,570 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 09:02:04,114 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 09:02:04,666 - INFO - No signal from either coin this hour.
+2026-07-27 10:02:00,867 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 10:02:01,087 - INFO - Cancelled all stale open orders.
+2026-07-27 10:02:01,087 - WARNING - Balance unavailable – using default $3.
+2026-07-27 10:02:01,991 - INFO - Starting Hourly Signal Services
+2026-07-27 10:02:02,534 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 10:02:04,299 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 10:02:04,855 - INFO - No signal from either coin this hour.
+2026-07-27 11:02:00,606 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 11:02:00,827 - INFO - Cancelled all stale open orders.
+2026-07-27 11:02:00,828 - WARNING - Balance unavailable – using default $3.
+2026-07-27 11:02:01,733 - INFO - Starting Hourly Signal Services
+2026-07-27 11:02:02,281 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 11:02:04,252 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 11:02:04,807 - INFO - No signal from either coin this hour.
+2026-07-27 12:02:03,407 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 12:02:03,639 - INFO - Cancelled all stale open orders.
+2026-07-27 12:02:03,639 - WARNING - Balance unavailable – using default $3.
+2026-07-27 12:02:04,551 - INFO - Starting Hourly Signal Services
+2026-07-27 12:02:05,091 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 12:02:06,624 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 12:02:07,178 - INFO - No signal from either coin this hour.
+2026-07-27 13:02:00,980 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 13:02:01,203 - INFO - Cancelled all stale open orders.
+2026-07-27 13:02:01,204 - WARNING - Balance unavailable – using default $3.
+2026-07-27 13:02:02,110 - INFO - Starting Hourly Signal Services
+2026-07-27 13:02:02,664 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 13:02:05,095 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 13:02:05,639 - INFO - No signal from either coin this hour.
+2026-07-27 14:02:00,804 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 14:02:01,024 - INFO - Cancelled all stale open orders.
+2026-07-27 14:02:01,025 - WARNING - Balance unavailable – using default $3.
+2026-07-27 14:02:01,937 - INFO - Starting Hourly Signal Services
+2026-07-27 14:02:02,515 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 14:02:04,516 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 14:02:05,482 - INFO - No signal from either coin this hour.
+2026-07-27 15:02:00,695 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 15:02:00,921 - INFO - Cancelled all stale open orders.
+2026-07-27 15:02:00,921 - WARNING - Balance unavailable – using default $3.
+2026-07-27 15:02:01,834 - INFO - Starting Hourly Signal Services
+2026-07-27 15:02:02,414 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 15:02:04,026 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 15:02:04,602 - INFO - No signal from either coin this hour.
+2026-07-27 16:02:00,455 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 16:02:00,679 - INFO - Cancelled all stale open orders.
+2026-07-27 16:02:00,679 - WARNING - Balance unavailable – using default $3.
+2026-07-27 16:02:01,572 - INFO - Starting Hourly Signal Services
+2026-07-27 16:02:02,126 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 16:02:03,676 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 16:02:04,255 - INFO - No signal from either coin this hour.
+2026-07-27 17:02:00,594 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 17:02:00,825 - INFO - Cancelled all stale open orders.
+2026-07-27 17:02:00,825 - WARNING - Balance unavailable – using default $3.
+2026-07-27 17:02:01,773 - INFO - Starting Hourly Signal Services
+2026-07-27 17:02:02,329 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 17:02:03,921 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 17:02:04,472 - INFO - No signal from either coin this hour.
+2026-07-27 18:02:00,959 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 18:02:01,185 - INFO - Cancelled all stale open orders.
+2026-07-27 18:02:01,185 - WARNING - Balance unavailable – using default $3.
+2026-07-27 18:02:02,097 - INFO - Starting Hourly Signal Services
+2026-07-27 18:02:02,773 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 18:02:04,551 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 18:02:05,195 - INFO - No signal from either coin this hour.
+2026-07-27 19:02:00,883 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 19:02:01,107 - INFO - Cancelled all stale open orders.
+2026-07-27 19:02:01,107 - WARNING - Balance unavailable – using default $3.
+2026-07-27 19:02:02,017 - INFO - Starting Hourly Signal Services
+2026-07-27 19:02:02,755 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 19:02:04,535 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 19:02:05,132 - INFO - No signal from either coin this hour.
+2026-07-27 20:02:00,559 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 20:02:00,780 - INFO - Cancelled all stale open orders.
+2026-07-27 20:02:00,780 - WARNING - Balance unavailable – using default $3.
+2026-07-27 20:02:01,696 - INFO - Starting Hourly Signal Services
+2026-07-27 20:02:02,313 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 20:02:03,962 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 20:02:04,511 - INFO - No signal from either coin this hour.
+2026-07-27 21:02:00,246 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 21:02:00,466 - INFO - Cancelled all stale open orders.
+2026-07-27 21:02:00,466 - WARNING - Balance unavailable – using default $3.
+2026-07-27 21:02:01,379 - INFO - Starting Hourly Signal Services
+2026-07-27 21:02:01,936 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 21:02:04,346 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 21:02:04,897 - INFO - No signal from either coin this hour.
+2026-07-27 22:02:00,262 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 22:02:00,487 - INFO - Cancelled all stale open orders.
+2026-07-27 22:02:00,487 - WARNING - Balance unavailable – using default $3.
+2026-07-27 22:02:01,396 - INFO - Starting Hourly Signal Services
+2026-07-27 22:02:01,950 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 22:02:03,598 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 22:02:04,235 - INFO - No signal from either coin this hour.
+2026-07-27 23:02:00,999 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-27 23:02:01,225 - INFO - Cancelled all stale open orders.
+2026-07-27 23:02:01,225 - WARNING - Balance unavailable – using default $3.
+2026-07-27 23:02:02,128 - INFO - Starting Hourly Signal Services
+2026-07-27 23:02:02,674 - INFO - Starting Position Manager for ETH/USD
+2026-07-27 23:02:04,239 - INFO - Starting Position Manager for BTC/USD
+2026-07-27 23:02:04,789 - INFO - No signal from either coin this hour.
+2026-07-28 00:02:00,465 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 00:02:00,684 - INFO - Cancelled all stale open orders.
+2026-07-28 00:02:00,684 - WARNING - Balance unavailable – using default $3.
+2026-07-28 00:02:01,596 - INFO - Starting Hourly Signal Services
+2026-07-28 00:02:02,145 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 00:02:03,687 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 00:02:04,229 - INFO - No signal from either coin this hour.
+2026-07-28 01:02:00,499 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 01:02:00,724 - INFO - Cancelled all stale open orders.
+2026-07-28 01:02:00,725 - WARNING - Balance unavailable – using default $3.
+2026-07-28 01:02:01,635 - INFO - Starting Hourly Signal Services
+2026-07-28 01:02:02,174 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 01:02:03,731 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 01:02:04,278 - INFO - No signal from either coin this hour.
+2026-07-28 02:02:00,259 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 02:02:00,478 - INFO - Cancelled all stale open orders.
+2026-07-28 02:02:00,479 - WARNING - Balance unavailable – using default $3.
+2026-07-28 02:02:01,382 - INFO - Starting Hourly Signal Services
+2026-07-28 02:02:01,928 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 02:02:03,510 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 02:02:04,056 - INFO - No signal from either coin this hour.
+2026-07-28 03:02:00,524 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 03:02:00,749 - INFO - Cancelled all stale open orders.
+2026-07-28 03:02:00,749 - WARNING - Balance unavailable – using default $3.
+2026-07-28 03:02:01,656 - INFO - Starting Hourly Signal Services
+2026-07-28 03:02:02,195 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 03:02:03,739 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 03:02:04,302 - INFO - No signal from either coin this hour.
+2026-07-28 04:02:00,251 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 04:02:00,472 - INFO - Cancelled all stale open orders.
+2026-07-28 04:02:00,472 - WARNING - Balance unavailable – using default $3.
+2026-07-28 04:02:01,380 - INFO - Starting Hourly Signal Services
+2026-07-28 04:02:01,912 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 04:02:03,451 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 04:02:04,001 - INFO - No signal from either coin this hour.
+2026-07-28 05:02:00,603 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 05:02:00,824 - INFO - Cancelled all stale open orders.
+2026-07-28 05:02:00,824 - WARNING - Balance unavailable – using default $3.
+2026-07-28 05:02:01,726 - INFO - Starting Hourly Signal Services
+2026-07-28 05:02:02,268 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 05:02:03,823 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 05:02:04,377 - INFO - No signal from either coin this hour.
+2026-07-28 06:02:00,906 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 06:02:01,131 - INFO - Cancelled all stale open orders.
+2026-07-28 06:02:01,131 - WARNING - Balance unavailable – using default $3.
+2026-07-28 06:02:02,030 - INFO - Starting Hourly Signal Services
+2026-07-28 06:02:02,576 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 06:02:04,561 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 06:02:05,113 - INFO - No signal from either coin this hour.
+2026-07-28 07:02:00,583 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 07:02:00,807 - INFO - Cancelled all stale open orders.
+2026-07-28 07:02:00,807 - WARNING - Balance unavailable – using default $3.
+2026-07-28 07:02:01,725 - INFO - Starting Hourly Signal Services
+2026-07-28 07:02:02,267 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 07:02:03,810 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 07:02:04,359 - INFO - No signal from either coin this hour.
+2026-07-28 08:02:01,179 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 08:02:01,400 - INFO - Cancelled all stale open orders.
+2026-07-28 08:02:01,400 - WARNING - Balance unavailable – using default $3.
+2026-07-28 08:02:02,292 - INFO - Starting Hourly Signal Services
+2026-07-28 08:02:02,834 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 08:02:04,383 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 08:02:04,934 - INFO - No signal from either coin this hour.
+2026-07-28 09:02:00,311 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 09:02:00,528 - INFO - Cancelled all stale open orders.
+2026-07-28 09:02:00,529 - WARNING - Balance unavailable – using default $3.
+2026-07-28 09:02:01,428 - INFO - Starting Hourly Signal Services
+2026-07-28 09:02:01,966 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 09:02:03,914 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 09:02:04,457 - INFO - No signal from either coin this hour.
+2026-07-28 10:02:00,715 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 10:02:00,937 - INFO - Cancelled all stale open orders.
+2026-07-28 10:02:00,937 - WARNING - Balance unavailable – using default $3.
+2026-07-28 10:02:01,847 - INFO - Starting Hourly Signal Services
+2026-07-28 10:02:02,388 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 10:02:03,933 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 10:02:04,486 - INFO - No signal from either coin this hour.
+2026-07-28 11:02:00,899 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 11:02:01,115 - INFO - Cancelled all stale open orders.
+2026-07-28 11:02:01,116 - WARNING - Balance unavailable – using default $3.
+2026-07-28 11:02:02,022 - INFO - Starting Hourly Signal Services
+2026-07-28 11:02:02,573 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 11:02:04,956 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 11:02:05,500 - INFO - No signal from either coin this hour.
+2026-07-28 12:02:00,681 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 12:02:00,905 - INFO - Cancelled all stale open orders.
+2026-07-28 12:02:00,905 - WARNING - Balance unavailable – using default $3.
+2026-07-28 12:02:01,814 - INFO - Starting Hourly Signal Services
+2026-07-28 12:02:02,359 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 12:02:03,924 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 12:02:04,471 - INFO - No signal from either coin this hour.
+2026-07-28 13:02:02,754 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 13:02:02,971 - INFO - Cancelled all stale open orders.
+2026-07-28 13:02:02,971 - WARNING - Balance unavailable – using default $3.
+2026-07-28 13:02:03,886 - INFO - Starting Hourly Signal Services
+2026-07-28 13:02:04,434 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 13:02:05,984 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 13:02:06,524 - INFO - No signal from either coin this hour.
+2026-07-28 14:02:01,101 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 14:02:01,320 - INFO - Cancelled all stale open orders.
+2026-07-28 14:02:01,320 - WARNING - Balance unavailable – using default $3.
+2026-07-28 14:02:02,230 - INFO - Starting Hourly Signal Services
+2026-07-28 14:02:02,778 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 14:02:04,354 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 14:02:04,908 - INFO - No signal from either coin this hour.
+2026-07-28 15:02:00,642 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 15:02:00,865 - INFO - Cancelled all stale open orders.
+2026-07-28 15:02:00,865 - WARNING - Balance unavailable – using default $3.
+2026-07-28 15:02:01,779 - INFO - Starting Hourly Signal Services
+2026-07-28 15:02:02,462 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 15:02:04,126 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 15:02:04,687 - INFO - No signal from either coin this hour.
+2026-07-28 16:02:00,496 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 16:02:00,717 - INFO - Cancelled all stale open orders.
+2026-07-28 16:02:00,718 - WARNING - Balance unavailable – using default $3.
+2026-07-28 16:02:01,620 - INFO - Starting Hourly Signal Services
+2026-07-28 16:02:02,396 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 16:02:04,121 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 16:02:04,705 - INFO - No signal from either coin this hour.
+2026-07-28 17:02:01,193 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 17:02:01,414 - INFO - Cancelled all stale open orders.
+2026-07-28 17:02:01,414 - WARNING - Balance unavailable – using default $3.
+2026-07-28 17:02:02,319 - INFO - Starting Hourly Signal Services
+2026-07-28 17:02:02,999 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 17:02:04,916 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 17:02:05,694 - INFO - No signal from either coin this hour.
+2026-07-28 18:02:00,709 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 18:02:00,932 - INFO - Cancelled all stale open orders.
+2026-07-28 18:02:00,933 - WARNING - Balance unavailable – using default $3.
+2026-07-28 18:02:01,849 - INFO - Starting Hourly Signal Services
+2026-07-28 18:02:02,506 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 18:02:04,221 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 18:02:04,791 - INFO - No signal from either coin this hour.
+2026-07-28 19:02:01,062 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 19:02:01,282 - INFO - Cancelled all stale open orders.
+2026-07-28 19:02:01,283 - WARNING - Balance unavailable – using default $3.
+2026-07-28 19:02:02,183 - INFO - Starting Hourly Signal Services
+2026-07-28 19:02:02,956 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 19:02:05,019 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 19:02:05,849 - INFO - No signal from either coin this hour.
+2026-07-28 20:02:01,210 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 20:02:01,436 - INFO - Cancelled all stale open orders.
+2026-07-28 20:02:01,436 - WARNING - Balance unavailable – using default $3.
+2026-07-28 20:02:02,553 - INFO - Starting Hourly Signal Services
+2026-07-28 20:02:03,148 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 20:02:04,786 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 20:02:05,372 - INFO - No signal from either coin this hour.
+2026-07-28 21:02:00,850 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 21:02:01,068 - INFO - Cancelled all stale open orders.
+2026-07-28 21:02:01,068 - WARNING - Balance unavailable – using default $3.
+2026-07-28 21:02:01,978 - INFO - Starting Hourly Signal Services
+2026-07-28 21:02:02,530 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 21:02:04,105 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 21:02:04,653 - INFO - No signal from either coin this hour.
+2026-07-28 22:02:01,032 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 22:02:01,256 - INFO - Cancelled all stale open orders.
+2026-07-28 22:02:01,256 - WARNING - Balance unavailable – using default $3.
+2026-07-28 22:02:02,176 - INFO - Starting Hourly Signal Services
+2026-07-28 22:02:02,728 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 22:02:04,283 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 22:02:04,832 - INFO - No signal from either coin this hour.
+2026-07-28 23:02:00,674 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-28 23:02:00,898 - INFO - Cancelled all stale open orders.
+2026-07-28 23:02:00,898 - WARNING - Balance unavailable – using default $3.
+2026-07-28 23:02:01,808 - INFO - Starting Hourly Signal Services
+2026-07-28 23:02:02,378 - INFO - Starting Position Manager for ETH/USD
+2026-07-28 23:02:03,932 - INFO - Starting Position Manager for BTC/USD
+2026-07-28 23:02:04,502 - INFO - No signal from either coin this hour.
+2026-07-29 00:02:00,953 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 00:02:01,174 - INFO - Cancelled all stale open orders.
+2026-07-29 00:02:01,174 - WARNING - Balance unavailable – using default $3.
+2026-07-29 00:02:02,083 - INFO - Starting Hourly Signal Services
+2026-07-29 00:02:02,678 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 00:02:04,244 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 00:02:04,825 - INFO - No signal from either coin this hour.
+2026-07-29 01:02:00,612 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 01:02:00,833 - INFO - Cancelled all stale open orders.
+2026-07-29 01:02:00,833 - WARNING - Balance unavailable – using default $3.
+2026-07-29 01:02:01,738 - INFO - Starting Hourly Signal Services
+2026-07-29 01:02:02,279 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 01:02:03,831 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 01:02:04,803 - INFO - No signal from either coin this hour.
+2026-07-29 02:02:00,247 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 02:02:00,469 - INFO - Cancelled all stale open orders.
+2026-07-29 02:02:00,469 - WARNING - Balance unavailable – using default $3.
+2026-07-29 02:02:01,371 - INFO - Starting Hourly Signal Services
+2026-07-29 02:02:01,921 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 02:02:03,467 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 02:02:04,011 - INFO - No signal from either coin this hour.
+2026-07-29 03:02:00,548 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 03:02:00,765 - INFO - Cancelled all stale open orders.
+2026-07-29 03:02:00,766 - WARNING - Balance unavailable – using default $3.
+2026-07-29 03:02:01,681 - INFO - Starting Hourly Signal Services
+2026-07-29 03:02:02,223 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 03:02:03,809 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 03:02:04,366 - INFO - No signal from either coin this hour.
+2026-07-29 04:02:00,410 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 04:02:00,634 - INFO - Cancelled all stale open orders.
+2026-07-29 04:02:00,634 - WARNING - Balance unavailable – using default $3.
+2026-07-29 04:02:01,543 - INFO - Starting Hourly Signal Services
+2026-07-29 04:02:02,130 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 04:02:03,730 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 04:02:04,492 - INFO - No signal from either coin this hour.
+2026-07-29 05:02:00,976 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 05:02:01,195 - INFO - Cancelled all stale open orders.
+2026-07-29 05:02:01,195 - WARNING - Balance unavailable – using default $3.
+2026-07-29 05:02:02,099 - INFO - Starting Hourly Signal Services
+2026-07-29 05:02:02,645 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 05:02:04,186 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 05:02:04,746 - INFO - No signal from either coin this hour.
+2026-07-29 06:02:00,873 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 06:02:01,095 - INFO - Cancelled all stale open orders.
+2026-07-29 06:02:01,095 - WARNING - Balance unavailable – using default $3.
+2026-07-29 06:02:02,009 - INFO - Starting Hourly Signal Services
+2026-07-29 06:02:02,551 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 06:02:04,939 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 06:02:05,487 - INFO - No signal from either coin this hour.
+2026-07-29 07:02:00,920 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 07:02:01,136 - INFO - Cancelled all stale open orders.
+2026-07-29 07:02:01,136 - WARNING - Balance unavailable – using default $3.
+2026-07-29 07:02:02,027 - INFO - Starting Hourly Signal Services
+2026-07-29 07:02:02,581 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 07:02:04,113 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 07:02:04,659 - INFO - No signal from either coin this hour.
+2026-07-29 08:02:00,378 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 08:02:00,601 - INFO - Cancelled all stale open orders.
+2026-07-29 08:02:00,601 - WARNING - Balance unavailable – using default $3.
+2026-07-29 08:02:01,509 - INFO - Starting Hourly Signal Services
+2026-07-29 08:02:02,057 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 08:02:04,020 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 08:02:05,021 - INFO - No signal from either coin this hour.
+2026-07-29 09:02:01,097 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 09:02:01,317 - INFO - Cancelled all stale open orders.
+2026-07-29 09:02:01,318 - WARNING - Balance unavailable – using default $3.
+2026-07-29 09:02:02,229 - INFO - Starting Hourly Signal Services
+2026-07-29 09:02:02,780 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 09:02:04,339 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 09:02:04,896 - INFO - No signal from either coin this hour.
+2026-07-29 10:02:00,878 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 10:02:01,094 - INFO - Cancelled all stale open orders.
+2026-07-29 10:02:01,095 - WARNING - Balance unavailable – using default $3.
+2026-07-29 10:02:02,000 - INFO - Starting Hourly Signal Services
+2026-07-29 10:02:02,537 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 10:02:03,544 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1914.84), 'order_side': 'Buy', 'tp_price': np.float64(1921.35), 'sl_price': np.float64(1881.12), 'current_price': np.float64(1919.86), 'checked': False, 'current_bal': 3.0, 'atr': 13.723535714285699, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7924421883812753)}
+2026-07-29 10:02:04,093 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 10:02:04,870 - INFO - SignalExecutor: leverage=15x for ETHUSDT
+2026-07-29 10:02:04,870 - INFO - SignalExecutor: ETHUSDT BUY LIMIT @ 1914.84
+2026-07-29 10:02:05,121 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-29 10:02:05,345 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-29 10:02:05,347 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1914.84), 'order_side': 'Buy', 'tp_price': np.float64(1921.35), 'sl_price': np.float64(1881.12), 'current_price': np.float64(1919.86), 'checked': False, 'current_bal': 3.0, 'atr': 13.723535714285699, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7924421883812753), 'qty': '0.018'}
+2026-07-29 10:02:05,347 - INFO - ETH order: id=N/A
+2026-07-29 10:52:50,804 - INFO - ETH/USD BUY limit filled. Price:1913.34
+2026-07-29 11:02:00,566 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 11:02:00,790 - INFO - Cancelled all stale open orders.
+2026-07-29 11:02:00,790 - WARNING - Balance unavailable – using default $3.
+2026-07-29 11:02:01,702 - INFO - Starting Hourly Signal Services
+2026-07-29 11:02:02,269 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 11:02:03,829 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 11:02:04,386 - INFO - No signal from either coin this hour.
+2026-07-29 12:02:00,871 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 12:02:01,091 - INFO - Cancelled all stale open orders.
+2026-07-29 12:02:01,092 - WARNING - Balance unavailable – using default $3.
+2026-07-29 12:02:02,007 - INFO - Starting Hourly Signal Services
+2026-07-29 12:02:02,548 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 12:02:04,096 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 12:02:04,666 - INFO - No signal from either coin this hour.
+2026-07-29 13:02:00,550 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 13:02:00,772 - INFO - Cancelled all stale open orders.
+2026-07-29 13:02:00,773 - WARNING - Balance unavailable – using default $3.
+2026-07-29 13:02:01,678 - INFO - Starting Hourly Signal Services
+2026-07-29 13:02:02,218 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 13:02:03,644 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1910.8), 'order_side': 'Sell', 'tp_price': np.float64(1901.03), 'sl_price': np.float64(1943.65), 'current_price': np.float64(1903.04), 'checked': False, 'current_bal': 3.0, 'atr': 13.366142857142838, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7736288465564194)}
+2026-07-29 13:02:05,046 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 13:02:06,442 - INFO - SignalExecutor: leverage=15x for ETHUSDT
+2026-07-29 13:02:06,442 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1910.8
+2026-07-29 13:02:06,689 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-29 13:02:07,324 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-29 13:02:07,326 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1910.8), 'order_side': 'Sell', 'tp_price': np.float64(1901.03), 'sl_price': np.float64(1943.65), 'current_price': np.float64(1903.04), 'checked': False, 'current_bal': 3.0, 'atr': 13.366142857142838, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7736288465564194), 'qty': '0.018'}
+2026-07-29 13:02:07,326 - INFO - ETH order: id=N/A
+2026-07-29 14:02:00,240 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 14:02:00,459 - INFO - Cancelled all stale open orders.
+2026-07-29 14:02:00,459 - WARNING - Balance unavailable – using default $3.
+2026-07-29 14:02:01,373 - INFO - Starting Hourly Signal Services
+2026-07-29 14:02:01,946 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 14:02:02,972 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1906.84), 'order_side': 'Sell', 'tp_price': np.float64(1900.82), 'sl_price': np.float64(1937.23), 'current_price': np.float64(1904.73), 'checked': False, 'current_bal': 3.0, 'atr': 12.366249999999988, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7171813051960335)}
+2026-07-29 14:02:03,517 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 14:02:04,499 - INFO - SignalExecutor: leverage=15x for ETHUSDT
+2026-07-29 14:02:04,499 - INFO - SignalExecutor: ETHUSDT SELL LIMIT @ 1906.84
+2026-07-29 14:02:05,174 - INFO - SignalExecutor: placing LIMIT for ETHUSDT…
+2026-07-29 14:02:05,396 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-29 14:02:05,398 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Limit', 'entry_price': np.float64(1906.84), 'order_side': 'Sell', 'tp_price': np.float64(1900.82), 'sl_price': np.float64(1937.23), 'current_price': np.float64(1904.73), 'checked': False, 'current_bal': 3.0, 'atr': 12.366249999999988, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7171813051960335), 'qty': '0.018'}
+2026-07-29 14:02:05,399 - INFO - ETH order: id=N/A
+2026-07-29 14:06:59,998 - INFO - ETH/USD SELL limit filled. Price:1908.2475
+2026-07-29 15:02:00,854 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 15:02:01,077 - INFO - Cancelled all stale open orders.
+2026-07-29 15:02:01,077 - WARNING - Balance unavailable – using default $3.
+2026-07-29 15:02:01,983 - INFO - Starting Hourly Signal Services
+2026-07-29 15:02:02,800 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 15:02:06,293 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 15:02:07,325 - INFO - No signal from either coin this hour.
+2026-07-29 16:02:00,354 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 16:02:00,575 - INFO - Cancelled all stale open orders.
+2026-07-29 16:02:00,575 - WARNING - Balance unavailable – using default $3.
+2026-07-29 16:02:01,491 - INFO - Starting Hourly Signal Services
+2026-07-29 16:02:02,349 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 16:02:04,268 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 16:02:04,893 - INFO - No signal from either coin this hour.
+2026-07-29 17:02:00,248 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 17:02:00,469 - INFO - Cancelled all stale open orders.
+2026-07-29 17:02:00,469 - WARNING - Balance unavailable – using default $3.
+2026-07-29 17:02:01,384 - INFO - Starting Hourly Signal Services
+2026-07-29 17:02:02,132 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 17:02:03,964 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 17:02:04,583 - INFO - No signal from either coin this hour.
+2026-07-29 18:02:00,712 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 18:02:00,931 - INFO - Cancelled all stale open orders.
+2026-07-29 18:02:00,931 - WARNING - Balance unavailable – using default $3.
+2026-07-29 18:02:01,840 - INFO - Starting Hourly Signal Services
+2026-07-29 18:02:02,718 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 18:02:04,607 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 18:02:05,149 - INFO - No signal from either coin this hour.
+2026-07-29 19:02:00,881 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 19:02:01,102 - INFO - Cancelled all stale open orders.
+2026-07-29 19:02:01,103 - WARNING - Balance unavailable – using default $3.
+2026-07-29 19:02:02,004 - INFO - Starting Hourly Signal Services
+2026-07-29 19:02:02,701 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 19:02:03,833 - INFO - ETH/USD signal: {'symbol': 'ETHUSDT', 'order_type': 'Market', 'entry_price': np.float64(1919.47), 'order_side': 'Buy', 'tp_price': np.float64(1928.56), 'sl_price': np.float64(1886.31), 'current_price': np.float64(1919.467), 'checked': False, 'current_bal': 3.0, 'atr': 13.495365665178545, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7774020953700781)}
+2026-07-29 19:02:04,478 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 19:02:05,360 - INFO - SignalExecutor: leverage=15x for ETHUSDT
+2026-07-29 19:02:05,360 - INFO - SignalExecutor: ETHUSDT BUY MARKET @ 1919.47
+2026-07-29 19:02:05,611 - INFO - SignalExecutor: placing MARKET for ETHUSDT…
+2026-07-29 19:02:05,834 - ERROR - SignalExecutor: order placement failed for ETHUSDT: APIError(code=-2019): Margin is insufficient.
+2026-07-29 19:02:05,836 - INFO - ETH signal: {'symbol': 'ETHUSDT', 'order_type': 'Market', 'entry_price': np.float64(1919.47), 'order_side': 'Buy', 'tp_price': np.float64(1928.56), 'sl_price': np.float64(1886.31), 'current_price': np.float64(1919.467), 'checked': False, 'current_bal': 3.0, 'atr': 13.495365665178545, 'atr_mult': 2.457332099106302, 'expected_max_loss': np.float64(0.7774020953700781), 'qty': '0.018'}
+2026-07-29 19:02:05,836 - INFO - ETH order: id=N/A
+2026-07-29 19:02:41,106 - INFO - ETH/USD market order filled. Price:1919.467
+2026-07-29 20:02:00,693 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 20:02:00,913 - INFO - Cancelled all stale open orders.
+2026-07-29 20:02:00,914 - WARNING - Balance unavailable – using default $3.
+2026-07-29 20:02:01,830 - INFO - Starting Hourly Signal Services
+2026-07-29 20:02:02,394 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 20:02:03,953 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 20:02:04,497 - INFO - No signal from either coin this hour.
+2026-07-29 21:02:00,717 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 21:02:00,935 - INFO - Cancelled all stale open orders.
+2026-07-29 21:02:00,936 - WARNING - Balance unavailable – using default $3.
+2026-07-29 21:02:01,843 - INFO - Starting Hourly Signal Services
+2026-07-29 21:02:02,396 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 21:02:03,949 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 21:02:04,492 - INFO - No signal from either coin this hour.
+2026-07-29 22:02:01,711 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 22:02:01,936 - INFO - Cancelled all stale open orders.
+2026-07-29 22:02:01,936 - WARNING - Balance unavailable – using default $3.
+2026-07-29 22:02:02,842 - INFO - Starting Hourly Signal Services
+2026-07-29 22:02:03,409 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 22:02:04,968 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 22:02:05,532 - INFO - No signal from either coin this hour.
+2026-07-29 23:02:00,669 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-29 23:02:00,890 - INFO - Cancelled all stale open orders.
+2026-07-29 23:02:00,891 - WARNING - Balance unavailable – using default $3.
+2026-07-29 23:02:01,809 - INFO - Starting Hourly Signal Services
+2026-07-29 23:02:02,394 - INFO - Starting Position Manager for ETH/USD
+2026-07-29 23:02:03,974 - INFO - Starting Position Manager for BTC/USD
+2026-07-29 23:02:04,532 - INFO - No signal from either coin this hour.
+2026-07-30 00:02:00,992 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 00:02:01,211 - INFO - Cancelled all stale open orders.
+2026-07-30 00:02:01,212 - WARNING - Balance unavailable – using default $3.
+2026-07-30 00:02:02,121 - INFO - Starting Hourly Signal Services
+2026-07-30 00:02:02,668 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 00:02:04,237 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 00:02:04,796 - INFO - No signal from either coin this hour.
+2026-07-30 01:02:00,625 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 01:02:00,854 - INFO - Cancelled all stale open orders.
+2026-07-30 01:02:00,854 - WARNING - Balance unavailable – using default $3.
+2026-07-30 01:02:01,769 - INFO - Starting Hourly Signal Services
+2026-07-30 01:02:02,316 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 01:02:03,849 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 01:02:04,394 - INFO - No signal from either coin this hour.
+2026-07-30 02:02:00,245 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 02:02:00,467 - INFO - Cancelled all stale open orders.
+2026-07-30 02:02:00,467 - WARNING - Balance unavailable – using default $3.
+2026-07-30 02:02:01,378 - INFO - Starting Hourly Signal Services
+2026-07-30 02:02:01,931 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 02:02:03,466 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 02:02:04,007 - INFO - No signal from either coin this hour.
+2026-07-30 03:02:03,217 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 03:02:03,436 - INFO - Cancelled all stale open orders.
+2026-07-30 03:02:03,436 - WARNING - Balance unavailable – using default $3.
+2026-07-30 03:02:04,331 - INFO - Starting Hourly Signal Services
+2026-07-30 03:02:04,873 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 03:02:06,399 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 03:02:06,953 - INFO - No signal from either coin this hour.
+2026-07-30 04:02:00,888 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 04:02:01,108 - INFO - Cancelled all stale open orders.
+2026-07-30 04:02:01,108 - WARNING - Balance unavailable – using default $3.
+2026-07-30 04:02:01,996 - INFO - Starting Hourly Signal Services
+2026-07-30 04:02:02,528 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 04:02:04,052 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 04:02:04,602 - INFO - No signal from either coin this hour.
+2026-07-30 05:02:00,802 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 05:02:01,023 - INFO - Cancelled all stale open orders.
+2026-07-30 05:02:01,023 - WARNING - Balance unavailable – using default $3.
+2026-07-30 05:02:01,930 - INFO - Starting Hourly Signal Services
+2026-07-30 05:02:02,477 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 05:02:04,130 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 05:02:04,770 - INFO - No signal from either coin this hour.
+2026-07-30 06:02:00,974 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 06:02:01,191 - INFO - Cancelled all stale open orders.
+2026-07-30 06:02:01,191 - WARNING - Balance unavailable – using default $3.
+2026-07-30 06:02:02,099 - INFO - Starting Hourly Signal Services
+2026-07-30 06:02:02,638 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 06:02:04,177 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 06:02:04,740 - INFO - No signal from either coin this hour.
+2026-07-30 07:02:00,829 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 07:02:01,046 - INFO - Cancelled all stale open orders.
+2026-07-30 07:02:01,046 - WARNING - Balance unavailable – using default $3.
+2026-07-30 07:02:01,954 - INFO - Starting Hourly Signal Services
+2026-07-30 07:02:02,496 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 07:02:04,250 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 07:02:04,791 - INFO - No signal from either coin this hour.
+2026-07-30 08:02:00,243 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 08:02:00,464 - INFO - Cancelled all stale open orders.
+2026-07-30 08:02:00,464 - WARNING - Balance unavailable – using default $3.
+2026-07-30 08:02:01,367 - INFO - Starting Hourly Signal Services
+2026-07-30 08:02:01,906 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 08:02:03,451 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 08:02:03,996 - INFO - No signal from either coin this hour.
+2026-07-30 09:02:00,310 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 09:02:00,530 - INFO - Cancelled all stale open orders.
+2026-07-30 09:02:00,531 - WARNING - Balance unavailable – using default $3.
+2026-07-30 09:02:01,438 - INFO - Starting Hourly Signal Services
+2026-07-30 09:02:01,982 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 09:02:03,539 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 09:02:04,515 - INFO - No signal from either coin this hour.
+2026-07-30 10:02:00,641 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 10:02:00,863 - INFO - Cancelled all stale open orders.
+2026-07-30 10:02:00,863 - WARNING - Balance unavailable – using default $3.
+2026-07-30 10:02:01,764 - INFO - Starting Hourly Signal Services
+2026-07-30 10:02:02,300 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 10:02:03,849 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 10:02:04,393 - INFO - No signal from either coin this hour.
+2026-07-30 11:02:01,004 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 11:02:01,229 - INFO - Cancelled all stale open orders.
+2026-07-30 11:02:01,229 - WARNING - Balance unavailable – using default $3.
+2026-07-30 11:02:02,130 - INFO - Starting Hourly Signal Services
+2026-07-30 11:02:02,692 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 11:02:04,234 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 11:02:04,773 - INFO - No signal from either coin this hour.
+2026-07-30 12:02:00,302 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 12:02:00,523 - INFO - Cancelled all stale open orders.
+2026-07-30 12:02:00,524 - WARNING - Balance unavailable – using default $3.
+2026-07-30 12:02:01,426 - INFO - Starting Hourly Signal Services
+2026-07-30 12:02:01,977 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 12:02:03,524 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 12:02:04,074 - INFO - No signal from either coin this hour.
+2026-07-30 13:02:01,110 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 13:02:01,331 - INFO - Cancelled all stale open orders.
+2026-07-30 13:02:01,331 - WARNING - Balance unavailable – using default $3.
+2026-07-30 13:02:02,236 - INFO - Starting Hourly Signal Services
+2026-07-30 13:02:02,775 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 13:02:04,328 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 13:02:04,876 - INFO - No signal from either coin this hour.
+2026-07-30 14:02:00,972 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 14:02:01,192 - INFO - Cancelled all stale open orders.
+2026-07-30 14:02:01,192 - WARNING - Balance unavailable – using default $3.
+2026-07-30 14:02:02,094 - INFO - Starting Hourly Signal Services
+2026-07-30 14:02:02,639 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 14:02:04,197 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 14:02:04,740 - INFO - No signal from either coin this hour.
+2026-07-30 15:02:03,601 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 15:02:03,822 - INFO - Cancelled all stale open orders.
+2026-07-30 15:02:03,822 - WARNING - Balance unavailable – using default $3.
+2026-07-30 15:02:04,725 - INFO - Starting Hourly Signal Services
+2026-07-30 15:02:05,310 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 15:02:06,954 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 15:02:07,565 - INFO - No signal from either coin this hour.
+2026-07-30 16:02:00,467 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 16:02:00,689 - INFO - Cancelled all stale open orders.
+2026-07-30 16:02:00,689 - WARNING - Balance unavailable – using default $3.
+2026-07-30 16:02:01,599 - INFO - Starting Hourly Signal Services
+2026-07-30 16:02:02,207 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 16:02:03,896 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 16:02:04,623 - INFO - No signal from either coin this hour.
+2026-07-30 17:02:00,712 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 17:02:00,937 - INFO - Cancelled all stale open orders.
+2026-07-30 17:02:00,937 - WARNING - Balance unavailable – using default $3.
+2026-07-30 17:02:01,859 - INFO - Starting Hourly Signal Services
+2026-07-30 17:02:02,509 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 17:02:04,490 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 17:02:05,379 - INFO - No signal from either coin this hour.
+2026-07-30 18:02:02,232 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 18:02:02,454 - INFO - Cancelled all stale open orders.
+2026-07-30 18:02:02,454 - WARNING - Balance unavailable – using default $3.
+2026-07-30 18:02:03,362 - INFO - Starting Hourly Signal Services
+2026-07-30 18:02:03,955 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 18:02:06,036 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 18:02:07,092 - INFO - No signal from either coin this hour.
+2026-07-30 19:02:00,662 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 19:02:00,886 - INFO - Cancelled all stale open orders.
+2026-07-30 19:02:00,886 - WARNING - Balance unavailable – using default $3.
+2026-07-30 19:02:01,793 - INFO - Starting Hourly Signal Services
+2026-07-30 19:02:02,422 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 19:02:04,377 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 19:02:05,256 - INFO - No signal from either coin this hour.
+2026-07-30 20:02:00,834 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 20:02:01,053 - INFO - Cancelled all stale open orders.
+2026-07-30 20:02:01,053 - WARNING - Balance unavailable – using default $3.
+2026-07-30 20:02:01,969 - INFO - Starting Hourly Signal Services
+2026-07-30 20:02:02,522 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 20:02:04,515 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 20:02:05,512 - INFO - No signal from either coin this hour.
+2026-07-30 21:02:00,776 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 21:02:00,999 - INFO - Cancelled all stale open orders.
+2026-07-30 21:02:00,999 - WARNING - Balance unavailable – using default $3.
+2026-07-30 21:02:01,915 - INFO - Starting Hourly Signal Services
+2026-07-30 21:02:02,473 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 21:02:05,322 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 21:02:05,883 - INFO - No signal from either coin this hour.
+2026-07-30 22:02:00,794 - INFO - Balance – USDT:0.0  BTC:0.0  ETH:0.0
+2026-07-30 22:02:01,012 - INFO - Cancelled all stale open orders.
+2026-07-30 22:02:01,013 - WARNING - Balance unavailable – using default $3.
+2026-07-30 22:02:01,908 - INFO - Starting Hourly Signal Services
+2026-07-30 22:02:02,458 - INFO - Starting Position Manager for ETH/USD
+2026-07-30 22:02:03,999 - INFO - Starting Position Manager for BTC/USD
+2026-07-30 22:02:04,545 - INFO - No signal from either coin this hour.
