@@ -1,30 +1,8 @@
 """
 p4_search.py
 Daily parameter optimizer for PyQuant — Bayesian (Optuna) edition.
-
-REFACTOR NOTE: This file previously ran a blind grid search over 2,744
-parameter combinations (7 x 7 x 7 x 8), taking roughly 8-15 minutes per
-daily run. It now uses Optuna's TPE (Tree-structured Parzen Estimator)
-sampler, evaluating ~150 continuous-space trials in under 2 minutes, with
-comparable or better parameter quality — this is the exact same approach
-validated in pyquant_walkforward_v4.py, which produced +1060% / 91.4% win
-rate / Sharpe 15.26 on the walk-forward backtest.
-
-Also added: an `atr_mult` search dimension for the ATR-adaptive stop loss
-(see SignalGenerator._calculate_sl_price in pyquant_utils.py), jointly
-optimized with the four signal thresholds — exactly as in the validated
-backtest, since a wider/narrower ATR multiplier changes which signal
-thresholds are actually profitable.
-
-The function name `run_grid_search()` is kept for interface compatibility
-with pyquant_orchestra.py's daily_optimizer(), which calls it generically
-and writes the result to optimal_params.json — no changes needed there.
-
-This module keeps its OWN lightweight UKF implementation (not importing
-UKFModel from pyquant_utils.py) to preserve the original architecture's
-deliberate import isolation — pyquant_utils.py has no dependency on this
-file, and this file has no dependency on pyq_p4.py, avoiding any risk of
-a circular import between the orchestrator's three main modules.
+Optimizes strict, stricts, and atr_mult over a 15-day backtest window.
+LEVERAGE unified to 10x to match walkforward.py.
 """
 
 import os
@@ -43,21 +21,18 @@ try:
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
-    print("[grid_search] WARNING: optuna not installed — falling back to "
-          "blind grid search. Install with: pip install optuna")
+    print("[grid_search] WARNING: optuna not installed — falling back to blind grid search.")
 
 
-# ── Configuration (matches pyquant_walkforward_v4.py exactly) ────────────────
-
-LEVERAGE          = 15
-BAYESIAN_TRIALS   = 150
+LEVERAGE              = 10 # UNIFIED: Set to 10 to match walkforward.py
+BAYESIAN_TRIALS       = 150
 PARAM_SMOOTHING_ALPHA = 0.7
 
 USE_ATR_SL        = True
 ATR_PERIOD        = 14
 ATR_SL_RANGE      = (1.0, 3.0)
 ATR_SL_MULTIPLIER = 1.8
-BTC_SL_FLOOR      = 100.0
+BTC_SL_FLOOR      = 20.0
 ETH_SL_FLOOR      = 8.0
 BTC_SL_DELTA      = 7.5 * 30
 ETH_SL_DELTA      = 16.0 * 1
@@ -71,29 +46,24 @@ MIN_NOTIONAL         = 5.0
 BTC_LOT_STEP         = 0.001
 ETH_LOT_STEP         = 0.001
 
-# Grid fallback space (only used if Optuna is not installed)
 STRICT_BTC_VALS  = [0.0025, 0.00275, 0.003, 0.0035, 0.004, 0.0045, 0.005]
 STRICTS_BTC_VALS = [0.004,  0.0045,  0.005, 0.0055, 0.006, 0.007,  0.0075]
 STRICT_ETH_VALS  = [0.0035, 0.004,   0.0045, 0.005, 0.0055, 0.006]
 STRICTS_ETH_VALS = [0.0045, 0.005,   0.0055, 0.006, 0.0065, 0.007, 0.0075, 0.008]
 
-BACKTEST_DAYS    = 15   # opt window
-UKF_TRAIN_DAYS   = 30   # training window before the opt window
+BACKTEST_DAYS    = 15
+UKF_TRAIN_DAYS   = 30
 
 
-# ── Accounting helpers (identical formulas to pyquant_walkforward_v4.py) ─────
-
-def floor_to_lot(qty, step):
+def floor_to_lot(qty: float, step: float) -> float:
     return math.floor(qty / step) * step
 
 
-def is_fillable(entry_price, bar_low, bar_high):
-    """FIX 1 (carried from the walk-forward validation) — reject Limit
-    entries whose price never actually traded within the bar."""
+def is_fillable(entry_price: float, bar_low: float, bar_high: float) -> bool:
     return bar_low <= entry_price <= bar_high
 
 
-def apply_entry(signal_price, side, capital, leverage, lot_step):
+def apply_entry(signal_price: float, side: str, capital: float, leverage: float, lot_step: float):
     slip   = ENTRY_SLIPPAGE_PCT
     filled = signal_price * (1 + slip) if side == 'Buy' else signal_price * (1 - slip)
     qty    = floor_to_lot((capital * leverage) / filled, lot_step)
@@ -101,17 +71,17 @@ def apply_entry(signal_price, side, capital, leverage, lot_step):
     return filled, qty, MAKER_FEE * qty * filled, valid
 
 
-def apply_exit(trigger, leg, side, qty):
+def apply_exit(trigger: float, leg: str, side: str, qty: float):
     slip   = SL_EXIT_SLIPPAGE_PCT if leg == 'SL' else TP_EXIT_SLIPPAGE_PCT
     filled = trigger * (1 - slip) if side == 'Buy' else trigger * (1 + slip)
     return filled, TAKER_FEE * qty * filled
 
 
-def compute_profit(side, entry, exit_p, qty):
+def compute_profit(side: str, entry: float, exit_p: float, qty: float) -> float:
     return (exit_p - entry) * qty if side == 'Buy' else (entry - exit_p) * qty
 
 
-def compute_atr(df, period=ATR_PERIOD):
+def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
     if len(df) < 2:
         return 0.0
     h = df['high'].values; l = df['low'].values; c = df['close'].values
@@ -122,7 +92,7 @@ def compute_atr(df, period=ATR_PERIOD):
     return float(np.mean(tr[-n:])) if n > 0 else 0.0
 
 
-def sl_price(entry, side, symbol, atr=0.0, atr_mult=None):
+def sl_price(entry: float, side: str, symbol: str, atr: float = 0.0, atr_mult: float = None) -> float:
     is_btc      = (symbol == 'BTC')
     fixed_delta = BTC_SL_DELTA if is_btc else ETH_SL_DELTA
     floor_delta = BTC_SL_FLOOR if is_btc else ETH_SL_FLOOR
@@ -132,8 +102,6 @@ def sl_price(entry, side, symbol, atr=0.0, atr_mult=None):
         delta = fixed_delta
     return (entry - delta) if side == 'Buy' else (entry + delta)
 
-
-# ── UKF engine (isolated copy, matches pyquant_walkforward_v4.py) ────────────
 
 def _stabilise_P(ukf, floor=1e-6):
     P = (ukf.P + ukf.P.T) / 2
@@ -179,13 +147,11 @@ def step_ukf(ukf, high_ukf, low_ukf, row):
     for u, val in [(ukf, row['close']), (high_ukf, row['high']), (low_ukf, row['low'])]:
         u.update(val); _stabilise_P(u)
         u.predict();   _stabilise_P(u)
-    return ukf.x[0], high_ukf.x[0], low_ukf.x[0]
+    return float(ukf.x[0]), float(high_ukf.x[0]), float(low_ukf.x[0])
 
 
-# ── Signal generation (mirrors SignalGenerator's math as a pure function) ───
-
-def generate_signal(price, pred, high_pred, low_pred, symbol, balance, leverage,
-                    strict, stricts, atr=0.0, atr_mult=None):
+def generate_signal(price, pred, high_pred, low_pred, symbol, balance,
+                    leverage, strict, stricts, atr=0.0, atr_mult=None):
     is_btc = (symbol == 'BTC')
     r      = 0 if is_btc else 2
     tp_inc = 1.004 if is_btc else 1.05
@@ -225,14 +191,8 @@ def generate_signal(price, pred, high_pred, low_pred, symbol, balance, leverage,
     return None
 
 
-# ── Evaluation core (shared by Bayesian and grid, matches walkforward v4) ────
-
 def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
                      balance, leverage, sb, sbs, se, ses, atr_mult=None):
-    """
-    FIX 1 applied — rejects Limit entries whose price never traded in the bar.
-    FIX 2 applied — BTC and ETH are evaluated and entered independently.
-    """
     equity = balance
     in_b = in_e = False
     side_b = side_e = ''
@@ -349,7 +309,7 @@ def _run_bayesian(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage,
             try:
                 study.enqueue_trial(trial_params)
             except Exception as e:
-                print(f"[grid_search] Warm-start enqueue failed (non-fatal): {e}")
+                print(f"[grid_search] Warm-start enqueue failed: {e}")
 
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best = study.best_params
@@ -390,7 +350,6 @@ def _smooth(new_params, prev_params, alpha=PARAM_SMOOTHING_ALPHA):
 
 
 def _load_prev_params():
-    """Reads yesterday's optimal_params.json to warm-start today's search."""
     try:
         with open("optimal_params.json", "r") as f:
             return json.load(f)
@@ -398,21 +357,7 @@ def _load_prev_params():
         return None
 
 
-# ── Public entry point — same name/signature the orchestrator already calls ─
-
 def run_grid_search(backtest_days: int = BACKTEST_DAYS, initial_capital: float = 10.0) -> dict:
-    """
-    Daily parameter optimizer. Despite the legacy name (kept for
-    pyquant_orchestra.py compatibility), this now runs Bayesian optimization
-    via Optuna rather than a blind grid — see module docstring.
-
-    Reads btc_back366.csv / eth_back366.csv (written by data_download.py),
-    trains UKFs on the last UKF_TRAIN_DAYS, generates predictions over the
-    last `backtest_days`, and searches for the best strict/stricts/atr_mult
-    combination. Falls back to the blind grid automatically if Optuna is
-    not installed. Warm-starts from the previous day's optimal_params.json
-    and smooths the result with it to dampen day-to-day parameter noise.
-    """
     length = backtest_days * 24
     train_len = UKF_TRAIN_DAYS * 24
 

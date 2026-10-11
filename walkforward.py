@@ -84,11 +84,8 @@ ETH_SL_DELTA          = 16.0 * 1
 USE_PESSIMISTIC_EXITS = True
 ENABLE_PLOTTING       = True
 
-BTC_CSV = '/kaggle/input/pyquant-data/btc_back366.csv'
-ETH_CSV = '/kaggle/input/pyquant-data/eth_back366.csv'
-if not os.path.exists(BTC_CSV):
-    BTC_CSV = 'btc_back366.csv'
-    ETH_CSV = 'eth_back366.csv'
+BTC_CSV = 'btc_back366.csv'
+ETH_CSV = 'eth_back366.csv'
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — EXECUTION COST MODEL

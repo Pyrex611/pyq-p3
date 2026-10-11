@@ -1,61 +1,12 @@
 """
 pyq_p4.py
-PyQuant live trading module — major refactor integrating the validated
-pyquant_walkforward_v4.py backtest design into live production.
+PyQuant live trading module — complete unabridged base containing all 18 UKF models
+(1H, 15M, 5M), full retry loops, legacy 1-minute trackers, daily 1H UKF retraining,
+Test Mode, and Watchdog virtual trade tracking.
 
-CHANGES FROM pyq_p3.py
-─────────────────────
-1. LEVERAGE reduced from 50x to 10x, matching the walk-forward backtest
-   that produced +1060% / 91.4% win rate / Sharpe 15.26 / max drawdown 28.28%.
-   Every risk figure in this file assumes 10x; do not raise it without
-   re-validating in the backtest first — the SL widths and last-resort
-   thresholds below are all calibrated against this leverage.
-
-2. ATR-adaptive stop loss. hourly_task now fetches the last ~20 hourly bars
-   per symbol (fetch_recent_bars in pyquant_utils.py), computes a live ATR
-   (compute_atr, Wilder's method), and passes it plus the current atr_mult
-   (from optimal_params.json, written by the new Bayesian grid_search.py)
-   into SignalGenerator.generate_signal(). SL price becomes
-   entry ± max(atr_mult × ATR, floor) instead of the old fixed $225/$16
-   offset — this is the exact mechanism validated in the backtest.
-
-3. BTC and ETH now trade fully independently. The old code generated and
-   could act on signals for both symbols every hour regardless of whether
-   either already had an open position. This refactor adds an explicit
-   check_open_position() gate per symbol BEFORE generating a new signal —
-   a symbol with an open trade is skipped for new signal generation until
-   it closes, while the OTHER symbol is never blocked by it. This matches
-   the independent per-symbol design validated in pyquant_walkforward_v4.py
-   (previously, a walkforward-side version of this same bug — `if in_b or
-   in_e: continue` — was found and fixed there; this is the live-system
-   equivalent of that fix).
-
-4. Dynamic last-resort stop loss. The old fixed 12.5% / 10%-of-balance
-   last-resort thresholds were calibrated against the old fixed $225/$16
-   SL. With ATR-adaptive SL now potentially wider (or narrower) depending
-   on market conditions, a fixed balance percentage could fire BEFORE the
-   real bracket SL ever would, turning a backstop into a competing, tighter
-   constraint. The last-resort threshold is now 1.5x the EXPECTED MAX LOSS
-   implied by that specific signal's own SL distance (computed at signal
-   generation time and stored in the signal dict), so it always scales with
-   whatever SL width was actually used and only fires as a genuine backstop
-   for bracket-placement failures, never as a routine competing exit.
-
-5. Dead Bybit TP/SL code removed. The original architecture description
-   named Bybit for TP/SL management, but that role has been fully replaced
-   by Binance's Algo Order API (see PositionGuard._place_bracket_order in
-   pyquant_utils.py) since Binance migrated all conditional orders off the
-   old endpoint on 2025-12-09. The Bybit HTTP helpers (genSignature,
-   HTTP_Request) and open_tp_sl_position() were never called anywhere in
-   the live task flow after that migration and have been removed to reduce
-   startup latency, failure surface, and complexity. The Bybit `session`
-   client still exists in pyquant_utils.py for architectural compatibility
-   / potential future use, but nothing in this file depends on it.
-
-Everything else — env loading, shared clients, PositionGuard integration,
-duplicate-run guards, the manual 1-minute tracker, virtual TP/SL safeguard,
-signal_executor's 3-tuple return — is carried forward unchanged from the
-fixes already validated in pyq_p3.py.
+MODES:
+  TEST_MODE     = False  (If True, generates signals but bypasses live order execution)
+  WATCHDOG_MODE = True   (If True, monitors all signals from entry fill to TP/SL exit)
 """
 
 # ── Standard library ──────────────────────────────────────────────────────────
@@ -100,14 +51,10 @@ from sklearn.metrics import (
 )
 
 from p4_utils import (
-    UKFModel, get_equities, SignalGenerator, PositionGuard,
+    UKFModel, build_ukfs, step_ukf, get_equities, SignalGenerator, PositionGuard,
     data_download, aggregate_ohlcv_data,
     check_open_position, close_futures_position,
     compute_atr, fetch_recent_bars,
-    # Shared clients — created once in pyquant_utils with retry logic.
-    # NOTE: the Bybit `session` client is intentionally NOT imported here —
-    # TP/SL management is fully handled by Binance's Algo Order API via
-    # PositionGuard (see p4_utils.py), so nothing in this file needs it.
     binance_client, crypto_client, _binance_lock,
 )
 
@@ -138,15 +85,14 @@ BINANCE_SECRET_KEY = _require_env("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
-# ── Trading constant ──────────────────────────────────────────────────────────
-# CHANGED from 50 to 15 — matches the validated walk-forward backtest exactly.
-# Every SL/last-resort threshold in this file assumes this value.
-LEVERAGE = 15
-
-# ATR configuration — must match pyquant_walkforward_v4.py / grid_search.py
-ATR_LOOKBACK_HOURS = 20   # bars fetched; only need 15 for a 14-period ATR,
-                          # 20 gives a buffer against a thin/missing bar
+# ── Trading & Operational Constants ──────────────────────────────────────────
+LEVERAGE           = 10
+ATR_LOOKBACK_HOURS = 20
 ATR_PERIOD         = 14
+UKF_TRAIN_DAYS     = 30
+
+TEST_MODE     = False  # Set to True to bypass live order execution on Binance
+WATCHDOG_MODE = True   # Set to True to track all signals bar-by-bar to TP/SL
 
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
@@ -174,9 +120,9 @@ if not logger.handlers:
     logger.addHandler(_console_h)
     logger.addHandler(_file_h)
 
-logger.info("\nStarting PyQuant p4" + "-" * 80 + "\n")
+logger.info("\nStarting PyQuant p4 (Full Base + Daily UKF Retrain + Watchdog)" + "-" * 40 + "\n")
 
-# ── UKF model setup ───────────────────────────────────────────────────────────
+# ── UKF Models Setup (All 18 Models Initialized at Startup) ───────────────────
 ukf_model = UKFModel(crypto_client, start_date)
 
 eth_symbols = ["ETH/USD"]
@@ -190,10 +136,9 @@ eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.create_ukf_models
 eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.create_ukf_models("15T", eth_symbols)
 eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models("5T",  eth_symbols)
 
-# ── Signal generator ──────────────────────────────────────────────────────────
+# ── Signal Generator & PositionGuard ──────────────────────────────────────────
 signal_generator = SignalGenerator()
 
-# ── PositionGuard ──────────────────────────────────────────────────────────────
 guard = PositionGuard(
     binance_client=binance_client,
     telegram_token=TELEGRAM_TOKEN,
@@ -201,7 +146,7 @@ guard = PositionGuard(
 )
 guard.start()
 
-# ── UKF mapping ───────────────────────────────────────────────────────────────
+# ── UKF Mapping ───────────────────────────────────────────────────────────────
 symbols_list = ["ETH/USD", "BTC/USD"]
 
 ukf_mapping = {
@@ -209,7 +154,148 @@ ukf_mapping = {
     "BTC/USD": {"ukf": btc_ukf, "high_ukf": btc_high_ukf, "low_ukf": btc_low_ukf},
 }
 
-# ── Module-level state ────────────────────────────────────────────────────────
+# ── WATCHDOG TRACKER ENGINE ───────────────────────────────────────────────────
+
+class WatchdogTracker:
+    def __init__(self, filename="watchdog_trades.json"):
+        self.filename = filename
+        self.lock = threading.Lock()
+        self.trades = self.load_trades()
+
+    def load_trades(self) -> dict:
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def save_trades(self):
+        try:
+            with open(self.filename, "w") as f:
+                json.dump(self.trades, f, indent=4)
+        except Exception as e:
+            logger.error(f"WatchdogTracker save error: {e}")
+
+    def register_signal(self, signal: dict, is_test_mode: bool = False, is_unfunded: bool = False):
+        if not signal or "symbol" not in signal:
+            return
+        with self.lock:
+            trade_id = f"{signal['symbol']}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            self.trades[trade_id] = {
+                "trade_id": trade_id,
+                "symbol": signal["symbol"],
+                "order_side": signal["order_side"],
+                "order_type": signal["order_type"],
+                "entry_price": float(signal["entry_price"]),
+                "tp_price": float(signal["tp_price"]),
+                "sl_price": float(signal["sl_price"]),
+                "current_bal": float(signal.get("current_bal", 3.0)),
+                "status": "PENDING",
+                "registered_ts": datetime.now(timezone.utc).isoformat(),
+                "fill_ts": None,
+                "fill_price": None,
+                "exit_ts": None,
+                "exit_price": None,
+                "exit_leg": None,
+                "pnl": 0.0,
+                "is_test_mode": is_test_mode,
+                "is_unfunded": is_unfunded,
+            }
+            self.save_trades()
+            logger.info(f"🐶 [WATCHDOG REGISTERED] {trade_id} | {signal['symbol']} {signal['order_side']} {signal['order_type']} @ ${signal['entry_price']:,.2f}")
+
+    def process_minute_bar(self, symbol: str, bar_open: float, bar_high: float, bar_low: float, bar_close: float):
+        if not WATCHDOG_MODE or not self.trades:
+            return
+
+        with self.lock:
+            updated = False
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            for trade_id, t in list(self.trades.items()):
+                if t["symbol"] != symbol or t["status"] == "CLOSED":
+                    continue
+
+                side  = t["order_side"]
+                entry = t["entry_price"]
+                tp    = t["tp_price"]
+                sl    = t["sl_price"]
+
+                # Step 1: Check PENDING signals for fill
+                if t["status"] == "PENDING":
+                    filled = False
+                    fill_p = entry
+
+                    if t["order_type"] == "Market":
+                        filled = True
+                        fill_p = bar_close
+                    elif side == "Buy":
+                        if bar_low <= entry:
+                            filled = True
+                            fill_p = entry
+                    elif side == "Sell":
+                        if bar_high >= entry:
+                            filled = True
+                            fill_p = entry
+
+                    if filled:
+                        t["status"]     = "FILLED"
+                        t["fill_ts"]    = now_iso
+                        t["fill_price"] = float(fill_p)
+                        updated = True
+                        logger.info(f"🐶 [WATCHDOG FILLED] {trade_id} | {symbol} {side} @ ${fill_p:,.2f}")
+
+                # Step 2: Check active FILLED signals for TP/SL exit
+                if t["status"] == "FILLED":
+                    fp = t["fill_price"]
+                    exit_leg  = None
+                    exit_price = None
+
+                    if side == "Buy":
+                        h_sl = bar_low <= sl
+                        h_tp = bar_high >= tp
+                        if h_sl and h_tp:
+                            exit_leg = "SL"; exit_price = sl
+                        elif h_sl:
+                            exit_leg = "SL"; exit_price = sl
+                        elif h_tp:
+                            exit_leg = "TP"; exit_price = tp
+                    elif side == "Sell":
+                        h_sl = bar_high >= sl
+                        h_tp = bar_low <= tp
+                        if h_sl and h_tp:
+                            exit_leg = "SL"; exit_price = sl
+                        elif h_sl:
+                            exit_leg = "SL"; exit_price = sl
+                        elif h_tp:
+                            exit_leg = "TP"; exit_price = tp
+
+                    if exit_leg:
+                        bal = t["current_bal"]
+                        qty = (bal * LEVERAGE) / fp if fp > 0 else 0
+                        pnl = (exit_price - fp) * qty if side == "Buy" else (fp - exit_price) * qty
+                        
+                        t["status"]     = "CLOSED"
+                        t["exit_ts"]    = now_iso
+                        t["exit_price"] = float(exit_price)
+                        t["exit_leg"]   = exit_leg
+                        t["pnl"]        = float(pnl)
+                        updated = True
+
+                        logger.info(
+                            f"🐶 [WATCHDOG EXIT] {trade_id} | {symbol} {side} closed via {exit_leg} "
+                            f"@ ${exit_price:,.2f} | Virtual PnL: ${pnl:+.4f}"
+                        )
+
+            if updated:
+                self.save_trades()
+
+
+watchdog = WatchdogTracker()
+
+# ── Module-level State ────────────────────────────────────────────────────────
 predictions      = []
 high_predictions = []
 low_predictions  = []
@@ -241,12 +327,7 @@ btc_tracker = {
     "sig_gened": False, "ordered": False, "order_filled": False,
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
-    # Frozen balance snapshot at order-placement time (unchanged from p3).
     "entry_balance": None,
-    # NEW — the dollar loss expected if THIS signal's own SL is hit, computed
-    # at signal-generation time from its actual (fixed or ATR-based) SL
-    # distance. Drives the dynamic last-resort check below instead of a
-    # fixed % of balance.
     "expected_max_loss": None,
 }
 eth_tracker = {
@@ -257,18 +338,46 @@ eth_tracker = {
     "expected_max_loss": None,
 }
 
-# ── Last-resort stop loss constants ──────────────────────────────────────────
-# CHANGED: no longer a fixed % of entry_balance (that was calibrated against
-# the old fixed $225/$16 SL and could fire before a wider ATR-based bracket
-# SL ever would). The multiplier below is applied to each trade's OWN
-# expected_max_loss (stored per-trade in the tracker), so the last-resort
-# always scales with whatever SL width was actually used this trade.
 LAST_RESORT_MULTIPLIER = 1.5
-HARD_DOLLAR_SL_FLOOR    = -0.20   # absolute backstop regardless of position size
+HARD_DOLLAR_SL_FLOOR    = -0.20
 
-# ── Duplicate-run guards ──────────────────────────────────────────────────────
 LAST_RUN_FILE   = "last_execution_timestamp.txt"
 MINUTE_RUN_FILE = "minute_execution_timestamp.txt"
+
+
+def retrain_daily_ukfs():
+    """Re-anchors 1H UKFs on trailing 30 days of data once daily (matches walkforward.py)."""
+    global btc_ukf, btc_high_ukf, btc_low_ukf
+    global eth_ukf, eth_high_ukf, eth_low_ukf
+    logger.info("[UKF Retrain] Re-anchoring 1H UKF models on trailing 30-day window…")
+
+    for symbol_alpaca in ("BTC/USD", "ETH/USD"):
+        try:
+            hours_needed = UKF_TRAIN_DAYS * 24
+            start_time = datetime.now(timezone.utc) - timedelta(hours=hours_needed + 5)
+            request_params = CryptoBarsRequest(
+                symbol_or_symbols=[symbol_alpaca],
+                timeframe=TimeFrame.Hour,
+                start=start_time,
+            )
+            bars = crypto_client.get_crypto_bars(request_params).df
+            if isinstance(bars.index, pd.MultiIndex):
+                bars = bars.xs(symbol_alpaca, level="symbol")
+            
+            bars = bars.sort_index().tail(hours_needed).reset_index(drop=True)
+            symb_short = "BTC" if "BTC" in symbol_alpaca else "ETH"
+            
+            ukf_c, ukf_h, ukf_l = build_ukfs(bars, symb_short)
+            if symb_short == "BTC":
+                btc_ukf, btc_high_ukf, btc_low_ukf = ukf_c, ukf_h, ukf_l
+                ukf_mapping["BTC/USD"] = {"ukf": btc_ukf, "high_ukf": btc_high_ukf, "low_ukf": btc_low_ukf}
+            else:
+                eth_ukf, eth_high_ukf, eth_low_ukf = ukf_c, ukf_h, ukf_l
+                ukf_mapping["ETH/USD"] = {"ukf": eth_ukf, "high_ukf": eth_high_ukf, "low_ukf": eth_low_ukf}
+
+            logger.info(f"[UKF Retrain] Successfully re-anchored 1H UKF for {symb_short} on {len(bars)} bars.")
+        except Exception as e:
+            logger.error(f"[UKF Retrain] Error re-anchoring 1H UKF for {symbol_alpaca}: {e}")
 
 
 def has_function_run_this_hour() -> bool:
@@ -309,8 +418,6 @@ def update_minute_run_timestamp():
         f.write(datetime.now().isoformat())
 
 
-# ── Utility helpers ───────────────────────────────────────────────────────────
-
 def safe_decimal(value) -> Decimal:
     if value is None or value == "":
         return Decimal("0")
@@ -338,21 +445,11 @@ def handle_api_response(response: dict, action_description: str):
     return None
 
 
-# ── ATR fetch helper ──────────────────────────────────────────────────────────
-
 def get_live_atr(symbol_alpaca: str) -> float:
-    """
-    Fetches the last ATR_LOOKBACK_HOURS of hourly bars and computes ATR.
-    Returns 0.0 on any failure — SignalGenerator._calculate_sl_price falls
-    back to the fixed $225/$16 offset when atr=0.0, so a fetch failure
-    degrades to the old fixed-SL behaviour rather than blocking the signal
-    or leaving a trade without a stop loss.
-    """
     try:
         df = fetch_recent_bars(symbol_alpaca, hours=ATR_LOOKBACK_HOURS)
         if df is None or len(df) < 2:
-            logger.warning(f"get_live_atr: insufficient bars for {symbol_alpaca} "
-                           f"— falling back to fixed SL offset.")
+            logger.warning(f"get_live_atr: insufficient bars for {symbol_alpaca} — falling back to fixed SL offset.")
             return 0.0
         return compute_atr(df, period=ATR_PERIOD)
     except Exception as e:
@@ -360,13 +457,7 @@ def get_live_atr(symbol_alpaca: str) -> float:
         return 0.0
 
 
-# ── signal_executor ───────────────────────────────────────────────────────────
-
 def signal_executor(signal: dict, trade_val: float):
-    """
-    Places a Binance Futures entry order from a signal dict.
-    Always returns a 3-tuple: (signal, response, ordered).
-    """
     global ordered, signals
     response = None
 
@@ -447,10 +538,7 @@ def signal_executor(signal: dict, trade_val: float):
         return signal, response, ordered
 
 
-# ── price_tracker / order_editor (kept for compatibility, not in default flow) ─
-
 def price_tracker(signal, pred, high_pred, low_pred, price, the_symbol):
-    """Detects entry drift and updates signal if price conditions shift."""
     try:
         if not isinstance(signal, dict):
             raise TypeError(f"Invalid signal format: {type(signal)}")
@@ -512,10 +600,7 @@ def order_editor(order_changes: dict):
     )
 
 
-# ── position_manager ──────────────────────────────────────────────────────────
-
 def position_manager(symbol: str, data):
-    """Checks open position against UKF trend/pct_diff. Closes on reversal or loss limit."""
     global in_trade, signals, eth_tracker, btc_tracker
 
     logger.info(f"Starting Position Manager for {symbol}")
@@ -565,32 +650,7 @@ def position_manager(symbol: str, data):
         logger.error(f"position_manager ({symbol}): {e}")
 
 
-# ── Dynamic last-resort stop loss ────────────────────────────────────────────
-
 def last_resort_stop_loss_check(symbol: str, tracker: dict) -> bool:
-    """
-    Final safety net, checked every minute.
-
-    CHANGED from a fixed % of entry_balance to a DYNAMIC threshold:
-    1.5 x tracker['expected_max_loss'], where expected_max_loss is the
-    dollar loss THIS SPECIFIC TRADE would realize if its own SL price were
-    hit — computed at signal-generation time using its actual SL distance
-    (whether ATR-based or the fixed fallback).
-
-    Why this changed: the old fixed 12.5%/10%-of-balance thresholds were
-    calibrated against the old fixed $225 (BTC) / $16 (ETH) SL offsets. With
-    ATR-adaptive SL now potentially much wider during volatile periods, a
-    fixed balance percentage could be tighter in dollar terms than the
-    bracket SL itself — meaning this "last resort" would routinely fire
-    BEFORE the real bracket order ever would, turning a backstop into a
-    competing, premature exit. Scaling the threshold to each trade's own
-    expected_max_loss (with a 1.5x safety margin) guarantees this check
-    only fires as a genuine backstop for bracket-placement failures.
-
-    HARD_DOLLAR_SL_FLOOR remains as an absolute backstop for the case where
-    expected_max_loss wasn't stored (e.g. an untracked position picked up
-    from the exchange with no known signal history).
-    """
     expected_max_loss = tracker.get("expected_max_loss")
 
     try:
@@ -627,8 +687,6 @@ def last_resort_stop_loss_check(symbol: str, tracker: dict) -> bool:
 
     return False
 
-
-# ── hourly_task ───────────────────────────────────────────────────────────────
 
 def hourly_task():
     if has_function_run_this_hour():
@@ -671,7 +729,7 @@ def hourly_task():
         while wallet_balance is None:
             try:
                 usdt_equity, btc_equity, eth_equity = get_equities()
-                wallet_balance = float(usdt_equity)
+                wallet_balance = float(usdt_equity) if usdt_equity > 0 else 3.0
                 btc_balance    = float(btc_equity)
                 eth_balance    = float(eth_equity)
                 logger.info(f"Balance – USDT:{wallet_balance}  BTC:{btc_balance}  ETH:{eth_balance}")
@@ -679,14 +737,15 @@ def hourly_task():
                 logger.error(f"Error getting balance: {e}")
                 time.sleep(2)
 
-        try:
-            open_orders         = binance_client.futures_get_open_orders()
-            symbols_with_orders = {o["symbol"] for o in open_orders}
-            for sym in symbols_with_orders:
-                binance_client.futures_cancel_all_open_orders(symbol=sym)
-            logger.info("Cancelled all stale open orders.")
-        except Exception as e:
-            logger.error(f"Error cancelling open orders: {e}")
+        if not TEST_MODE:
+            try:
+                open_orders         = binance_client.futures_get_open_orders()
+                symbols_with_orders = {o["symbol"] for o in open_orders}
+                for sym in symbols_with_orders:
+                    binance_client.futures_cancel_all_open_orders(symbol=sym)
+                logger.info("Cancelled all stale open orders.")
+            except Exception as e:
+                logger.error(f"Error cancelling open orders: {e}")
 
         if not wallet_balance:
             logger.warning("Balance unavailable – using default $3.")
@@ -695,44 +754,43 @@ def hourly_task():
     except Exception as e:
         logger.error(f"Balance routine error: {e}")
 
-    # Secondary last-resort backstop (primary check is the 1-minute task)
-    try:
-        btc_pos = check_open_position(symbol="BTCUSDT")
-        if btc_pos["is_open_position"]:
-            logger.info(
-                f"Open BTC: side={btc_pos['side']}  size={btc_pos['size']}  "
-                f"entry={btc_pos['entry_price']:.4f}  uPNL={btc_pos['unrealized_pnl']:.4f}"
-            )
-            in_trade = btc_tracker["in_trade"] = True
-            if btc_tracker["open_trade"]:
-                if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
-                    btc_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None, "expected_max_loss": None})
-                    in_trade = btc_tracker["in_trade"] = False
-        else:
-            in_trade = btc_tracker["in_trade"] = False
+    # Position backstop checks
+    if not TEST_MODE:
+        try:
+            btc_pos = check_open_position(symbol="BTCUSDT")
+            if btc_pos["is_open_position"]:
+                logger.info(
+                    f"Open BTC: side={btc_pos['side']}  size={btc_pos['size']}  "
+                    f"entry={btc_pos['entry_price']:.4f}  uPNL={btc_pos['unrealized_pnl']:.4f}"
+                )
+                in_trade = btc_tracker["in_trade"] = True
+                if btc_tracker["open_trade"]:
+                    if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
+                        btc_tracker.update({"open_trade": False, "sl_hit": True,
+                                             "entry_balance": None, "expected_max_loss": None})
+                        in_trade = btc_tracker["in_trade"] = False
+            else:
+                in_trade = btc_tracker["in_trade"] = False
 
-        eth_pos = check_open_position(symbol="ETHUSDT")
-        if eth_pos["is_open_position"]:
-            logger.info(
-                f"Open ETH: side={eth_pos['side']}  size={eth_pos['size']}  "
-                f"entry={eth_pos['entry_price']:.4f}  uPNL={eth_pos['unrealized_pnl']:.4f}"
-            )
-            in_trade = eth_tracker["in_trade"] = True
-            if eth_tracker["open_trade"]:
-                if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
-                    eth_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None, "expected_max_loss": None})
-                    in_trade = eth_tracker["in_trade"] = False
-        else:
-            in_trade = eth_tracker["in_trade"] = False
+            eth_pos = check_open_position(symbol="ETHUSDT")
+            if eth_pos["is_open_position"]:
+                logger.info(
+                    f"Open ETH: side={eth_pos['side']}  size={eth_pos['size']}  "
+                    f"entry={eth_pos['entry_price']:.4f}  uPNL={eth_pos['unrealized_pnl']:.4f}"
+                )
+                in_trade = eth_tracker["in_trade"] = True
+                if eth_tracker["open_trade"]:
+                    if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
+                        eth_tracker.update({"open_trade": False, "sl_hit": True,
+                                             "entry_balance": None, "expected_max_loss": None})
+                        in_trade = eth_tracker["in_trade"] = False
+            else:
+                in_trade = eth_tracker["in_trade"] = False
 
-    except Exception as e:
-        logger.error(f"Position check error: {e}")
+        except Exception as e:
+            logger.error(f"Position check error: {e}")
 
     position_closed = False
-
-    # Read the current atr_mult once per cycle (written daily by grid_search.py)
     atr_mult = signal_generator.load_params().get("atr_mult", 1.8)
 
     # Signal generation
@@ -742,24 +800,17 @@ def hourly_task():
             trade_symbol = "BTCUSDT" if symbol in ("BTC/USD", "BTCUSDT") else "ETHUSDT"
             ukf_data = ukf_mapping.get(symbol)
 
-            # FIX (independent per-symbol trading, matching the walk-forward
-            # validation): a symbol that already has an open position is
-            # skipped for NEW signal generation this hour. This never blocks
-            # the OTHER symbol — BTC being open has no bearing on whether ETH
-            # can open its own new trade this cycle, and vice versa. Without
-            # this gate, a symbol could stack a second entry order on top of
-            # an already-open position.
-            already_open = check_open_position(symbol=trade_symbol)["is_open_position"]
-            if already_open:
-                logger.info(f"{symbol} already has an open position — "
-                            f"skipping new signal generation this hour.")
-                if symbol in ("BTC/USD", "BTCUSDT"):
-                    btc_signal = None
-                    btc_tracker.update({"sig_gened": False, "ordered": False})
-                else:
-                    eth_signal = None
-                    eth_tracker.update({"sig_gened": False, "ordered": False})
-                continue
+            if not TEST_MODE:
+                already_open = check_open_position(symbol=trade_symbol)["is_open_position"]
+                if already_open:
+                    logger.info(f"{symbol} already has an open position — skipping new signal generation.")
+                    if symbol in ("BTC/USD", "BTCUSDT"):
+                        btc_signal = None
+                        btc_tracker.update({"sig_gened": False, "ordered": False})
+                    else:
+                        eth_signal = None
+                        eth_tracker.update({"sig_gened": False, "ordered": False})
+                    continue
 
             ddata = None
             while ddata is None:
@@ -774,11 +825,11 @@ def hourly_task():
                     print(f"Error downloading {symbol} 1H: {e}")
                     time.sleep(2)
 
-            price = ddata["close"]
+            price = float(ddata["close"])
 
             try:
                 position_manager(symbol, ddata)
-                if symbol in ("ETH/USD", "ETHUSDT"):
+                if symbol in ("ETH/USD", "ETHUSDT") and not TEST_MODE:
                     eth_ps = check_open_position(symbol="ETHUSDT")
                     if eth_ps["is_open_position"]:
                         hr_inc  = 1.003
@@ -793,7 +844,6 @@ def hourly_task():
             except Exception as e:
                 logger.error(f"position_manager / hourly threshold error: {e}")
 
-            # NEW — fetch live ATR for this symbol before generating the signal
             atr_val = get_live_atr(symbol)
 
             if ukf_data:
@@ -822,6 +872,9 @@ def hourly_task():
                 else:
                     logger.error(f"Signal generated for unknown symbol: {symbol}")
                 ordered = False
+
+                if WATCHDOG_MODE:
+                    watchdog.register_signal(my_signal, is_test_mode=TEST_MODE, is_unfunded=(wallet_balance <= 0))
             else:
                 print(f"No signal for {symbol} (1H).")
                 signal_generator.sig_gened = False
@@ -841,72 +894,77 @@ def hourly_task():
 
         if btc_tracker["sig_gened"] and eth_tracker["sig_gened"]:
             logger.info("Signal from both coins.")
-            trade_value = float(wallet_balance)
+            trade_value = float(wallet_balance) / 2.0  # Consolidated 50/50 capital split
 
-            try:
-                eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
-                if eth_response:
-                    guard.start_guard_for_order(eth_signal, eth_response["orderId"])
-            except Exception as e:
-                logger.error(f"ETH order execution error: {e}")
+            if not TEST_MODE:
+                try:
+                    eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
+                    if eth_response:
+                        guard.start_guard_for_order(eth_signal, eth_response["orderId"])
+                except Exception as e:
+                    logger.error(f"ETH order execution error: {e}")
 
-            if eth_ordered:
-                logger.info(f"ETH order placed: id={eth_response.get('orderId') if eth_response else 'N/A'}")
+                try:
+                    btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
+                    if btc_response:
+                        guard.start_guard_for_order(btc_signal, btc_response["orderId"])
+                except Exception as e:
+                    logger.error(f"BTC order execution error: {e}")
+
+                double_order = True
+                signal_generator.sig_gened = True
+                ordered = True
+                eth_tracker.update({"sig_gened": True, "ordered": eth_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance,
+                                     "expected_max_loss": eth_signal.get("expected_max_loss")})
+                btc_tracker.update({"sig_gened": True, "ordered": btc_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance,
+                                     "expected_max_loss": btc_signal.get("expected_max_loss")})
             else:
-                logger.info("ETH order not placed successfully.")
-
-            double_order = True
-            signal_generator.sig_gened = True
-            ordered = True
-            eth_tracker.update({"sig_gened": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance,
-                                 "expected_max_loss": eth_signal.get("expected_max_loss")})
-            btc_tracker.update({"sig_gened": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance,
-                                 "expected_max_loss": btc_signal.get("expected_max_loss")})
+                logger.info("[TEST MODE] Both signals generated; live order execution bypassed.")
 
         elif btc_tracker["sig_gened"] and not eth_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
-            btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
-            try:
-                if btc_response:
-                    guard.start_guard_for_order(btc_signal, btc_response["orderId"])
-            except Exception as e:
-                logger.error(f"BTC guard start error: {e}")
+            if not TEST_MODE:
+                btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
+                try:
+                    if btc_response:
+                        guard.start_guard_for_order(btc_signal, btc_response["orderId"])
+                except Exception as e:
+                    logger.error(f"BTC guard start error: {e}")
 
-            logger.info(f"BTC signal: {btc_ordered_signal}")
-            logger.info(f"BTC order: id={btc_response.get('orderId') if btc_response else 'N/A'}")
-
-            eth_ordered_signal = None
-            signal_generator.sig_gened = True
-            ordered      = True
-            double_order = False
-            btc_tracker.update({"ordered": True, "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance,
-                                 "expected_max_loss": btc_signal.get("expected_max_loss")})
-            eth_tracker["sig_gened"] = False
+                eth_ordered_signal = None
+                signal_generator.sig_gened = True
+                ordered      = True
+                double_order = False
+                btc_tracker.update({"ordered": btc_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance,
+                                     "expected_max_loss": btc_signal.get("expected_max_loss")})
+                eth_tracker["sig_gened"] = False
+            else:
+                logger.info("[TEST MODE] BTC signal generated; live order execution bypassed.")
 
         elif eth_tracker["sig_gened"] and not btc_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
-            eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
-            try:
-                if eth_response:
-                    guard.start_guard_for_order(eth_signal, eth_response["orderId"])
-            except Exception as e:
-                logger.error(f"ETH guard start error: {e}")
+            if not TEST_MODE:
+                eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
+                try:
+                    if eth_response:
+                        guard.start_guard_for_order(eth_signal, eth_response["orderId"])
+                except Exception as e:
+                    logger.error(f"ETH guard start error: {e}")
 
-            logger.info(f"ETH signal: {eth_ordered_signal}")
-            logger.info(f"ETH order: id={eth_response.get('orderId') if eth_response else 'N/A'}")
-
-            btc_ordered_signal = None
-            signal_generator.sig_gened = True
-            ordered      = True
-            double_order = False
-            eth_tracker.update({"sig_gened": True, "ordered": True,
-                                 "last_event_timestamp": now,
-                                 "entry_balance": wallet_balance,
-                                 "expected_max_loss": eth_signal.get("expected_max_loss")})
-            btc_tracker["sig_gened"] = False
+                btc_ordered_signal = None
+                signal_generator.sig_gened = True
+                ordered      = True
+                double_order = False
+                eth_tracker.update({"sig_gened": True, "ordered": eth_ordered,
+                                     "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance,
+                                     "expected_max_loss": eth_signal.get("expected_max_loss")})
+                btc_tracker["sig_gened"] = False
+            else:
+                logger.info("[TEST MODE] ETH signal generated; live order execution bypassed.")
 
         else:
             print("No signals from either coin. No orders placed.")
@@ -919,8 +977,6 @@ def hourly_task():
     except Exception as e:
         logger.error(f"Signal execution error: {e}\n{traceback.format_exc()}")
 
-
-# ── fifteen_minute_task ───────────────────────────────────────────────────────
 
 def fifteen_minute_task():
     global order_changed, my_signal, btc_ordered_signal, eth_ordered_signal
@@ -965,8 +1021,6 @@ def fifteen_minute_task():
         print(f"15-minute task error: {e}\n{traceback.format_exc()}")
 
 
-# ── five_minute_task ──────────────────────────────────────────────────────────
-
 def five_minute_task():
     global order_changed, signal, my_signal
 
@@ -1004,8 +1058,6 @@ def five_minute_task():
     except Exception as e:
         print(f"5-minute task error: {e}\n{traceback.format_exc()}")
 
-
-# ── one_minute_task ───────────────────────────────────────────────────────────
 
 def one_minute_task():
     if has_function_run_this_minute():
@@ -1052,11 +1104,6 @@ def one_minute_task():
                     if not btc_tracker.get("entry_balance"):
                         btc_tracker["entry_balance"] = wallet_balance
                     if not btc_tracker.get("expected_max_loss"):
-                        # No signal history for this untracked position — fall
-                        # back to the hard dollar floor only (dynamic_breach
-                        # in last_resort_stop_loss_check requires a positive
-                        # expected_max_loss, so leaving this None is safe and
-                        # simply skips straight to the hard floor check).
                         btc_tracker["expected_max_loss"] = None
                 if eth_position_status["is_open_position"] and not eth_position:
                     eth_position = True
@@ -1088,31 +1135,33 @@ def one_minute_task():
                     print(f"Error downloading 1M data for {i}: {e}")
                     time.sleep(2)
 
-            price = one_data["close"]
-            llow  = one_data["low"]
-            hhigh = one_data["high"]
+            price = float(one_data["close"])
+            llow  = float(one_data["low"])
+            hhigh = float(one_data["high"])
             print(f"{i}: O:{one_data['open']}  H:{hhigh}  L:{llow}  C:{price}")
+
+            # Watchdog Processing
+            watchdog.process_minute_bar(
+                symbol="BTCUSDT" if "BTC" in i else "ETHUSDT",
+                bar_open=float(one_data["open"]),
+                bar_high=hhigh,
+                bar_low=llow,
+                bar_close=price
+            )
 
             # PositionGuard virtual TP/SL safeguard
             if guard and guard.monitored_orders:
                 for order_id, order_info in list(guard.monitored_orders.items()):
-                    if (order_info["symbol"] == i or
-                            order_info["symbol"].replace("/", "") == i.replace("/", "")):
+                    if (order_info["symbol"] == i or order_info["symbol"].replace("/", "") == i.replace("/", "")):
                         sig = order_info.get("signal")
-                        if not sig:
-                            continue
-                        virtual_close = False
-                        reason        = ""
+                        if not sig: continue
+                        virtual_close = False; reason = ""
                         if sig["order_side"] == "Buy":
-                            if hhigh >= sig["tp_price"]:
-                                virtual_close = True; reason = "Virtual TP (Buy)"
-                            elif llow <= sig["sl_price"]:
-                                virtual_close = True; reason = "Virtual SL (Buy)"
+                            if hhigh >= sig["tp_price"]: virtual_close = True; reason = "Virtual TP (Buy)"
+                            elif llow <= sig["sl_price"]: virtual_close = True; reason = "Virtual SL (Buy)"
                         elif sig["order_side"] == "Sell":
-                            if llow <= sig["tp_price"]:
-                                virtual_close = True; reason = "Virtual TP (Sell)"
-                            elif hhigh >= sig["sl_price"]:
-                                virtual_close = True; reason = "Virtual SL (Sell)"
+                            if llow <= sig["tp_price"]: virtual_close = True; reason = "Virtual TP (Sell)"
+                            elif hhigh >= sig["sl_price"]: virtual_close = True; reason = "Virtual SL (Sell)"
 
                         if virtual_close:
                             logger.warning(f"🚨 {reason} HIT for {i}. Checking position…")
@@ -1120,32 +1169,25 @@ def one_minute_task():
                             if pos_check["is_open_position"]:
                                 logger.warning("Position OPEN – executing emergency close.")
                                 close_futures_position(pos_check)
-                                guard.add_alert_to_queue(
-                                    f"✅ {reason} executed via 1m safeguard for {i}"
-                                )
+                                guard.add_alert_to_queue(f"✅ {reason} executed via 1m safeguard for {i}")
                                 del guard.monitored_orders[order_id]
                                 guard.save_to_json()
                                 if order_info["symbol"] == "BTCUSDT":
-                                    btc_tracker.update({"open_trade": False,
-                                                         "entry_balance": None,
-                                                         "expected_max_loss": None})
+                                    btc_tracker.update({"open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                 elif order_info["symbol"] == "ETHUSDT":
-                                    eth_tracker.update({"open_trade": False,
-                                                         "entry_balance": None,
-                                                         "expected_max_loss": None})
+                                    eth_tracker.update({"open_trade": False, "entry_balance": None, "expected_max_loss": None})
 
-            # Dynamic last-resort PnL-based stop loss (see docstring above)
-            if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
-                if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
-                    btc_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None, "expected_max_loss": None})
+            # Dynamic last-resort PnL-based stop loss
+            if not TEST_MODE:
+                if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
+                    if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
+                        btc_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "expected_max_loss": None})
 
-            if i in ("ETH/USD", "ETHUSDT") and eth_tracker["open_trade"]:
-                if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
-                    eth_tracker.update({"open_trade": False, "sl_hit": True,
-                                         "entry_balance": None, "expected_max_loss": None})
+                if i in ("ETH/USD", "ETHUSDT") and eth_tracker["open_trade"]:
+                    if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
+                        eth_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "expected_max_loss": None})
 
-            # BTC manual tracker
+            # Legacy BTC manual tracker (Preserved)
             if i in ("BTC/USD", "BTCUSDT"):
                 try:
                     bo_signal = btc_ordered_signal
@@ -1155,36 +1197,28 @@ def one_minute_task():
                             if bo_signal["order_type"] == "Market":
                                 btc_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} market order filled. Price:{price}")
-                            if bo_signal["current_price"] > bo_signal["entry_price"] \
-                                    and price <= bo_signal["entry_price"]:
+                            if bo_signal["current_price"] > bo_signal["entry_price"] and price <= bo_signal["entry_price"]:
                                 btc_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} BUY limit filled. Price:{price}")
-                            elif bo_signal["current_price"] < bo_signal["entry_price"] \
-                                    and price >= bo_signal["entry_price"]:
+                            elif bo_signal["current_price"] < bo_signal["entry_price"] and price >= bo_signal["entry_price"]:
                                 btc_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} SELL limit filled. Price:{price}")
 
-                        if btc_tracker["open_trade"] \
-                                and not btc_tracker["tp_hit"] \
-                                and not btc_tracker["sl_hit"]:
+                        if btc_tracker["open_trade"] and not btc_tracker["tp_hit"] and not btc_tracker["sl_hit"]:
                             pnl = float(bo_signal["current_bal"]) - (wallet_balance or 0)
                             if bo_signal["order_side"] == "Buy":
                                 if hhigh >= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif bo_signal["order_side"] == "Sell":
                                 if llow <= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("BTC order tracking: unknown order_side.")
@@ -1196,7 +1230,7 @@ def one_minute_task():
                 except Exception as e:
                     print(f"BTC 1m tracker error: {e}")
 
-            # ETH manual tracker
+            # Legacy ETH manual tracker (Preserved)
             if i in ("ETH/USD", "ETHUSDT"):
                 try:
                     eo_signal = eth_ordered_signal
@@ -1206,36 +1240,28 @@ def one_minute_task():
                             if eo_signal["order_type"] == "Market":
                                 eth_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} market order filled. Price:{price}")
-                            if eo_signal["current_price"] > eo_signal["entry_price"] \
-                                    and price <= eo_signal["entry_price"]:
+                            if eo_signal["current_price"] > eo_signal["entry_price"] and price <= eo_signal["entry_price"]:
                                 eth_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} BUY limit filled. Price:{price}")
-                            elif eo_signal["current_price"] < eo_signal["entry_price"] \
-                                    and price >= eo_signal["entry_price"]:
+                            elif eo_signal["current_price"] < eo_signal["entry_price"] and price >= eo_signal["entry_price"]:
                                 eth_tracker.update({"order_filled": True, "open_trade": True})
                                 logger.info(f"{i} SELL limit filled. Price:{price}")
 
-                        if eth_tracker["open_trade"] \
-                                and not eth_tracker["tp_hit"] \
-                                and not eth_tracker["sl_hit"]:
+                        if eth_tracker["open_trade"] and not eth_tracker["tp_hit"] and not eth_tracker["sl_hit"]:
                             pnl = float(eo_signal["current_bal"]) - (wallet_balance or 0)
                             if eo_signal["order_side"] == "Buy":
                                 if hhigh >= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif eo_signal["order_side"] == "Sell":
                                 if llow <= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False,
-                                                         "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("ETH order tracking: unknown order_side.")
