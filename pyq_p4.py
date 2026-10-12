@@ -57,6 +57,7 @@ from p4_utils import (
     compute_atr, fetch_recent_bars,
     binance_client, crypto_client, _binance_lock,
 )
+import pyquant_signal_math as signal_math
 
 nest_asyncio.apply()
 
@@ -86,7 +87,9 @@ TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
 # ── Trading & Operational Constants ──────────────────────────────────────────
-LEVERAGE           = 10
+# Sourced from pyquant_signal_math (Phase 0 unification) so live and
+# walkforward.py can't silently drift on leverage again.
+LEVERAGE           = signal_math.LEVERAGE_DEFAULT
 ATR_LOOKBACK_HOURS = 20
 ATR_PERIOD         = 14
 UKF_TRAIN_DAYS     = 30
@@ -328,6 +331,7 @@ btc_tracker = {
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
     "entry_balance": None,
+    "entry_capital": None,  # Phase 0: actual capital allocated to this trade
     "expected_max_loss": None,
 }
 eth_tracker = {
@@ -335,6 +339,7 @@ eth_tracker = {
     "in_trade": False, "open_trade": False, "last_event_timestamp": None,
     "tp_hit": False, "sl_hit": False,
     "entry_balance": None,
+    "entry_capital": None,  # Phase 0: actual capital allocated to this trade
     "expected_max_loss": None,
 }
 
@@ -767,7 +772,7 @@ def hourly_task():
                 if btc_tracker["open_trade"]:
                     if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
                         btc_tracker.update({"open_trade": False, "sl_hit": True,
-                                             "entry_balance": None, "expected_max_loss": None})
+                                             "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                         in_trade = btc_tracker["in_trade"] = False
             else:
                 in_trade = btc_tracker["in_trade"] = False
@@ -782,7 +787,7 @@ def hourly_task():
                 if eth_tracker["open_trade"]:
                     if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
                         eth_tracker.update({"open_trade": False, "sl_hit": True,
-                                             "entry_balance": None, "expected_max_loss": None})
+                                             "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                         in_trade = eth_tracker["in_trade"] = False
             else:
                 in_trade = eth_tracker["in_trade"] = False
@@ -896,6 +901,17 @@ def hourly_task():
             logger.info("Signal from both coins.")
             trade_value = float(wallet_balance) / 2.0  # Consolidated 50/50 capital split
 
+            # Phase 0 fix: expected_max_loss was computed inside
+            # generate_signal() against the full wallet_balance, before
+            # this 50/50 split was known — recalculate it now against the
+            # capital actually allocated to each trade, so the last-resort
+            # stop (LAST_RESORT_MULTIPLIER * expected_max_loss) is
+            # calibrated correctly.
+            eth_signal["expected_max_loss"] = signal_math.expected_max_loss(
+                eth_signal["entry_price"], eth_signal["sl_price"], trade_value, LEVERAGE)
+            btc_signal["expected_max_loss"] = signal_math.expected_max_loss(
+                btc_signal["entry_price"], btc_signal["sl_price"], trade_value, LEVERAGE)
+
             if not TEST_MODE:
                 try:
                     eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
@@ -915,16 +931,20 @@ def hourly_task():
                 signal_generator.sig_gened = True
                 ordered = True
                 eth_tracker.update({"sig_gened": True, "ordered": eth_ordered, "last_event_timestamp": now,
-                                     "entry_balance": wallet_balance,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
                                      "expected_max_loss": eth_signal.get("expected_max_loss")})
                 btc_tracker.update({"sig_gened": True, "ordered": btc_ordered, "last_event_timestamp": now,
-                                     "entry_balance": wallet_balance,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
                                      "expected_max_loss": btc_signal.get("expected_max_loss")})
             else:
                 logger.info("[TEST MODE] Both signals generated; live order execution bypassed.")
 
         elif btc_tracker["sig_gened"] and not eth_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
+            # Phase 0 fix: recalculate against the actually-allocated 80%,
+            # not the full wallet_balance generate_signal() saw.
+            btc_signal["expected_max_loss"] = signal_math.expected_max_loss(
+                btc_signal["entry_price"], btc_signal["sl_price"], trade_value, LEVERAGE)
             if not TEST_MODE:
                 btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
                 try:
@@ -938,7 +958,7 @@ def hourly_task():
                 ordered      = True
                 double_order = False
                 btc_tracker.update({"ordered": btc_ordered, "last_event_timestamp": now,
-                                     "entry_balance": wallet_balance,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
                                      "expected_max_loss": btc_signal.get("expected_max_loss")})
                 eth_tracker["sig_gened"] = False
             else:
@@ -946,6 +966,10 @@ def hourly_task():
 
         elif eth_tracker["sig_gened"] and not btc_tracker["sig_gened"]:
             trade_value = float(wallet_balance) * 0.8
+            # Phase 0 fix: recalculate against the actually-allocated 80%,
+            # not the full wallet_balance generate_signal() saw.
+            eth_signal["expected_max_loss"] = signal_math.expected_max_loss(
+                eth_signal["entry_price"], eth_signal["sl_price"], trade_value, LEVERAGE)
             if not TEST_MODE:
                 eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
                 try:
@@ -960,7 +984,7 @@ def hourly_task():
                 double_order = False
                 eth_tracker.update({"sig_gened": True, "ordered": eth_ordered,
                                      "last_event_timestamp": now,
-                                     "entry_balance": wallet_balance,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
                                      "expected_max_loss": eth_signal.get("expected_max_loss")})
                 btc_tracker["sig_gened"] = False
             else:
@@ -1173,19 +1197,19 @@ def one_minute_task():
                                 del guard.monitored_orders[order_id]
                                 guard.save_to_json()
                                 if order_info["symbol"] == "BTCUSDT":
-                                    btc_tracker.update({"open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                 elif order_info["symbol"] == "ETHUSDT":
-                                    eth_tracker.update({"open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
 
             # Dynamic last-resort PnL-based stop loss
             if not TEST_MODE:
                 if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
                     if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
-                        btc_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "expected_max_loss": None})
+                        btc_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
 
                 if i in ("ETH/USD", "ETHUSDT") and eth_tracker["open_trade"]:
                     if last_resort_stop_loss_check("ETHUSDT", eth_tracker):
-                        eth_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "expected_max_loss": None})
+                        eth_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
 
             # Legacy BTC manual tracker (Preserved)
             if i in ("BTC/USD", "BTCUSDT"):
@@ -1208,17 +1232,17 @@ def one_minute_task():
                             pnl = float(bo_signal["current_bal"]) - (wallet_balance or 0)
                             if bo_signal["order_side"] == "Buy":
                                 if hhigh >= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif bo_signal["order_side"] == "Sell":
                                 if llow <= bo_signal["tp_price"]:
-                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= bo_signal["sl_price"]:
-                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    btc_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("BTC order tracking: unknown order_side.")
@@ -1251,17 +1275,17 @@ def one_minute_task():
                             pnl = float(eo_signal["current_bal"]) - (wallet_balance or 0)
                             if eo_signal["order_side"] == "Buy":
                                 if hhigh >= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif llow <= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             elif eo_signal["order_side"] == "Sell":
                                 if llow <= eo_signal["tp_price"]:
-                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"tp_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} TP hit. Price:{price}  PNL:{pnl}")
                                 elif hhigh >= eo_signal["sl_price"]:
-                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "expected_max_loss": None})
+                                    eth_tracker.update({"sl_hit": True, "open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
                                     logger.info(f"{i} SL hit. Price:{price}  PNL:{pnl}")
                             else:
                                 print("ETH order tracking: unknown order_side.")

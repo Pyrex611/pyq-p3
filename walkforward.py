@@ -46,6 +46,8 @@ import matplotlib.gridspec as gridspec
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from filterpy.common import Q_discrete_white_noise
 
+import pyquant_signal_math as signal_math
+
 warnings.filterwarnings('ignore')
 
 try:
@@ -61,7 +63,7 @@ except ImportError:
 # SECTION 1 — CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-LEVERAGE              = 10
+LEVERAGE              = signal_math.LEVERAGE_DEFAULT  # 10x — shared with live (Phase 0 unification)
 INITIAL_CAPITAL       = 10.0
 UKF_TRAIN_DAYS        = 30
 GRID_SEARCH_DAYS      = 15
@@ -74,12 +76,20 @@ PARAM_SMOOTHING_ALPHA = 0.7
 USE_ATR_SL            = True    # ATR-adaptive SL is active
 ATR_PERIOD            = 14
 ATR_SL_RANGE          = (1.0, 3.0)
-ATR_SL_MULTIPLIER     = 1.8
-BTC_SL_FLOOR          = 20.0
-ETH_SL_FLOOR          = 8.0
+# SL floor/delta and the ATR multiplier default now come from the shared
+# module (Phase 0 unification) — kept as module-level names here (rather
+# than inlined at every call site) so a run's printed config and its
+# metrics still show these values directly.
+ATR_SL_MULTIPLIER     = signal_math.DEFAULT_ATR_MULTIPLIER
+BTC_SL_FLOOR          = signal_math.SL_FLOOR["BTC"]
+ETH_SL_FLOOR          = signal_math.SL_FLOOR["ETH"]
 
-BTC_SL_DELTA          = 7.5 * 30
-ETH_SL_DELTA          = 16.0 * 1
+BTC_SL_DELTA          = signal_math.SL_FIXED_DELTA["BTC"]
+ETH_SL_DELTA          = signal_math.SL_FIXED_DELTA["ETH"]
+
+# Profit-target early-exit fractions (of margin-at-risk) — shared with live.
+BTC_PROFIT_TARGET     = signal_math.PROFIT_TARGET_FRACTION["BTC"]
+ETH_PROFIT_TARGET     = signal_math.PROFIT_TARGET_FRACTION["ETH"]
 
 USE_PESSIMISTIC_EXITS = True
 ENABLE_PLOTTING       = True
@@ -154,7 +164,9 @@ def market_exit(price: float, qty: float):
 
 
 def compute_profit(side: str, entry: float, exit_p: float, qty: float) -> float:
-    return (exit_p - entry) * qty if side == 'Buy' else (entry - exit_p) * qty
+    # Delegates to the shared module (Phase 0 unification) — kept as a
+    # local name since it's called throughout this file.
+    return signal_math.compute_profit(side, entry, exit_p, qty)
 
 
 def funding_cost(entry_ts, exit_ts, qty: float, entry_price: float) -> float:
@@ -200,17 +212,13 @@ def sl_price(entry: float, side: str, symbol: str,
     """
     ATR-adaptive: delta = max(atr_mult × ATR, fixed_floor).
     Fixed:        delta = $225 (BTC) / $16 (ETH).
+    Delegates to the shared module (Phase 0 unification) — the USE_ATR_SL
+    gate stays local since live has no equivalent toggle (it always
+    attempts ATR-adaptive SL when ATR data is available).
     """
-    is_btc      = (symbol == 'BTC')
-    fixed_delta = BTC_SL_DELTA if is_btc else ETH_SL_DELTA
-    floor_delta = BTC_SL_FLOOR if is_btc else ETH_SL_FLOOR
-
-    if USE_ATR_SL and atr > 0 and atr_mult is not None:
-        delta = max(atr_mult * atr, floor_delta)
-    else:
-        delta = fixed_delta
-
-    return (entry - delta) if side == 'Buy' else (entry + delta)
+    effective_atr = atr if USE_ATR_SL else 0.0
+    return entry - signal_math.sl_delta(symbol, effective_atr, atr_mult) if side == 'Buy' \
+        else entry + signal_math.sl_delta(symbol, effective_atr, atr_mult)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 5 — UKF ENGINE
@@ -592,8 +600,7 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
 
             if not exit_leg:
                 pnl_check = compute_profit(side, ep, hb if side == 'Buy' else lb, qty)
-                margin_at_risk = (qty * ep) / leverage
-                if pnl_check >= margin_at_risk * 0.225:
+                if pnl_check >= signal_math.profit_target_threshold('BTC', qty, ep, leverage):
                     exit_leg  = 'MARKET'
                     exit_trig = hb if side == 'Buy' else lb
 
@@ -630,8 +637,7 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
 
             if not exit_leg:
                 pnl_check = compute_profit(side, ep, he if side == 'Buy' else le, qty)
-                margin_at_risk = (qty * ep) / leverage
-                if pnl_check >= margin_at_risk * 0.175:
+                if pnl_check >= signal_math.profit_target_threshold('ETH', qty, ep, leverage):
                     exit_leg  = 'MARKET'
                     exit_trig = he if side == 'Buy' else le
 
@@ -861,9 +867,18 @@ def plot_results(capital_curve, trades, daily_params_log, initial_capital):
     ax3 = fig.add_subplot(gs[1, 2])
     profits = [t['profit'] for t in trades]
     if profits:
-        ax3.hist(profits, bins=min(30, len(profits)),
-                  color=['#2ecc71' if p > 0 else '#e74c3c' for p in profits],
-                  edgecolor='white', lw=0.4)
+        # FIX (Phase 0): matplotlib's hist() takes ONE color per DATASET,
+        # not one per sample — the previous per-trade color list crashed
+        # with "The 'color' keyword argument must have one color per
+        # dataset" on any run with trades. Wins and losses are now two
+        # separate, shared-bin datasets, each with its own single color.
+        bins = np.histogram_bin_edges(profits, bins=min(30, len(profits)))
+        wins = [p for p in profits if p > 0]
+        losses = [p for p in profits if p <= 0]
+        if wins:
+            ax3.hist(wins, bins=bins, color='#2ecc71', edgecolor='white', lw=0.4)
+        if losses:
+            ax3.hist(losses, bins=bins, color='#e74c3c', edgecolor='white', lw=0.4)
     ax3.axvline(0, color='black', lw=0.9, linestyle='--')
     ax3.set_title('Trade PnL Distribution', fontsize=11, fontweight='bold')
     ax3.set_xlabel('Profit ($)'); ax3.set_ylabel('Count'); ax3.grid(alpha=0.3)

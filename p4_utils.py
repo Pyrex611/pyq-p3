@@ -49,6 +49,8 @@ from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from filterpy.common import Q_discrete_white_noise
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error, r2_score
 
+import pyquant_signal_math as signal_math
+
 nest_asyncio.apply()
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -293,11 +295,24 @@ def check_open_position(symbol: str) -> dict:
             position_info["entry_price"]      = float(position["entryPrice"])
             position_info["unrealized_pnl"]   = float(position["unRealizedProfit"])
             position_info["liquidation_price"] = float(position["liquidationPrice"])
-            limit = 0.2 if symbol == "BTCUSDT" else 0.15
-            upnl  = position_info["unrealized_pnl"]
-            if upnl >= wallet_balance * limit or upnl >= 0.6:
+            upnl = position_info["unrealized_pnl"]
+            # Profit-target early exit — ported from walkforward.py's validated
+            # run (Phase 0 unification). The threshold is a fraction of
+            # MARGIN-AT-RISK (the capital actually allocated to this position,
+            # derived from its real exchange size/entry), not of the full
+            # wallet balance — the previous wallet_balance-relative version
+            # (0.2 BTC / 0.15 ETH of wallet_balance, plus a $0.6 absolute
+            # floor) was a live-only approximation that drifted from the
+            # validated reference.
+            pt_threshold = signal_math.profit_target_threshold(
+                symbol, position_info["size"], position_info["entry_price"]
+            )
+            if upnl >= pt_threshold:
                 close_futures_position(position_info)
-                logger.info(f"check_open_position: auto-closed {symbol} (uPNL={upnl:.4f})")
+                logger.info(
+                    f"check_open_position: profit-target early exit for {symbol} "
+                    f"(uPNL=${upnl:.4f} >= margin-at-risk threshold ${pt_threshold:.4f})"
+                )
     except Exception as e:
         logger.error(f"check_open_position ({symbol}): {e}")
     return position_info
@@ -374,7 +389,13 @@ class SignalGenerator:
                     "strict_eth": 0.0035, "stricts_eth": 0.0075,
                     "atr_mult": 1.8}
 
-    def _calculate_tp_price(self, price, pred, tp_multiplier, rounds, leverage, bal, tp_inc, entry, trend):
+    def _calculate_tp_price(self, price, pred, rounds, leverage, bal, tp_inc, entry, trend):
+        # NOTE: this function previously also took a `tp_multiplier` arg
+        # (fed from `_get_symbol_params()`'s now-removed buy_tp/sell_tp
+        # keys). It was never referenced in the body — only `tp_inc`
+        # actually drove the TP price, in both this file and
+        # walkforward.py's own generate_signal(). Removed as dead
+        # plumbing (Phase 0 cleanup); TP behavior is unchanged.
         net_bal = bal * tp_inc
         net_val = net_bal * leverage
         tp_qty  = (bal * leverage) / entry if entry > 0 else 1.0
@@ -385,27 +406,25 @@ class SignalGenerator:
 
     def _calculate_sl_price(self, entry_price, symbol, trend, atr=0.0, atr_mult=None):
         is_btc = (symbol in ("BTC/USD", "BTC", "BTCUSDT"))
-        fixed_delta = (7.5 * 30) if is_btc else (16.0 * 1)
-        floor_delta = 20.0 if is_btc else 8.0
-        rounds      = 0 if is_btc else 2
-
-        if atr > 0 and atr_mult is not None:
-            delta = max(atr_mult * atr, floor_delta)
-        else:
-            delta = fixed_delta
+        rounds = 0 if is_btc else 2
+        # SL delta/floor now come from the shared module (Phase 0
+        # unification) so this always matches walkforward.py's sl_price().
+        delta = signal_math.sl_delta(symbol, atr, atr_mult)
 
         if trend == "up":
             return round(entry_price - delta, rounds)
         return round(entry_price + delta, rounds)
 
     def _get_symbol_params(self, symbol: str, params: dict) -> dict:
+        # buy_tp/sell_tp removed (Phase 0 cleanup) — they were never read
+        # by `_calculate_tp_price()`, in this file or in walkforward.py's
+        # own generate_signal(); only tp_inc/sell_inc actually drive TP.
         if symbol in ("BTC/USD", "BTCUSDT"):
             tp_inc = 1.004
             return {
                 "strict": params.get("strict_btc", 0.0025),
                 "trade_symbol": "BTCUSDT",
                 "pct_diff_and_vol_strict": params.get("stricts_btc", 0.005),
-                "buy_tp": 1.0075, "sell_tp": 2 - 1.0075,
                 "rounds": 0, "tp_inc": tp_inc, "sell_inc": 2 - tp_inc,
             }
         elif symbol in ("ETH/USD", "ETHUSDT"):
@@ -414,7 +433,6 @@ class SignalGenerator:
                 "strict": params.get("strict_eth", 0.0035),
                 "trade_symbol": "ETHUSDT",
                 "pct_diff_and_vol_strict": params.get("stricts_eth", 0.0075),
-                "buy_tp": 1.0085, "sell_tp": 2 - 1.0085,
                 "rounds": 2, "tp_inc": tp_inc, "sell_inc": 2 - tp_inc,
             }
         raise ValueError(f"Unknown symbol: {symbol}")
@@ -454,10 +472,15 @@ class SignalGenerator:
                 return None
             entry = round(price if price < buy_price else buy_price, r)
             order_type = "Market" if price < buy_price else "Limit"
-            tp_price = self._calculate_tp_price(price, pred, sp["buy_tp"], r, leverage, bal, sp["tp_inc"], entry, "up")
+            tp_price = self._calculate_tp_price(price, pred, r, leverage, bal, sp["tp_inc"], entry, "up")
             sl_price = self._calculate_sl_price(entry, symbol, "up", atr, atr_mult)
-            pos_est = (bal * leverage) / entry if entry > 0 else 0
-            expected_max_loss = abs(entry - sl_price) * pos_est
+            # NOTE: `bal` here is the wallet balance at signal-generation
+            # time, before hourly_task() knows whether this will end up a
+            # single-signal (80%-of-balance) or double-signal (50/50) trade.
+            # This figure is therefore provisional; pyq_p4.py recalculates
+            # it against the actual allocated trade capital once that split
+            # is known, via signal_math.expected_max_loss() (Phase 0 fix).
+            expected_max_loss = signal_math.expected_max_loss(entry, sl_price, bal, leverage)
 
             sig = {"symbol": sp["trade_symbol"], "order_type": order_type,
                    "entry_price": float(entry), "order_side": "Buy",
@@ -476,10 +499,12 @@ class SignalGenerator:
                 return None
             entry = round(price if price > sell_price else sell_price, r)
             order_type = "Market" if price > sell_price else "Limit"
-            tp_price = self._calculate_tp_price(price, pred, sp["sell_tp"], r, leverage, bal, sp["sell_inc"], entry, "down")
+            tp_price = self._calculate_tp_price(price, pred, r, leverage, bal, sp["sell_inc"], entry, "down")
             sl_price = self._calculate_sl_price(entry, symbol, "down", atr, atr_mult)
-            pos_est = (bal * leverage) / entry if entry > 0 else 0
-            expected_max_loss = abs(sl_price - entry) * pos_est
+            # Provisional figure — see the matching NOTE in the "up" branch
+            # above; pyq_p4.py recalculates this once the actual allocated
+            # trade capital is known (Phase 0 fix).
+            expected_max_loss = signal_math.expected_max_loss(entry, sl_price, bal, leverage)
 
             sig = {"symbol": sp["trade_symbol"], "order_type": order_type,
                    "entry_price": float(entry), "order_side": "Sell",
