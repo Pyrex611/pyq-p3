@@ -24,6 +24,12 @@ optuna>=4.0.0
 nest-asyncio>=1.6.0
 schedule>=1.2.1
 
+# ── Phase 1: externalized state (pyquant_state.py) ─────────────
+# Only used when DATABASE_URL is set; pyquant_state.py falls back to the
+# stdlib's sqlite3 (no install needed) otherwise. Listed unconditionally
+# so it's already installed whenever DATABASE_URL does get set.
+psycopg2-binary>=2.9.9
+
 # ── HTTP / networking ─────────────────────────────────────────
 requests>=2.31.0
 websocket-client>=1.7.0

@@ -59,6 +59,7 @@ from p4_utils import (
 )
 import pyquant_signal_math as signal_math
 import pyquant_state as state_store
+import pyquant_resilience as resilience
 
 nest_asyncio.apply()
 
@@ -523,9 +524,22 @@ def signal_executor(signal: dict, trade_val: float):
         ordered = False
         return signal, response, ordered
 
+    # Phase 1: a deterministic client order id makes this entry order safe
+    # to retry. Without one, Binance auto-generates a fresh id per call, so
+    # a retry after a lost response (the request succeeded server-side,
+    # but we never saw the reply) could open a SECOND real position —
+    # the single most dangerous version of the duplicate-order risk
+    # pyquant_resilience.py's module docstring describes, since this is
+    # the entry itself, not a bracket SL/TP. The bucket is the current
+    # hour because signals are generated once per hourly_task() run; two
+    # calls for the SAME signal within the same hour are necessarily a
+    # retry, never a legitimate second trade.
+    client_order_id = f"pyq-{symbol}-{order_side}-{state_store.current_hour_bucket()}"[:36]
+
     order_params: dict = {
         "symbol": symbol, "side": order_side,
         "type": order_type, "quantity": quantity_str,
+        "newClientOrderId": client_order_id,
     }
 
     if order_type == "LIMIT":
@@ -543,7 +557,25 @@ def signal_executor(signal: dict, trade_val: float):
 
     try:
         logger.info(f"SignalExecutor: placing {order_type} for {symbol}…")
-        response = binance_client.futures_create_order(**order_params)
+
+        def _place():
+            return binance_client.futures_create_order(**order_params)
+
+        try:
+            response = resilience.retry_api_call(_place, description=f"signal_executor entry ({symbol})")
+        except Exception as e:
+            if resilience.is_duplicate_order_error(e):
+                # The order was actually placed on a prior attempt whose
+                # response we never saw — look it up by the client id
+                # instead of placing a second one.
+                logger.warning(
+                    f"SignalExecutor: {symbol} entry rejected as duplicate of "
+                    f"clientOrderId={client_order_id} — looking up the original instead of retrying."
+                )
+                response = binance_client.futures_get_order(symbol=symbol, origClientOrderId=client_order_id)
+            else:
+                raise
+
         logger.info(f"SignalExecutor: order placed – ID={response['orderId']}")
         signal["orderId"] = response["orderId"]
         signals.append(signal)

@@ -304,8 +304,11 @@ def check_open_position(symbol: str) -> dict:
         "take_profit_price": None, "stop_loss_price": None,
     }
     try:
-        with _binance_lock:
-            positions = binance_client.futures_position_information()
+        def _read_positions():
+            with _binance_lock:
+                return binance_client.futures_position_information()
+        # Read-only call — plain retry is always safe (Phase 1).
+        positions = resilience.retry_api_call(_read_positions, description="check_open_position read")
         usdt_eq, _, _ = get_equities()
         wallet_balance = usdt_eq
         position = next(
@@ -348,11 +351,29 @@ def close_futures_position(position_data: dict) -> dict:
         side       = position_data["side"]
         size       = position_data["size"]
         close_side = "SELL" if side == "BUY" else "BUY"
-        with _binance_lock:
-            response = binance_client.futures_create_order(
-                symbol=symbol, side=close_side,
-                type="MARKET", quantity=size, reduceOnly=True
-            )
+
+        def _close():
+            with _binance_lock:
+                return binance_client.futures_create_order(
+                    symbol=symbol, side=close_side,
+                    type="MARKET", quantity=size, reduceOnly=True
+                )
+
+        # Phase 1: retry/backoff on transient failures. reduceOnly makes a
+        # duplicate retry safe BY CONSTRUCTION — it can only shrink/close
+        # the existing position, never open a new one in the wrong
+        # direction — so unlike signal_executor()'s entry order, no
+        # deterministic client id is needed here. If the position was
+        # already closed by a prior attempt whose response was lost,
+        # Binance rejects the reduce-only retry; that's treated as success.
+        try:
+            response = resilience.retry_api_call(_close, description=f"close_futures_position ({symbol})")
+        except Exception as e:
+            if resilience.is_already_closed_error(e):
+                logger.info(f"close_futures_position: {symbol} was already closed by a prior attempt.")
+                return {"status": "already_closed", "symbol": symbol}
+            raise
+
         logger.info(f"close_futures_position: closed {symbol} via {close_side} MARKET.")
         return response
     except Exception as e:

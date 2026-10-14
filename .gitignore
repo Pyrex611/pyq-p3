@@ -3,3 +3,10 @@ btc_back365.csv
 btc_back366.csv
 eth_back365.csv
 eth_back366.csv
+
+# Phase 1: local SQLite state-store fallback (used only when DATABASE_URL
+# is unset) — pure runtime state, never meant to be committed.
+pyquant_state.sqlite3
+pyquant_state.sqlite3-journal
+pyquant_state.sqlite3-wal
+pyquant_state.sqlite3-shm

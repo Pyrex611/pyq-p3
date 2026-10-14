@@ -50,6 +50,30 @@ def _is_retryable(exc: Exception) -> bool:
     return any(snippet in msg for snippet in _RETRYABLE_SNIPPETS)
 
 
+def is_duplicate_order_error(exc: Exception) -> bool:
+    """
+    True if `exc` looks like Binance rejecting an order as a duplicate of
+    one already placed (its error text includes "duplicate") — the
+    expected, SAFE outcome of retrying `futures_create_order` after a
+    prior attempt's response was lost, when a deterministic
+    `newClientOrderId` was supplied (see signal_executor() in pyq_p4.py).
+    This is not a failure; the caller should treat it as "already placed"
+    and look the order up by client id.
+    """
+    return "duplicate" in str(exc).lower()
+
+
+def is_already_closed_error(exc: Exception) -> bool:
+    """
+    True if `exc` looks like Binance rejecting a reduce-only close because
+    there is no position left to close — the expected, SAFE outcome of
+    retrying close_futures_position() after a prior attempt's response
+    was lost but the close actually went through.
+    """
+    msg = str(exc).lower()
+    return "reduceonly" in msg.replace(" ", "").replace("-", "") or "would increase" in msg or "-2022" in msg
+
+
 def retry_api_call(fn: Callable, *args, max_retries: int = 3, base_delay: float = 1.0,
                     description: str = "API call", **kwargs) -> Any:
     """
