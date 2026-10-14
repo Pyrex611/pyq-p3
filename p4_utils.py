@@ -50,6 +50,8 @@ from filterpy.common import Q_discrete_white_noise
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error, r2_score
 
 import pyquant_signal_math as signal_math
+import pyquant_state as state_store
+import pyquant_resilience as resilience
 
 nest_asyncio.apply()
 
@@ -82,6 +84,27 @@ BINANCE_SECRET_KEY = _require_env("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN     = _require_env("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
 
+# ── Phase 1: paper mode ──────────────────────────────────────────────────────
+# PYQUANT_MODE=paper runs against Binance Futures TESTNET — real exchange
+# API integration (auth, order placement, Algo Order bracket orders, fills)
+# exercised end-to-end with no real capital at risk. This is deliberately
+# NOT the same thing as walkforward.py: walkforward validates the STRATEGY
+# against history; paper mode validates the live EXECUTION PATH against a
+# real (test) exchange. Separate testnet credentials are required —
+# mainnet keys do not work against testnet.binancefuture.com and vice
+# versa. Defaults to "live" so existing deployments are unaffected.
+PYQUANT_MODE = os.environ.get("PYQUANT_MODE", "live").strip().lower()
+if PYQUANT_MODE not in ("live", "paper"):
+    raise EnvironmentError(f"PYQUANT_MODE must be 'live' or 'paper', got: {PYQUANT_MODE!r}")
+IS_PAPER_MODE = (PYQUANT_MODE == "paper")
+
+if IS_PAPER_MODE:
+    _BINANCE_KEY    = _require_env("BINANCE_TESTNET_API_KEY")
+    _BINANCE_SECRET = _require_env("BINANCE_TESTNET_SECRET_KEY")
+else:
+    _BINANCE_KEY    = BINANCE_API_KEY
+    _BINANCE_SECRET = BINANCE_SECRET_KEY
+
 _binance_lock = threading.Lock()
 
 
@@ -89,9 +112,10 @@ def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Client
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
-            client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=False)
+            client = Client(_BINANCE_KEY, _BINANCE_SECRET, testnet=IS_PAPER_MODE)
             client.ping()
-            print(f"[Startup] Binance connected on attempt {attempt}.")
+            print(f"[Startup] Binance connected on attempt {attempt} "
+                  f"({'TESTNET / paper mode' if IS_PAPER_MODE else 'mainnet / live'}).")
             return client
         except Exception as e:
             last_err = e
@@ -380,9 +404,17 @@ class SignalGenerator:
 
     @staticmethod
     def load_params() -> dict:
+        # Phase 1: DB-first (pyquant_state), same reasoning as
+        # PositionGuard's monitored_orders — optimal_params.json on local
+        # disk doesn't survive a stateless Vercel invocation, and the
+        # daily optimizer (p4_orchestra.py) now writes to the DB too.
+        db_params = state_store.get_json("optimal_params")
+        if db_params is not None:
+            return db_params
         try:
             with open("optimal_params.json", "r") as f:
                 params = json.load(f)
+            state_store.set_json("optimal_params", params)  # seed the DB from the legacy file
             return params
         except FileNotFoundError:
             return {"strict_btc": 0.0025, "stricts_btc": 0.005,
@@ -547,20 +579,41 @@ class PositionGuard:
         self._hedge_mode: bool = self._detect_hedge_mode()
 
     def load_trade_state(self) -> dict:
+        # Phase 1: primary store is pyquant_state (SQLite locally, Postgres
+        # in production) so this survives a stateless Vercel invocation.
+        # The local active_trades.json file is read as a one-time migration
+        # fallback only — if the DB has nothing yet but the file does, that
+        # means this is the first run after upgrading, so seed the DB from
+        # it and use the file's content for this call.
+        db_state = state_store.get_json("position_guard_monitored_orders")
+        if db_state is not None:
+            return db_state
         if os.path.exists(self.trade_state_file):
             try:
                 with open(self.trade_state_file, "r") as f:
-                    return json.load(f)
+                    legacy_state = json.load(f)
+                state_store.set_json("position_guard_monitored_orders", legacy_state)
+                return legacy_state
             except Exception:
                 return {}
         return {}
 
     def save_to_json(self):
+        # Despite the name (kept for call-site compatibility), this now
+        # writes to pyquant_state, not JSON on disk (Phase 1). A local
+        # file write is also attempted, best-effort, so a VPS/orchestra
+        # deployment with no DATABASE_URL set still has a human-readable
+        # active_trades.json to inspect — but the DB write is the one that
+        # actually matters for correctness.
+        try:
+            state_store.set_json("position_guard_monitored_orders", self.monitored_orders)
+        except Exception as e:
+            logger.error(f"PositionGuard.save_to_json (state store): {e}")
         try:
             with open(self.trade_state_file, "w") as f:
                 json.dump(self.monitored_orders, f, indent=4, default=str)
-        except Exception as e:
-            logger.error(f"PositionGuard.save_to_json: {e}")
+        except Exception:
+            pass  # best-effort only; the state-store write above is authoritative
 
     def _detect_hedge_mode(self, max_retries: int = 5, retry_delay: int = 3) -> bool:
         last_err = None
@@ -780,9 +833,32 @@ class PositionGuard:
                     params["reduceOnly"] = "true"
                 return params
 
-            with self._api_lock:
-                sl_order = self.binance._request_futures_api('post', 'algoOrder', signed=True, data=_algo_params("STOP_MARKET", sl_str))
-                tp_order = self.binance._request_futures_api('post', 'algoOrder', signed=True, data=_algo_params("TAKE_PROFIT_MARKET", tp_str))
+            def _existing_order_of_type(order_type: str) -> bool:
+                with self._api_lock:
+                    current = self.binance._request_futures_api(
+                        'get', 'algoOrders/current', signed=True, data={"symbol": symbol})
+                return any(o.get("type") == order_type for o in (current or []))
+
+            def _place_sl():
+                with self._api_lock:
+                    return self.binance._request_futures_api(
+                        'post', 'algoOrder', signed=True, data=_algo_params("STOP_MARKET", sl_str))
+
+            def _place_tp():
+                with self._api_lock:
+                    return self.binance._request_futures_api(
+                        'post', 'algoOrder', signed=True, data=_algo_params("TAKE_PROFIT_MARKET", tp_str))
+
+            # Phase 1: retry/backoff on transient failures, with a
+            # duplicate-order guard before any retry (not the first
+            # attempt) — see pyquant_resilience.py's module docstring for
+            # why that matters on an endpoint with no client-order-id.
+            sl_order = resilience.retry_algo_order(
+                _place_sl, lambda: _existing_order_of_type("STOP_MARKET"),
+                description=f"_place_bracket_order SL ({symbol})")
+            tp_order = resilience.retry_algo_order(
+                _place_tp, lambda: _existing_order_of_type("TAKE_PROFIT_MARKET"),
+                description=f"_place_bracket_order TP ({symbol})")
 
         except Exception as e:
             logger.error(f"_place_bracket_order ({symbol}): {e}")
@@ -829,9 +905,30 @@ class PositionGuard:
                 if not self._hedge_mode: p["reduceOnly"] = "true"
                 return p
 
-            with self._api_lock:
-                fallback_sl = self.binance._request_futures_api('post', 'algoOrder', signed=True, data=_algo_params("STOP_MARKET", sl_str))
-                fallback_tp = self.binance._request_futures_api('post', 'algoOrder', signed=True, data=_algo_params("TAKE_PROFIT_MARKET", tp_str))
+            def _existing_order_of_type(order_type: str) -> bool:
+                with self._api_lock:
+                    current = self.binance._request_futures_api(
+                        'get', 'algoOrders/current', signed=True, data={"symbol": symbol})
+                return any(o.get("type") == order_type for o in (current or []))
+
+            def _place_sl():
+                with self._api_lock:
+                    return self.binance._request_futures_api(
+                        'post', 'algoOrder', signed=True, data=_algo_params("STOP_MARKET", sl_str))
+
+            def _place_tp():
+                with self._api_lock:
+                    return self.binance._request_futures_api(
+                        'post', 'algoOrder', signed=True, data=_algo_params("TAKE_PROFIT_MARKET", tp_str))
+
+            # Phase 1: same retry/backoff + duplicate-order guard as the
+            # primary placement path above.
+            fallback_sl = resilience.retry_algo_order(
+                _place_sl, lambda: _existing_order_of_type("STOP_MARKET"),
+                description=f"_place_bracket_order_fallback SL ({symbol})")
+            fallback_tp = resilience.retry_algo_order(
+                _place_tp, lambda: _existing_order_of_type("TAKE_PROFIT_MARKET"),
+                description=f"_place_bracket_order_fallback TP ({symbol})")
 
             return fallback_tp, fallback_sl
         except Exception as e:
@@ -868,8 +965,15 @@ class PositionGuard:
     def _cancel_sibling_algo_order(self, algo_id, symbol: str, leg_name: str):
         if not algo_id: return
         try:
-            with self._api_lock:
-                self.binance._request_futures_api('delete', 'algoOrder', signed=True, data={"algoId": algo_id})
+            def _cancel():
+                with self._api_lock:
+                    return self.binance._request_futures_api(
+                        'delete', 'algoOrder', signed=True, data={"algoId": algo_id})
+            # DELETE is naturally idempotent (cancelling an already-cancelled
+            # order just errors harmlessly), so a plain retry is safe here —
+            # no duplicate-order guard needed (Phase 1).
+            resilience.retry_api_call(
+                _cancel, description=f"_cancel_sibling_algo_order {leg_name} ({symbol})")
             logger.info(f"Cancelled dangling {leg_name} algo order {algo_id} for {symbol}.")
         except Exception as e:
             logger.info(f"Could not cancel {leg_name} algo order {algo_id} ({symbol}): {e}")

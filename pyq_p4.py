@@ -58,6 +58,7 @@ from p4_utils import (
     binance_client, crypto_client, _binance_lock,
 )
 import pyquant_signal_math as signal_math
+import pyquant_state as state_store
 
 nest_asyncio.apply()
 
@@ -346,8 +347,8 @@ eth_tracker = {
 LAST_RESORT_MULTIPLIER = 1.5
 HARD_DOLLAR_SL_FLOOR    = -0.20
 
-LAST_RUN_FILE   = "last_execution_timestamp.txt"
-MINUTE_RUN_FILE = "minute_execution_timestamp.txt"
+LAST_RUN_FILE   = "last_execution_timestamp.txt"   # unused as of Phase 1 — kept only so an
+MINUTE_RUN_FILE = "minute_execution_timestamp.txt"  # old deployment's leftover file is harmless
 
 
 def retrain_daily_ukfs():
@@ -384,6 +385,17 @@ def retrain_daily_ukfs():
         except Exception as e:
             logger.error(f"[UKF Retrain] Error re-anchoring 1H UKF for {symbol_alpaca}: {e}")
 
+
+# Phase 1: run guards now live in pyquant_state (SQLite locally, Postgres
+# in production via DATABASE_URL) instead of local timestamp files.
+# try_claim_run() is atomic and safe against two invocations racing each
+# other or a QStash retry of the same delivery — the file-mtime comparison
+# this replaced was neither (and wouldn't survive a stateless Vercel
+# invocation at all). hourly_task()/one_minute_task() below now call
+# try_claim_run() directly instead of has_function_run_this_hour() +
+# update_last_run_timestamp(); those two helper functions are UNUSED and
+# kept only as a reference for anyone diffing against the previous
+# deployment.
 
 def has_function_run_this_hour() -> bool:
     if os.path.exists(LAST_RUN_FILE):
@@ -694,11 +706,9 @@ def last_resort_stop_loss_check(symbol: str, tracker: dict) -> bool:
 
 
 def hourly_task():
-    if has_function_run_this_hour():
-        print(f"Hourly task already ran this hour. Skipping.")
+    if not state_store.try_claim_run("hourly_task", state_store.current_hour_bucket()):
+        print(f"Hourly task already ran (or is running) this hour. Skipping.")
         return
-
-    update_last_run_timestamp()
 
     global ordered, sig_gened, order_changed, signal, my_signal, signals
     global eth_tracker, btc_tracker, position_closed
@@ -1084,11 +1094,9 @@ def five_minute_task():
 
 
 def one_minute_task():
-    if has_function_run_this_minute():
-        print(f"1-minute task already ran this minute. Skipping.")
+    if not state_store.try_claim_run("one_minute_task", state_store.current_minute_bucket()):
+        print(f"1-minute task already ran (or is running) this minute. Skipping.")
         return
-
-    update_minute_run_timestamp()
 
     global btc_ordered_signal, double_order, ordered, eth_ordered_signal
     global btc_tracker, eth_tracker

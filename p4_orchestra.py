@@ -17,6 +17,7 @@ import pyq_p4
 from pyq_p4 import hourly_task, fifteen_minute_task, five_minute_task, one_minute_task
 from data_download import data_download
 from p4_search import run_grid_search
+import pyquant_state as state_store
 
 
 def daily_optimizer():
@@ -28,9 +29,16 @@ def daily_optimizer():
         # 2. Run the Bayesian parameter search against the freshly downloaded data
         best_params = run_grid_search()
 
-        # 3. Persist optimal params for live execution
-        with open("optimal_params.json", "w") as f:
-            json.dump(best_params, f, indent=4)
+        # 3. Persist optimal params for live execution.
+        # Phase 1: the state store (SQLite/Postgres) is now the primary
+        # write — SignalGenerator.load_params() reads it first. The local
+        # file is kept as a best-effort human-readable mirror only.
+        state_store.set_json("optimal_params", best_params)
+        try:
+            with open("optimal_params.json", "w") as f:
+                json.dump(best_params, f, indent=4)
+        except Exception as e:
+            print(f"[Orchestra] optimal_params.json mirror write failed (non-fatal): {e}")
 
         print(f"[Orchestra] Optimisation complete. Best params saved: {best_params}")
 
