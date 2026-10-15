@@ -36,6 +36,55 @@ DigitalOcean-specific.)
 
 ---
 
+## Free / free-tier alternatives (brainstormed, evaluated, and why DigitalOcean is still the default)
+
+The orchestra needs a machine that is up 24/7 and can hold a genuinely
+persistent process (`p4_orchestra.py`'s `while True: schedule.run_pending()`
+loop, ticking every minute). That requirement rules out a lot of "free"
+options before price even enters the picture — anything that sleeps an
+idle process, or caps you to short-lived invocations, can't run this
+specific script as-is. Evaluated against that bar:
+
+| Option | Free? | Works for this script as-is? | Verdict |
+|---|---|---|---|
+| **Oracle Cloud "Always Free" compute** | Yes, forever (not a trial) — either an AMD VM.Standard.E2.1.Micro (1/8 OCPU, 1 GB RAM) or an Ampere A1 Arm VM (up to 4 OCPUs / 24 GB RAM, shareable across instances) | Yes — it's a real, full-root, always-on Linux VM. Same systemd setup as Part D onward below applies unchanged. | **Best free option if you're willing to deal with sign-up friction.** The Ampere A1 tier in particular gives far more RAM than DigitalOcean's cheapest paid tier, at $0. Known friction: sign-up requires a card for identity verification (never charged, but Oracle's fraud-detection has a reputation for rejecting some cards/regions), and the Ampere A1 capacity is genuinely often sold out in popular regions — you may need to retry provisioning over a few days, or fall back to the always-available (if small) AMD Micro shape. |
+| **Google Cloud "Always Free" e2-micro** | Yes, forever, but only in specific US regions (`us-west1`, `us-central1`, `us-east1`) | Yes, same reasoning as Oracle | A real always-on VM, but 1 shared vCPU / 1 GB RAM is tight for the numpy/pandas/sklearn/optuna stack, especially during `daily_optimizer()`. Workable if you add a swap file; Oracle's free tier is more generous. |
+| **AWS Free Tier (t2.micro/t3.micro)** | Only for the first 12 months of a new AWS account | Yes, while it lasts | Not a lasting free option — explicitly time-boxed, then billed. Only worth it if you want to migrate off it again in a year. |
+| **Fly.io free allowance** | A small included usage allowance, not unlimited — a card is required and anything beyond the allowance bills per-second | Yes, architecturally (it's a real micro-VM, "Firecracker"-based, and does support a persistent process) | Plausible for this script's modest footprint, but "free" here means "small usage-based allowance," not a flat free tier — budget for it possibly costing a few dollars/month once this project is running 24/7 with real CPU usage during `daily_optimizer()`. |
+| **Render.com free Background Worker / PythonAnywhere free tier** | Yes, $0 | **No** | Render's free tier is for services that can sleep (web services) — a "Background Worker" (the right product for this) is a *paid* feature on Render. PythonAnywhere's free tier supports one *scheduled* (not always-on) task per day — incompatible with a script that needs to tick every minute. |
+| **GitHub Actions scheduled workflows** | Yes, generous free minutes even on a private repo | **Partially — architecture change required** | GitHub's `schedule:` cron trigger has a stated minimum granularity of 5 minutes, and GitHub itself documents that scheduled runs can be delayed significantly (10+ minutes) under platform load — fine for `daily_optimizer()` (once/day) and arguably `hourly_task()`, but not a real substitute for the `one_minute_task()` tracker, which needs a tight, predictable one-minute cadence to catch TP/SL fills. Also: each run would need to re-clone the repo, reinstall dependencies, and reconnect — there's no "keep process alive between runs" on Actions, so you'd be restarting cold every cycle rather than running one continuous process. |
+| **Re-architect onto Vercel + QStash entirely (no VPS at all)** | Yes, within Vercel's/QStash's existing free tiers | **No, not without real engineering work** | This is the "eliminate the VPS" option, not a drop-in free host for the current script: it means breaking `p4_orchestra.py`'s single infinite loop into separate HTTP-triggered functions (`hourly_task`, `five_minute_task`, `one_minute_task` each become their own endpoint that QStash calls on a schedule), which changes the deployment model, not just the host. Flagged as a real Phase 3+ option below, not a this-week swap. |
+| **Your own always-on PC / a Raspberry Pi** | Yes, $0 cloud cost | Yes, technically | Zero dollar cost, but trades it for reliability risk this project doesn't currently have to accept: a Windows update reboot, a sleep setting, a power cut, or your ISP dropping the connection all silently stop the bot with no alert beyond Telegram going quiet. Reasonable as a *testing* environment (and in fact matches how this has likely been run so far), not recommended as the "set it and forget it" production home. |
+
+**Recommendation:** try Oracle Cloud's Always Free Ampere A1 shape first — if
+sign-up/capacity friction becomes a real blocker, fall back to DigitalOcean's
+$12/mo droplet (Part A onward below) rather than losing more time fighting
+Oracle's provisioning queue. Either way, **every step from Part D onward in
+this guide (hardening, Python setup, getting the code over, systemd service)
+is identical regardless of which of these you provision** — only Parts A–C
+(account/VM creation) differ by provider.
+
+### The bigger idea worth tracking separately: eliminating the VPS entirely
+
+The real reason a VPS is needed at all is `p4_orchestra.py`'s infinite
+`while True` loop. If that loop were replaced with independent,
+HTTP-triggered functions — `hourly_task()`, `five_minute_task()`,
+`one_minute_task()`, `daily_optimizer()` each becoming a Vercel serverless
+endpoint, invoked on schedule by Upstash QStash (same product already
+evaluated in the Phase 1 planning for exactly this reason) — the orchestra
+would live entirely inside the same Vercel project as the UI/API, and the
+VPS step in this guide would become unnecessary. This is a genuine
+architecture change (state that currently lives in in-memory Python
+variables across ticks — `btc_tracker`, `eth_tracker`, the hourly guards —
+would all need to move into `pyquant_state.py`, which Phase 1 already
+mostly prepared for), not a same-day swap, so it's tracked as a **Phase 3+
+candidate in `CLAUDE.md`**, not implemented here. The VPS path in this
+guide remains the right near-term choice specifically because it requires
+zero changes to `p4_orchestra.py`'s existing, already-tested scheduling
+logic.
+
+---
+
 ## Part A — Create your DigitalOcean account
 
 1. Go to https://www.digitalocean.com in your browser.
