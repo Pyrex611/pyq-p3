@@ -53,12 +53,11 @@ python-binance>=1.0.19
 # v20+ uses the async Application builder used in PositionGuard
 python-telegram-bot>=20.8
 
-# ── Phase 2: backend API (local dev convenience only) ──────────
-# The actual Vercel deploy uses api/requirements.txt, which is
-# deliberately a MUCH smaller, separate dependency set (see that file's
-# header comment for why) — these two lines are only here so
-# `pip install -r requirements.txt` + `uvicorn api.index:app --reload`
-# works out of the box for local development against the same repo.
-fastapi>=0.110.0
-uvicorn>=0.29.0
-
+# NOTE — api/index.py's FastAPI backend (Phase 2) is deliberately NOT
+# listed here. It has its own, much smaller dependency set in the
+# project root's pyproject.toml (fastapi + psycopg2-binary only — never
+# the full Alpaca/Binance/Bybit/UKF/Optuna stack above), which is also
+# what Vercel reads to build that deploy. For LOCAL development of the
+# API only, install it separately:
+#   pip install fastapi uvicorn
+# (psycopg2-binary is already covered above). See VERCEL_DEPLOY.md.

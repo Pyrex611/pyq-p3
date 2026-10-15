@@ -1,9 +1,20 @@
 """
-api/index.py — PyQuant Control Center backend.
+api/index.py — PyQuant Control Center backend + frontend, one Vercel Function.
 
-Phase 2 (UI build). A FastAPI app, deployed as a single Vercel Python
-serverless function (Vercel's documented convention: one `app` ASGI object
-per file under api/, see vercel.json's rewrite in this same directory tree).
+Phase 2 (UI build). A FastAPI app, deployed via Vercel's Python FRAMEWORK
+PRESET (not the older "each file under api/ is its own function" model —
+see the redeploy note in the repo's VERCEL_DEPLOY.md for why that version
+404'd on every path). The project root's `pyproject.toml` sets
+`[tool.vercel].entrypoint = "api.index:app"`, which tells Vercel: detect
+FastAPI, load this exact module/variable, and route EVERY request to it —
+so this one app has to serve both the JSON API AND the static frontend.
+That's what the `StaticFiles` mount at the bottom of this file does: every
+`@app.get("/api/...")` route below is matched first (Starlette checks
+routes in registration order), and anything else falls through to the
+mount, which serves `web/`'s HTML/CSS/JS. This is the exact same
+app-plus-StaticFiles-mount shape already verified locally in this project's
+testing (TestClient + a headless-browser pass against a combined server) —
+production now matches that proven layout instead of introducing a new one.
 
 Design choice worth stating explicitly: this API is a READ layer (plus one
 narrow, deliberately-scoped write: the trading on/off switch) over
@@ -26,23 +37,32 @@ exchange directly. Two reasons:
      is_trading_enabled()/set_trading_enabled() docstring (OFF only stops
      NEW entries; it never touches an already-open position's protection).
 
-Local dev:  uvicorn api.index:app --reload --port 8000
-Vercel:     this file + vercel.json + requirements.txt is the whole deploy.
+Local dev:  uvicorn api.index:app --reload --port 8000  (run from the repo root)
+Vercel:     this file + pyproject.toml is the whole deploy. vercel.json is
+            deliberately empty ({}) — a "functions"/"rewrites" block there
+            is the legacy file-based-function config model, and mixing it
+            with the framework-preset entrypoint above is exactly what
+            caused the earlier 404 (see VERCEL_DEPLOY.md).
 """
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# pyquant_state.py lives at the repo root, one level up from api/. Vercel's
-# Python runtime invokes this file with the repo root on sys.path already;
-# this line is for local `uvicorn api.index:app` dev only.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# pyquant_state.py (and the web/ directory, mounted below) live at the repo
+# root, one level up from api/. Vercel's Python runtime sets the working
+# directory to the project root already (see "Reading relative files" in
+# Vercel's Python runtime docs), but this sys.path line makes `uvicorn
+# api.index:app` work identically when run locally from the repo root.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
 
 import pyquant_state as state_store  # noqa: E402
 
@@ -181,3 +201,16 @@ def get_dashboard():
         "last_run": runs[0] if runs else None,
         "realized_pnl_recent": realized_pnl_30,
     }
+
+
+# ── Static frontend ─────────────────────────────────────────────────────
+#
+# Registered LAST, deliberately: Starlette (FastAPI's underlying router)
+# tries routes in the order they were added, so every "/api/..." route
+# above is matched first. A request this mount actually receives (e.g.
+# "/", "/signals.html", "/assets/app.js") is either not an API call at
+# all, or an API path that genuinely doesn't exist — StaticFiles returns
+# a real 404 for the latter, same as before this mount existed.
+# html=True makes "/" resolve to web/index.html, matching how the Phase 2
+# frontend pages link to each other (index.html, live-monitor.html, etc.)
+app.mount("/", StaticFiles(directory=str(_REPO_ROOT / "web"), html=True), name="frontend")

@@ -124,8 +124,10 @@ frontend, without touching the live trading decision logic itself:
   choice — see `api/index.py`'s `/api/status` docstring for why that one
   is intentionally not hot-swappable from a public-facing API).
 - **`api/index.py`** — a FastAPI app, deployed as a single Vercel Python
-  serverless function (`vercel.json`'s rewrite routes `/api/*` to it). It
-  is a **read-only layer over the state store** (plus the one OFF-switch
+  app via Vercel's **framework preset** (`pyproject.toml`'s
+  `[tool.vercel].entrypoint` — not the older per-file `/api` model; see
+  `VERCEL_DEPLOY.md` for why that distinction matters and how it's wired).
+  It is a **read-only layer over the state store** (plus the one OFF-switch
   write above) and never holds Binance credentials or calls the exchange
   directly — everything it serves is already being written by the trading
   engine itself via the Phase 2 logging above. Endpoints: `/api/health`,
@@ -158,9 +160,11 @@ itself is deferred).
 - The Postgres backend in `pyquant_state.py` is written but untested
   against a real Postgres instance — it will be exercised for the first
   time during the Phase 1 DB provisioning step, not before.
-- The Phase 2 API and frontend have not been deployed to Vercel yet (local
-  testing only, above) — see the procurement/integration guide for the
-  deployment steps.
+- Deployment is documented separately, step by step: `SUPABASE_SETUP.md`
+  (database), `VPS_SETUP.md` (orchestra process), `VERCEL_DEPLOY.md`
+  (API + frontend) — the Claude Docs plan doc intentionally no longer
+  carries this granular content, per the project's standing instruction
+  to keep setup/procurement steps in the repo's `.md` files.
 - LIVE ↔ PAPER mode switching still requires an orchestra process restart
   with `PYQUANT_MODE` changed — the UI's mode display is informational for
   that axis; only the OFF switch is a live, no-restart control (see

@@ -1,0 +1,30 @@
+[project]
+name = "pyquant-control-center-api"
+version = "1.0.0"
+requires-python = ">=3.12"
+# Deliberately NOT the project's root requirements.txt dependency set (the
+# full Alpaca/Binance/Bybit/UKF/Optuna trading stack) — this is the whole
+# dependency list the VERCEL FUNCTION needs, nothing more. api/index.py
+# only ever imports pyquant_state.py, never pyq_p4.py/p4_utils.py/
+# walkforward.py/p4_orchestra.py (the processes that actually hold
+# exchange credentials and run the trading engine — those run elsewhere,
+# see VERCEL_DEPLOY.md and VPS_SETUP.md).
+dependencies = [
+    "fastapi>=0.110.0",
+    # Only exercised when DATABASE_URL is set (pyquant_state.py's Postgres
+    # backend) — listed unconditionally so it's already installed whenever
+    # DATABASE_URL does get set in the Vercel project's environment variables.
+    "psycopg2-binary>=2.9.9",
+]
+
+# This is what makes Vercel's Python framework preset find the app: without
+# it, Vercel only looks for an entrypoint named app.py/index.py/server.py/
+# main.py/wsgi.py/asgi.py at the PROJECT ROOT or under src/ or app/ — never
+# under api/. Pointing it here explicitly lets the app stay at api/index.py
+# (consistent with this repo's existing layout) while still using the
+# current, officially-recommended framework-preset deployment model, under
+# which Vercel routes EVERY request to this one app (api/index.py's own
+# docstring + its StaticFiles mount is what serves the frontend from the
+# same app for exactly this reason).
+[tool.vercel]
+entrypoint = "api.index:app"
