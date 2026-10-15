@@ -53,3 +53,12 @@ python-binance>=1.0.19
 # v20+ uses the async Application builder used in PositionGuard
 python-telegram-bot>=20.8
 
+# ── Phase 2: backend API (local dev convenience only) ──────────
+# The actual Vercel deploy uses api/requirements.txt, which is
+# deliberately a MUCH smaller, separate dependency set (see that file's
+# header comment for why) — these two lines are only here so
+# `pip install -r requirements.txt` + `uvicorn api.index:app --reload`
+# works out of the box for local development against the same repo.
+fastapi>=0.110.0
+uvicorn>=0.29.0
+

@@ -10,3 +10,8 @@ pyquant_state.sqlite3
 pyquant_state.sqlite3-journal
 pyquant_state.sqlite3-wal
 pyquant_state.sqlite3-shm
+
+# Phase 2: Python bytecode cache + Vercel's local build output
+__pycache__/
+*.pyc
+.vercel/

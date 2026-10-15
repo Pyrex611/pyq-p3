@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — Backtest</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot"></div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Walkforward Runs</h3>
+        <table id="tbl-wf">
+          <thead><tr><th>Run</th><th>Return</th><th>Win Rate</th><th>Trades</th><th>Finished</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="empty-wf" style="display:none;">
+          No walkforward runs logged yet — run <code class="mono">python3 walkforward.py</code> to log one.
+        </div>
+      </div>
+      <div class="card">
+        <h3>Daily Optimizer Runs</h3>
+        <table id="tbl-opt">
+          <thead><tr><th>Run</th><th>BTC bal</th><th>ETH bal</th><th>Finished</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="empty-opt" style="display:none;">
+          No optimizer runs logged yet — these are recorded automatically by p4_orchestra.py's daily 00:03 job.
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px;" id="detail-card" style="display:none;">
+      <h3>Run Detail</h3>
+      <pre id="detail-pre" class="mono" style="white-space:pre-wrap; color:var(--text-dim); font-size:12px;"></pre>
+    </div>
+  </main>
+  <footer class="hint">Click a run to see its full metrics/params payload.</footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+async function showDetail(runId) {
+  const card = document.getElementById("detail-card");
+  const pre = document.getElementById("detail-pre");
+  try {
+    const run = await apiGet(`/runs/${runId}`);
+    pre.textContent = JSON.stringify(run, null, 2);
+    card.style.display = "block";
+  } catch (e) {
+    pre.textContent = "Could not load run: " + e.message;
+    card.style.display = "block";
+  }
+}
+
+async function loadRuns() {
+  const bannerSlot = document.getElementById("banner-slot");
+  try {
+    const wf = await apiGet("/runs", { run_type: "walkforward" });
+    const wfBody = document.querySelector("#tbl-wf tbody");
+    if (wf.runs.length === 0) {
+      document.getElementById("empty-wf").style.display = "block";
+    } else {
+      wfBody.innerHTML = wf.runs.map(r => {
+        const m = r.metrics || {};
+        return `
+        <tr style="cursor:pointer;" onclick="showDetail(${r.id})">
+          <td class="mono">#${r.id}</td>
+          <td class="mono">${m["Total Return (%)"] ?? "—"}%</td>
+          <td class="mono">${m["Win Rate (%)"] ?? "—"}%</td>
+          <td class="mono">${m["Total Trades"] ?? "—"}</td>
+          <td>${fmtTime(r.finished_at)}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    const opt = await apiGet("/runs", { run_type: "daily_optimizer" });
+    const optBody = document.querySelector("#tbl-opt tbody");
+    if (opt.runs.length === 0) {
+      document.getElementById("empty-opt").style.display = "block";
+    } else {
+      optBody.innerHTML = opt.runs.map(r => {
+        const m = r.metrics || {};
+        return `
+        <tr style="cursor:pointer;" onclick="showDetail(${r.id})">
+          <td class="mono">#${r.id}</td>
+          <td class="mono">${fmtMoney(m.btc_val)}</td>
+          <td class="mono">${fmtMoney(m.eth_val)}</td>
+          <td>${fmtTime(r.finished_at)}</td>
+        </tr>`;
+      }).join("");
+    }
+  } catch (e) {
+    bannerSlot.innerHTML = `<div class="banner error">Could not reach the API (${e.message}).</div>`;
+  }
+}
+loadRuns();
+</script>
+</body>
+</html>

@@ -47,6 +47,7 @@ from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from filterpy.common import Q_discrete_white_noise
 
 import pyquant_signal_math as signal_math
+import pyquant_state as state_store
 
 warnings.filterwarnings('ignore')
 
@@ -1159,6 +1160,26 @@ def run_walk_forward():
     print("=" * 80)
     metrics = compute_metrics(all_trades, capital_curve, INITIAL_CAPITAL)
     print(metrics.to_string(index=False))
+
+    # Phase 2: log this run for the UI's "Backtest" screen. Purely
+    # additive — a logging failure must never affect the run's own
+    # output/return value, so it's wrapped and never re-raised.
+    try:
+        metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
+        state_store.record_run(
+            run_type="walkforward",
+            metrics=metrics_dict,
+            symbol="BTC+ETH",
+            params={
+                "leverage": LEVERAGE, "initial_capital": INITIAL_CAPITAL,
+                "walk_forward_days": WALK_FORWARD_DAYS,
+                "use_bayesian": bool(USE_BAYESIAN and OPTUNA_AVAILABLE),
+                "use_atr_sl": USE_ATR_SL,
+                "use_pessimistic_exits": USE_PESSIMISTIC_EXITS,
+            },
+        )
+    except Exception as e:
+        print(f"  (non-fatal) run logging failed: {e}")
 
     print(f"\n{'─'*80}")
     print(f"  Net: {((capital/INITIAL_CAPITAL)-1)*100:+.4f}%  |  "

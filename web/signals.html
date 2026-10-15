@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — Signals</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot"></div>
+    <div class="card" style="margin-bottom:16px;">
+      <h3>Filter</h3>
+      <div style="display:flex; gap:12px; flex-wrap:wrap;">
+        <select id="f-symbol" class="mono" style="background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px;">
+          <option value="">All symbols</option>
+          <option value="BTCUSDT">BTCUSDT</option>
+          <option value="ETHUSDT">ETHUSDT</option>
+        </select>
+        <select id="f-status" class="mono" style="background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 10px;">
+          <option value="">All statuses</option>
+          <option value="open">Open</option>
+          <option value="closed_tp">Closed — TP</option>
+          <option value="closed_sl">Closed — SL</option>
+          <option value="closed_manual">Closed — Manual</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Signal History</h3>
+      <table id="tbl-signals">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Status</th><th>Entry</th><th>Outcome</th>
+            <th>PnL</th><th>Mode</th><th>Opened</th><th>Closed</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="empty-signals" style="display:none;">No signals match this filter.</div>
+    </div>
+  </main>
+  <footer class="hint">Up to 200 most recent signals logged by the trading engine (pyquant_signals).</footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+async function loadSignals() {
+  const bannerSlot = document.getElementById("banner-slot");
+  const symbol = document.getElementById("f-symbol").value;
+  const status = document.getElementById("f-status").value;
+  try {
+    const d = await apiGet("/signals", { symbol, status });
+    const body = document.querySelector("#tbl-signals tbody");
+    const empty = document.getElementById("empty-signals");
+    if (d.signals.length === 0) {
+      body.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+    body.innerHTML = d.signals.map(s => `
+      <tr>
+        <td class="mono">${s.symbol}</td>
+        <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+        <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
+        <td class="mono">${fmtPrice(s.entry_price)}</td>
+        <td class="mono">${fmtPrice(s.outcome_price)}</td>
+        <td class="${pnlClass(s.realized_pnl)}">${s.realized_pnl !== null ? fmtMoney(s.realized_pnl) : "—"}</td>
+        <td>${s.mode}</td>
+        <td>${fmtTime(s.opened_at)}</td>
+        <td>${fmtTime(s.closed_at)}</td>
+      </tr>`).join("");
+  } catch (e) {
+    bannerSlot.innerHTML = `<div class="banner error">Could not reach the API (${e.message}).</div>`;
+  }
+}
+document.getElementById("f-symbol").addEventListener("change", loadSignals);
+document.getElementById("f-status").addEventListener("change", loadSignals);
+loadSignals();
+</script>
+</body>
+</html>

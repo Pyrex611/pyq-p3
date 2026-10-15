@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — Live Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot"></div>
+    <div class="card">
+      <h3>Currently Open Positions</h3>
+      <table id="tbl-live">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th>
+            <th>Qty</th><th>Capital</th><th>Max Loss</th><th>Mode</th><th>Opened</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="empty-live" style="display:none;">
+        No open positions. The last hourly cycle generated no entry, or trading is currently OFF.
+      </div>
+    </div>
+  </main>
+  <footer class="hint">Reflects pyquant_state's signals log as of the last entry/close the trading engine wrote. Refresh the page for the latest.</footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+async function loadLive() {
+  const bannerSlot = document.getElementById("banner-slot");
+  try {
+    const d = await apiGet("/signals/open");
+    const body = document.querySelector("#tbl-live tbody");
+    if (d.signals.length === 0) {
+      document.getElementById("empty-live").style.display = "block";
+      return;
+    }
+    body.innerHTML = d.signals.map(s => `
+      <tr>
+        <td class="mono">${s.symbol}</td>
+        <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+        <td class="mono">${fmtPrice(s.entry_price)}</td>
+        <td class="mono">${fmtPrice(s.sl_price)}</td>
+        <td class="mono">${fmtPrice(s.tp_price)}</td>
+        <td class="mono">${s.qty ?? "—"}</td>
+        <td class="mono">${fmtMoney(s.entry_capital)}</td>
+        <td class="mono">${fmtMoney(s.expected_max_loss)}</td>
+        <td>${s.mode}</td>
+        <td>${fmtTime(s.opened_at)}</td>
+      </tr>`).join("");
+  } catch (e) {
+    bannerSlot.innerHTML = `<div class="banner error">Could not reach the API (${e.message}).</div>`;
+  }
+}
+loadLive();
+</script>
+</body>
+</html>

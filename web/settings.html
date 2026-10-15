@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — API Keys &amp; Settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot">
+      <div class="banner warn">
+        This screen shows whether a credential is configured in the API's own Vercel environment — never the actual values. Keys are managed in the Vercel project's Environment Variables, not here.
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Exchange &amp; Data Credentials</h3>
+        <div id="cfg-exchange"></div>
+      </div>
+      <div class="card">
+        <h3>Notifications &amp; Persistence</h3>
+        <div id="cfg-other"></div>
+      </div>
+    </div>
+  </main>
+  <footer class="hint">To rotate a key, update it in the Vercel dashboard (or the orchestra VPS's .env for the trading engine itself) and redeploy/restart — this page is read-only.</footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+const EXCHANGE_KEYS = [
+  ["ALPACA_API_KEY", "Alpaca API Key"],
+  ["ALPACA_SECRET_KEY", "Alpaca Secret Key"],
+  ["BYBIT_API_KEY", "Bybit API Key"],
+  ["BYBIT_SECRET_KEY", "Bybit Secret Key"],
+  ["BINANCE_API_KEY", "Binance API Key (mainnet)"],
+  ["BINANCE_SECRET_KEY", "Binance Secret Key (mainnet)"],
+  ["BINANCE_TESTNET_API_KEY", "Binance API Key (testnet / paper)"],
+  ["BINANCE_TESTNET_SECRET_KEY", "Binance Secret Key (testnet / paper)"],
+];
+const OTHER_KEYS = [
+  ["TELEGRAM_TOKEN", "Telegram Bot Token"],
+  ["TELEGRAM_CHAT_ID", "Telegram Chat ID"],
+  ["DATABASE_URL", "Postgres DATABASE_URL"],
+];
+
+function renderRows(cfg, keys) {
+  return keys.map(([key, label]) => {
+    const set = !!cfg[key];
+    return `
+      <div class="config-row">
+        <span class="config-key"><span class="dot ${set ? 'set' : 'unset'}"></span>${label}</span>
+        <span class="mono" style="color: ${set ? 'var(--green)' : 'var(--text-faint)'}; font-size:12px;">
+          ${set ? 'CONFIGURED' : 'NOT SET'}
+        </span>
+      </div>`;
+  }).join("");
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await apiGet("/config");
+    document.getElementById("cfg-exchange").innerHTML = renderRows(cfg, EXCHANGE_KEYS);
+    document.getElementById("cfg-other").innerHTML = renderRows(cfg, OTHER_KEYS);
+  } catch (e) {
+    document.getElementById("banner-slot").innerHTML += `<div class="banner error">Could not reach the API (${e.message}).</div>`;
+  }
+}
+loadConfig();
+</script>
+</body>
+</html>

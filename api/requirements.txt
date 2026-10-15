@@ -1,0 +1,19 @@
+# ============================================================
+# PyQuant Control Center API — Vercel serverless function deps
+# ============================================================
+# Deliberately NOT the root requirements.txt: this function is a thin
+# read layer over pyquant_state.py and must stay small (Vercel's Python
+# functions have a size/cold-start budget) — it never imports pyq_p4.py,
+# p4_utils.py, walkforward.py or any of the Alpaca/Binance/Bybit/UKF/
+# Optuna stack those files pull in. Vercel's Python builder prefers a
+# requirements.txt placed next to the function (this file) over the
+# project-root one, which is what keeps this function's dependency set
+# scoped to just these three packages.
+fastapi>=0.110.0
+pydantic>=2.6.0
+
+# Only exercised when DATABASE_URL is set (pyquant_state.py's Postgres
+# backend) — listed unconditionally, same rationale as the root
+# requirements.txt, so it's already installed whenever DATABASE_URL does
+# get set in the Vercel project's environment variables.
+psycopg2-binary>=2.9.9

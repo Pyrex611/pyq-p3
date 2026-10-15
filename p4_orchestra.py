@@ -42,6 +42,17 @@ def daily_optimizer():
 
         print(f"[Orchestra] Optimisation complete. Best params saved: {best_params}")
 
+        # Phase 2: log this optimizer run for the UI's "Backtest" screen
+        # (run history), alongside walkforward.py's own logged runs.
+        try:
+            state_store.record_run(
+                run_type="daily_optimizer",
+                metrics={"btc_val": btc_val, "eth_val": eth_val},
+                params=best_params,
+            )
+        except Exception as e:
+            print(f"[Orchestra] run logging failed (non-fatal): {e}")
+
         # 4. Re-anchor live 1H UKF models on the new trailing 30-day window (matches walkforward.py)
         pyq_p4.retrain_daily_ukfs()
 

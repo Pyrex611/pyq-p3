@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot"></div>
+
+    <div class="grid cols-4" style="margin-bottom:16px;">
+      <div class="card">
+        <h3>Open Positions</h3>
+        <div class="stat-value" id="stat-open">—</div>
+        <div class="stat-label">currently monitored</div>
+      </div>
+      <div class="card">
+        <h3>Realized PnL (recent)</h3>
+        <div class="stat-value" id="stat-pnl">—</div>
+        <div class="stat-label">last 200 logged signals</div>
+      </div>
+      <div class="card">
+        <h3>Trading</h3>
+        <div class="stat-value" id="stat-trading">—</div>
+        <div class="stat-label" id="stat-mode">—</div>
+      </div>
+      <div class="card">
+        <h3>Last Run</h3>
+        <div class="stat-value" id="stat-last-run">—</div>
+        <div class="stat-label" id="stat-last-run-time">—</div>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Open Positions</h3>
+        <table id="tbl-open">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Opened</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="empty-open" style="display:none;">No open positions right now.</div>
+      </div>
+      <div class="card">
+        <h3>Recently Closed</h3>
+        <table id="tbl-closed">
+          <thead><tr><th>Symbol</th><th>Side</th><th>Outcome</th><th>PnL</th><th>Closed</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="empty-state" id="empty-closed" style="display:none;">No closed signals logged yet.</div>
+      </div>
+    </div>
+  </main>
+  <footer class="hint">Data refreshes on page load. Trading toggle takes effect on the next scheduled hourly cycle.</footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+async function loadDashboard() {
+  const bannerSlot = document.getElementById("banner-slot");
+  try {
+    const d = await apiGet("/dashboard");
+
+    document.getElementById("stat-open").textContent = d.open_positions.length;
+    document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);
+    document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.realized_pnl_recent);
+    document.getElementById("stat-trading").textContent = d.trading_enabled ? "ON" : "OFF";
+    document.getElementById("stat-mode").textContent = d.mode.toUpperCase() + " mode";
+    if (d.last_run) {
+      document.getElementById("stat-last-run").textContent = d.last_run.run_type;
+      document.getElementById("stat-last-run-time").textContent = fmtTime(d.last_run.finished_at);
+    } else {
+      document.getElementById("stat-last-run").textContent = "—";
+      document.getElementById("stat-last-run-time").textContent = "no runs logged yet";
+    }
+
+    const openBody = document.querySelector("#tbl-open tbody");
+    if (d.open_positions.length === 0) {
+      document.getElementById("empty-open").style.display = "block";
+    } else {
+      openBody.innerHTML = d.open_positions.map(s => `
+        <tr>
+          <td class="mono">${s.symbol}</td>
+          <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+          <td class="mono">${fmtPrice(s.entry_price)}</td>
+          <td class="mono">${fmtPrice(s.sl_price)}</td>
+          <td class="mono">${fmtPrice(s.tp_price)}</td>
+          <td>${fmtTime(s.opened_at)}</td>
+        </tr>`).join("");
+    }
+
+    const closedBody = document.querySelector("#tbl-closed tbody");
+    if (d.recent_closed.length === 0) {
+      document.getElementById("empty-closed").style.display = "block";
+    } else {
+      closedBody.innerHTML = d.recent_closed.map(s => `
+        <tr>
+          <td class="mono">${s.symbol}</td>
+          <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+          <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
+          <td class="${pnlClass(s.realized_pnl)}">${fmtMoney(s.realized_pnl)}</td>
+          <td>${fmtTime(s.closed_at)}</td>
+        </tr>`).join("");
+    }
+  } catch (e) {
+    bannerSlot.innerHTML = `<div class="banner error">Could not reach the API (${e.message}). Check that the backend is deployed and PYQUANT_API_BASE / the /api rewrite is configured.</div>`;
+  }
+}
+loadDashboard();
+</script>
+</body>
+</html>

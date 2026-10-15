@@ -90,6 +90,40 @@ def _bootstrap_postgres(conn) -> None:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_signals (
+                id              SERIAL PRIMARY KEY,
+                symbol          TEXT NOT NULL,
+                side            TEXT NOT NULL,
+                entry_price     DOUBLE PRECISION NOT NULL,
+                sl_price        DOUBLE PRECISION,
+                tp_price        DOUBLE PRECISION,
+                qty             DOUBLE PRECISION,
+                entry_capital   DOUBLE PRECISION,
+                expected_max_loss DOUBLE PRECISION,
+                mode            TEXT NOT NULL DEFAULT 'live',
+                status          TEXT NOT NULL DEFAULT 'open',
+                outcome_price   DOUBLE PRECISION,
+                realized_pnl    DOUBLE PRECISION,
+                opened_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                closed_at       TIMESTAMPTZ
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_runs (
+                id            SERIAL PRIMARY KEY,
+                run_type      TEXT NOT NULL,
+                symbol        TEXT,
+                params        TEXT,
+                metrics       TEXT NOT NULL,
+                started_at    TIMESTAMPTZ,
+                finished_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
 
 
 @contextmanager
@@ -104,6 +138,21 @@ def _sqlite_conn():
             "CREATE TABLE IF NOT EXISTS pyquant_run_guard ("
             "  task TEXT NOT NULL, bucket TEXT NOT NULL, claimed_at TEXT NOT NULL,"
             "  PRIMARY KEY (task, bucket))"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_signals ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  symbol TEXT NOT NULL, side TEXT NOT NULL, entry_price REAL NOT NULL,"
+            "  sl_price REAL, tp_price REAL, qty REAL, entry_capital REAL,"
+            "  expected_max_loss REAL, mode TEXT NOT NULL DEFAULT 'live',"
+            "  status TEXT NOT NULL DEFAULT 'open', outcome_price REAL,"
+            "  realized_pnl REAL, opened_at TEXT NOT NULL, closed_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_runs ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_type TEXT NOT NULL, symbol TEXT, params TEXT, metrics TEXT NOT NULL,"
+            "  started_at TEXT, finished_at TEXT NOT NULL)"
         )
         yield conn
         conn.commit()
@@ -196,3 +245,235 @@ def current_hour_bucket(now: Optional[datetime] = None) -> str:
 def current_minute_bucket(now: Optional[datetime] = None) -> str:
     now = now or datetime.now(timezone.utc)
     return now.strftime("%Y-%m-%dT%H:%M")
+
+
+# ── Signals (Phase 2 — UI "Signals"/"Live Monitor" screens) ─────────────────
+#
+# One row per entry taken (or, in paper mode, simulated). Written by
+# pyq_p4.py at signal-execution time (status="open") and updated when
+# PositionGuard/check_open_position closes it (status="closed_tp" /
+# "closed_sl" / "closed_manual", realized_pnl, outcome_price, closed_at).
+# This is purely additive logging — nothing here feeds back into trading
+# decisions, so it is safe to exercise with ordinary local tests without
+# touching the live engine.
+
+def log_signal(
+    symbol: str,
+    side: str,
+    entry_price: float,
+    sl_price: Optional[float] = None,
+    tp_price: Optional[float] = None,
+    qty: Optional[float] = None,
+    entry_capital: Optional[float] = None,
+    expected_max_loss: Optional[float] = None,
+    mode: str = "live",
+) -> Optional[int]:
+    """Records a newly-opened signal/position. Returns its row id, or None on error."""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pyquant_signals "
+                    "(symbol, side, entry_price, sl_price, tp_price, qty, entry_capital, "
+                    " expected_max_loss, mode, status, opened_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',now()) RETURNING id",
+                    (symbol, side, entry_price, sl_price, tp_price, qty, entry_capital,
+                     expected_max_loss, mode),
+                )
+                return cur.fetchone()[0]
+        with _lock, _sqlite_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO pyquant_signals "
+                "(symbol, side, entry_price, sl_price, tp_price, qty, entry_capital, "
+                " expected_max_loss, mode, status, opened_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'open',?)",
+                (symbol, side, entry_price, sl_price, tp_price, qty, entry_capital,
+                 expected_max_loss, mode, now),
+            )
+            return cur.lastrowid
+    except Exception:
+        return None
+
+
+def update_signal_outcome(
+    signal_id: int,
+    status: str,
+    outcome_price: Optional[float] = None,
+    realized_pnl: Optional[float] = None,
+) -> None:
+    """Marks a signal closed (status e.g. "closed_tp"/"closed_sl"/"closed_manual")."""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "UPDATE pyquant_signals SET status=%s, outcome_price=%s, "
+                    "realized_pnl=%s, closed_at=now() WHERE id=%s",
+                    (status, outcome_price, realized_pnl, signal_id),
+                )
+            return
+        with _lock, _sqlite_conn() as conn:
+            conn.execute(
+                "UPDATE pyquant_signals SET status=?, outcome_price=?, "
+                "realized_pnl=?, closed_at=? WHERE id=?",
+                (status, outcome_price, realized_pnl, now, signal_id),
+            )
+    except Exception:
+        pass  # logging is best-effort; never let it break the trading path
+
+
+def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200) -> list[dict]:
+    """Returns recent signals, newest first, optionally filtered by symbol/status."""
+    where, params = [], []
+    if symbol:
+        where.append("symbol = %s" if _using_postgres() else "symbol = ?")
+        params.append(symbol)
+    if status:
+        where.append("status = %s" if _using_postgres() else "status = ?")
+        params.append(status)
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    cols = ["id", "symbol", "side", "entry_price", "sl_price", "tp_price", "qty",
+            "entry_capital", "expected_max_loss", "mode", "status", "outcome_price",
+            "realized_pnl", "opened_at", "closed_at"]
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"SELECT {','.join(cols)} FROM pyquant_signals{clause} "
+                    f"ORDER BY id DESC LIMIT %s", (*params, limit),
+                )
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+        with _lock, _sqlite_conn() as conn:
+            rows = conn.execute(
+                f"SELECT {','.join(cols)} FROM pyquant_signals{clause} "
+                f"ORDER BY id DESC LIMIT ?", (*params, limit),
+            ).fetchall()
+            return [dict(zip(cols, row)) for row in rows]
+    except Exception:
+        return []
+
+
+# ── Runs (Phase 2 — UI "Backtest" screen: walkforward + daily-optimizer runs) ─
+
+def record_run(
+    run_type: str,
+    metrics: dict,
+    symbol: Optional[str] = None,
+    params: Optional[dict] = None,
+    started_at: Optional[str] = None,
+) -> Optional[int]:
+    """
+    Records a completed walkforward/backtest/optimizer run. `run_type` is a
+    free-form label (e.g. "walkforward", "daily_optimizer"). `metrics` is
+    whatever compute_metrics()-style dict the caller has (win rate, total
+    pnl, sharpe, max drawdown, trade count, etc.) — stored as JSON, read
+    back parsed by the API layer.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    metrics_json = json.dumps(metrics, default=str)
+    params_json = json.dumps(params, default=str) if params is not None else None
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pyquant_runs (run_type, symbol, params, metrics, started_at, finished_at) "
+                    "VALUES (%s,%s,%s,%s,%s,now()) RETURNING id",
+                    (run_type, symbol, params_json, metrics_json, started_at),
+                )
+                return cur.fetchone()[0]
+        with _lock, _sqlite_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO pyquant_runs (run_type, symbol, params, metrics, started_at, finished_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (run_type, symbol, params_json, metrics_json, started_at, now),
+            )
+            return cur.lastrowid
+    except Exception:
+        return None
+
+
+def _row_to_run(row: tuple) -> dict:
+    d = dict(zip(["id", "run_type", "symbol", "params", "metrics", "started_at", "finished_at"], row))
+    try:
+        d["metrics"] = json.loads(d["metrics"]) if d["metrics"] else {}
+    except Exception:
+        pass
+    try:
+        d["params"] = json.loads(d["params"]) if d["params"] else None
+    except Exception:
+        pass
+    return d
+
+
+def list_runs(run_type: Optional[str] = None, limit: int = 50) -> list[dict]:
+    """Returns recent runs, newest first, optionally filtered by run_type."""
+    clause, params = "", []
+    if run_type:
+        clause = " WHERE run_type = %s" if _using_postgres() else " WHERE run_type = ?"
+        params.append(run_type)
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
+                    f"FROM pyquant_runs{clause} ORDER BY id DESC LIMIT %s", (*params, limit),
+                )
+                return [_row_to_run(row) for row in cur.fetchall()]
+        with _lock, _sqlite_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
+                f"FROM pyquant_runs{clause} ORDER BY id DESC LIMIT ?", (*params, limit),
+            ).fetchall()
+            return [_row_to_run(row) for row in rows]
+    except Exception:
+        return []
+
+
+# ── Trading on/off switch (Phase 2 — UI's LIVE/PAPER/OFF control) ───────────
+#
+# Scope note: LIVE vs PAPER is which Binance credentials/host the process
+# connects to (testnet.binancefuture.com vs mainnet) — that connection is
+# built once at process start (see p4_utils.py's _create_binance_client()),
+# so switching it still requires restarting the orchestra process with
+# PYQUANT_MODE set accordingly; the procurement/integration guide covers
+# that restart step. OFF, by contrast, is made a genuinely live control
+# here: it does NOT touch PYQUANT_MODE/credentials, and does NOT stop
+# PositionGuard from continuing to manage any ALREADY-OPEN position's
+# bracket orders (that would be unsafe — an open position must keep its
+# protective SL/TP). It only gates placing NEW entry orders, checked by
+# pyq_p4.py's hourly_task() at the top of every cycle, so a toggle here
+# takes effect on the next scheduled run without a restart.
+
+_TRADING_ENABLED_KEY = "trading_enabled"
+
+
+def is_trading_enabled() -> bool:
+    """True (the default) unless the UI has explicitly set OFF."""
+    val = get_json(_TRADING_ENABLED_KEY, default={"enabled": True})
+    return bool(val.get("enabled", True)) if isinstance(val, dict) else True
+
+
+def set_trading_enabled(enabled: bool) -> None:
+    set_json(_TRADING_ENABLED_KEY, {"enabled": bool(enabled)})
+
+
+def get_run(run_id: int) -> Optional[dict]:
+    """Returns a single run by id, or None if not found/on error."""
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
+                    "FROM pyquant_runs WHERE id = %s", (run_id,),
+                )
+                row = cur.fetchone()
+                return _row_to_run(row) if row else None
+        with _lock, _sqlite_conn() as conn:
+            row = conn.execute(
+                "SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
+                "FROM pyquant_runs WHERE id = ?", (run_id,),
+            ).fetchone()
+            return _row_to_run(row) if row else None
+    except Exception:
+        return None

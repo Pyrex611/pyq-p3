@@ -100,7 +100,56 @@ against margin-at-risk with walkforward's validated 0.225/0.175
 fractions, computed directly from the position's real exchange size and
 entry price.
 
-## 6. What's explicitly NOT done yet
+## 6. Phase 2 — UI build (backend + frontend)
+
+Phase 2 adds a read layer over the state store plus a deployable static
+frontend, without touching the live trading decision logic itself:
+
+- **`pyquant_state.py`** gained two new tables: `pyquant_signals` (one row
+  per entry taken — symbol, side, entry/SL/TP, qty, capital, mode, and its
+  eventual close outcome/realized PnL) and `pyquant_runs` (one row per
+  `walkforward.py` or daily-optimizer run, with its full metrics/params
+  payload as JSON). Both are purely additive logging: `pyq_p4.py`,
+  `p4_utils.py`, `walkforward.py` and `p4_orchestra.py` all call these
+  functions in `try/except`-wrapped, best-effort fashion — a logging
+  failure never affects a trading decision, matching the same
+  fail-safe pattern `pyquant_state.py`'s run guards already used.
+- **`pyquant_state.py`** also gained a genuinely live trading on/off
+  switch (`is_trading_enabled()` / `set_trading_enabled()`), checked by
+  `pyq_p4.py`'s `hourly_task()` at the top of every cycle. Turning it OFF
+  from the UI skips placing NEW entry orders on the next scheduled run —
+  it deliberately does NOT stop `PositionGuard` from continuing to manage
+  any already-open position's bracket orders, and does NOT touch
+  `PYQUANT_MODE` (live vs. paper is still a restart-time, credential-level
+  choice — see `api/index.py`'s `/api/status` docstring for why that one
+  is intentionally not hot-swappable from a public-facing API).
+- **`api/index.py`** — a FastAPI app, deployed as a single Vercel Python
+  serverless function (`vercel.json`'s rewrite routes `/api/*` to it). It
+  is a **read-only layer over the state store** (plus the one OFF-switch
+  write above) and never holds Binance credentials or calls the exchange
+  directly — everything it serves is already being written by the trading
+  engine itself via the Phase 2 logging above. Endpoints: `/api/health`,
+  `/api/status` (GET/POST), `/api/config` (masked credential-presence
+  check), `/api/signals`, `/api/signals/open`, `/api/runs`,
+  `/api/runs/{id}`, `/api/dashboard`.
+- **`web/`** — five static HTML/CSS/JS pages (Dashboard, Live Monitor,
+  Signals, Backtest, API Keys & Settings), visually matching the approved
+  Design-canvas mockup's color tokens and layout, but a genuinely separate,
+  deployable production frontend — not an edit to the `.dc.html` mockup
+  files, which remain a design reference only. Each page fetches from the
+  API above; no build step, no framework.
+
+All of the above was tested locally — `pyquant_state.py`'s new tables via
+direct assertions against a disposable SQLite file, `api/index.py` via
+FastAPI's `TestClient`, and the five frontend pages via a headless-browser
+check against a locally-running copy of the real API serving real
+(seeded) data — none of which touches the live trading engine, consistent
+with this project's standing "testing deferred to integration" rule
+(ordinary software testing of new non-trading infrastructure was always
+in scope; only ad hoc terminal testing of `pyq_p4.py`/`p4_orchestra.py`
+itself is deferred).
+
+## 7. What's explicitly NOT done yet
 
 - Paper mode is wired at the Binance-client level (testnet credentials +
   endpoint) but has not been run — per the "testing deferred to
@@ -109,7 +158,16 @@ entry price.
 - The Postgres backend in `pyquant_state.py` is written but untested
   against a real Postgres instance — it will be exercised for the first
   time during the Phase 1 DB provisioning step, not before.
-- Concurrency hardening so far covers the Algo Order placement/
-  cancellation path only. `signal_executor()`'s main entry order
-  (`futures_create_order`) and `check_open_position()` are not yet
-  wrapped — candidates for the next resilience pass.
+- The Phase 2 API and frontend have not been deployed to Vercel yet (local
+  testing only, above) — see the procurement/integration guide for the
+  deployment steps.
+- LIVE ↔ PAPER mode switching still requires an orchestra process restart
+  with `PYQUANT_MODE` changed — the UI's mode display is informational for
+  that axis; only the OFF switch is a live, no-restart control (see
+  Section 6).
+- `last_resort_stop_loss_check()`'s position close does not yet log a
+  Phase 2 signal close-out (it has no in-memory signal reference, only
+  tracker state) — the three paths that do (PositionGuard's virtual
+  close, the legacy TP/SL tracker, and `check_open_position()`'s
+  profit-target exit) cover the overwhelming majority of real closes; this
+  one is a narrower fallback path and a candidate for a follow-up pass.

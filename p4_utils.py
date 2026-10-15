@@ -340,6 +340,20 @@ def check_open_position(symbol: str) -> dict:
                     f"check_open_position: profit-target early exit for {symbol} "
                     f"(uPNL=${upnl:.4f} >= margin-at-risk threshold ${pt_threshold:.4f})"
                 )
+                # Phase 2: best-effort close-out of the Phase-2 signals log.
+                # This path has no in-memory signal dict (only exchange
+                # position data), so it looks up the newest still-"open"
+                # logged signal for this symbol instead. Never affects the
+                # trading decision above.
+                try:
+                    open_rows = state_store.list_signals(symbol=symbol, status="open", limit=1)
+                    if open_rows:
+                        state_store.update_signal_outcome(
+                            open_rows[0]["id"], "closed_tp",
+                            outcome_price=position_info["entry_price"], realized_pnl=upnl,
+                        )
+                except Exception as e:
+                    logger.warning(f"check_open_position: signal-log close-out failed (non-fatal): {e}")
     except Exception as e:
         logger.error(f"check_open_position ({symbol}): {e}")
     return position_info

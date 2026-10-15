@@ -1,0 +1,142 @@
+/* PyQuant Control Center — shared stylesheet
+   Color tokens matched to the approved Design-canvas mockup
+   (Main.dc.html / LiveMonitor.dc.html / Signals.dc.html / Backtest.dc.html /
+   ApiKeys.dc.html) so this deployable frontend reads as the same product,
+   not a re-skin. This file is hand-written, separate production CSS — the
+   mockup's own .dc.html files are a Claude-hosted design reference, not
+   something this frontend imports or extends. */
+
+:root {
+  --bg: #0B0D11;
+  --bg-panel: #12151A;
+  --border: #242933;
+  --border-soft: #171B22;
+  --text: #E7E9ED;
+  --text-dim: #C9CDD4;
+  --text-muted: #8A909C;
+  --text-faint: #565C68;
+  --accent: #5B8DEF;
+  --accent-soft: #2C3B5C;
+  --accent-soft-text: #BBD0FF;
+  --green: #3FB950;
+  --red: #F2545B;
+  --amber: #E3A13A;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+}
+
+.mono { font-family: 'IBM Plex Mono', monospace; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: #7fa4f3; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 10px 12px; font-size: 13px; }
+th {
+  color: var(--text-faint); font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.04em; font-size: 11px; border-bottom: 1px solid var(--border);
+}
+td { border-bottom: 1px solid var(--border-soft); color: var(--text-dim); }
+tbody tr:hover td { background: #0E1116; }
+
+.app-shell {
+  min-height: 100vh; width: 100%; max-width: 1440px; margin: 0 auto;
+  display: flex; flex-direction: column; background: var(--bg);
+}
+
+.topbar {
+  height: 64px; flex: 0 0 auto; display: flex; align-items: center;
+  justify-content: space-between; padding: 0 24px; border-bottom: 1px solid var(--border);
+  background: var(--bg); position: sticky; top: 0; z-index: 10;
+}
+
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .name { font-weight: 600; font-size: 15px; letter-spacing: 0.01em; }
+.brand .subtitle { color: var(--text-faint); font-size: 13px; margin-left: 2px; }
+
+.mode-switch {
+  display: flex; gap: 4px; background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 3px;
+}
+.mode-switch button {
+  font-family: inherit; font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  padding: 6px 14px; border-radius: 6px; border: none; background: transparent;
+  color: var(--text-muted); cursor: pointer; transition: background .12s, color .12s;
+}
+.mode-switch button.active { background: var(--accent-soft); color: var(--accent-soft-text); }
+.mode-switch button.off.active { background: #4a2328; color: #ffb3b8; }
+
+nav.primary { display: flex; gap: 20px; padding: 0 24px; border-bottom: 1px solid var(--border); }
+nav.primary a {
+  display: inline-block; padding: 12px 2px; font-size: 13px; color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+}
+nav.primary a:hover { color: var(--text); }
+nav.primary a.active { color: var(--text); border-bottom-color: var(--accent); }
+
+main { padding: 24px; flex: 1 1 auto; }
+
+.grid { display: grid; gap: 16px; }
+.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.cols-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) {
+  .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; }
+}
+
+.card {
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 18px 20px;
+}
+.card h3 {
+  margin: 0 0 14px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-faint); font-weight: 600;
+}
+
+.stat-value { font-size: 26px; font-weight: 600; }
+.stat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+.pill {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
+  font-weight: 600; letter-spacing: 0.02em;
+}
+.pill.open { background: #1c2f52; color: #8fb4ff; }
+.pill.closed_tp { background: #113524; color: #6fd99a; }
+.pill.closed_sl { background: #40201f; color: #ff9a92; }
+.pill.closed_manual { background: #2a2a1f; color: #e0d27a; }
+
+.side-buy { color: var(--green); }
+.side-sell { color: var(--red); }
+.pnl-pos { color: var(--green); }
+.pnl-neg { color: var(--red); }
+
+.empty-state { color: var(--text-muted); font-size: 13px; padding: 24px; text-align: center; }
+
+.config-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 0; border-bottom: 1px solid var(--border-soft);
+}
+.config-row:last-child { border-bottom: none; }
+.config-key { font-size: 13px; color: var(--text-dim); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+.dot.set { background: var(--green); }
+.dot.unset { background: var(--text-faint); }
+
+.banner {
+  padding: 10px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+.banner.warn { background: #3a2a14; color: #e3b96a; border: 1px solid #5a4322; }
+.banner.error { background: #3a1416; color: #ff9a92; border: 1px solid #5a2224; }
+
+footer.hint { padding: 16px 24px; color: var(--text-faint); font-size: 12px; }
