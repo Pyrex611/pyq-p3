@@ -1,24 +1,11 @@
 name: PyQuant Orchestra (cron)
 
-# GitHub Actions cron migration — see CLAUDE.md Section 6.3 and
-# GITHUB_ACTIONS_SETUP.md for the full writeup (why 5 minutes, not 1;
-# why this needs a public repo to stay actually free; what cron_runner.py
-# does differently from p4_orchestra.py).
-#
-# `*/5 * * * *` is GitHub Actions' documented minimum schedule
-# granularity — there is no 1-minute option. GitHub's own docs also note
-# that scheduled runs are best-effort and can be delayed under load,
-# especially for public repos at the top of the hour — expect occasional
-# skipped/delayed ticks, not a perfectly metronomic 5 minutes.
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}    # lets you trigger a tick manually from the Actions tab, for testing
 
 concurrency:
-  # Prevents two ticks from ever running at once if one run takes longer
-  # than 5 minutes (slow Alpaca/Binance API calls, etc.) — the next
-  # scheduled tick waits for the previous one instead of overlapping it.
   group: pyquant-orchestra
   cancel-in-progress: false
 
@@ -39,17 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
         
-      - name: Create .env file from template and secrets
+      - name: Create .env file from secrets
         run: |
-          # 1. Copy template if it exists, otherwise create a blank .env
-          if [ -f env_template.txt ]; then
-            cp env_template.txt .env
-          else
-            touch .env
-          fi
-
-          # 2. Inject your secrets and variables into the physical .env file
-          echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
+          echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" > .env
           echo "ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}" >> .env
           echo "BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}" >> .env
           echo "BINANCE_SECRET_KEY=${{ secrets.BINANCE_SECRET_KEY }}" >> .env
