@@ -36,6 +36,8 @@ jobs:
           echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" >> .env
           echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> .env
           echo "PYQUANT_MODE=${{ vars.PYQUANT_MODE }}" >> .env
+          echo "BYBIT_API_KEY=${{ secrets.BYBIT_API_KEY }}" >> .env
+          echo "BYBIT_SECRET_KEY=${{ secrets.BYBIT_SECRET_KEY }}" >> .env
 
       - name: Verify .env file exists (Debug)
         run: |
