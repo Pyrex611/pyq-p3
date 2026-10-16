@@ -13,7 +13,7 @@ name: PyQuant Orchestra (cron)
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # lets you trigger a tick manually from the Actions tab, for testing
+  workflow_dispatch: {}    # lets you trigger a tick manually from the Actions tab, for testing
 
 concurrency:
   # Prevents two ticks from ever running at once if one run takes longer
@@ -41,14 +41,14 @@ jobs:
         
       - name: Create .env file from template and secrets
         run: |
-          # 1. Copy the template to create the physical .env file
+          # 1. Copy template if it exists, otherwise create a blank .env
           if [ -f env_template.txt ]; then
             cp env_template.txt .env
           else
             touch .env
           fi
 
-          # 2. Append or inject your secrets into .env
+          # 2. Inject your secrets and variables into the physical .env file
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" >> .env
           echo "ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}" >> .env
           echo "BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}" >> .env
@@ -60,15 +60,14 @@ jobs:
 
       - name: Verify .env file exists (Debug)
         run: |
-          echo "Checking if .env exists in current directory:"
+          echo "Checking if .env exists and has content:"
           ls -la .env
+          wc -l .env
 
       - name: Run one orchestra tick
         env:
           BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
           BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
-          # BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
-          # BINANCE_TESTNET_SECRET_KEY: ${{ secrets.BINANCE_TESTNET_SECRET_KEY }}
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
