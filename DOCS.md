@@ -60,8 +60,13 @@ Three things that used to live on local disk now live in a database
 - **The daily optimizer's output** (previously `optimal_params.json`,
   written by `p4_orchestra.py`'s `daily_optimizer()`, read by
   `SignalGenerator.load_params()`).
+- **(Added for the GitHub Actions cron migration — Section 8)** the 18
+  UKF filters' internal state (`.x`/`.P`), `btc_tracker`/`eth_tracker`
+  plus a handful of scalar flags (double-order prevention, which symbol
+  has an open position, etc.), and `WatchdogTracker`'s trade log
+  (previously `watchdog_trades.json`).
 
-Both of the JSON-backed pieces still get a best-effort local file mirror
+All of the JSON-backed pieces still get a best-effort local file mirror
 for human inspection on a VPS, but the database is what's actually read
 back — the file is not load-bearing anymore.
 
@@ -161,10 +166,12 @@ itself is deferred).
   against a real Postgres instance — it will be exercised for the first
   time during the Phase 1 DB provisioning step, not before.
 - Deployment is documented separately, step by step: `SUPABASE_SETUP.md`
-  (database), `VPS_SETUP.md` (orchestra process), `VERCEL_DEPLOY.md`
-  (API + frontend) — the Claude Docs plan doc intentionally no longer
-  carries this granular content, per the project's standing instruction
-  to keep setup/procurement steps in the repo's `.md` files.
+  (database), `GITHUB_ACTIONS_SETUP.md` (orchestra process — current
+  path) or `VPS_SETUP.md` (orchestra process — fallback path, see
+  Section 8), `VERCEL_DEPLOY.md` (API + frontend) — the Claude Docs plan
+  doc intentionally no longer carries this granular content, per the
+  project's standing instruction to keep setup/procurement steps in the
+  repo's `.md` files.
 - LIVE ↔ PAPER mode switching still requires an orchestra process restart
   with `PYQUANT_MODE` changed — the UI's mode display is informational for
   that axis; only the OFF switch is a live, no-restart control (see
@@ -175,3 +182,31 @@ itself is deferred).
   close, the legacy TP/SL tracker, and `check_open_position()`'s
   profit-target exit) cover the overwhelming majority of real closes; this
   one is a narrower fallback path and a candidate for a follow-up pass.
+
+## 8. GitHub Actions cron migration (current orchestra deployment path)
+
+The orchestra (`p4_orchestra.py`) moved from "needs a VPS" to "runs as a
+GitHub Actions cron job" — `cron_runner.py` (new) is a stateless,
+one-shot entrypoint that calls every task function once per invocation;
+each already self-guards against running too often via
+`pyquant_state.py`'s `try_claim_run()` (two new guards were added —
+`fifteen_minute_task()` and `daily_optimizer()` had none before, since
+they'd always relied on `p4_orchestra.py`'s own scheduler calling them
+at the right wall-clock offset within one continuous process).
+
+This is a real code change to the trading engine, not just a hosting
+swap — a cron-restarted process has no memory of the previous
+invocation, so three kinds of previously in-memory-only state now
+round-trip through the database every tick: the 18 UKF filters'
+`.x`/`.P`, `btc_tracker`/`eth_tracker` plus a handful of scalar flags,
+and `WatchdogTracker`'s trade log. **Not yet validated against
+walkforward** — per the project's own standing rule, don't trust
+`PYQUANT_MODE=paper`/`live` output from this path until that comparison
+confirms the restart-safe behavior tracks the original continuous-process
+behavior. See `GITHUB_ACTIONS_SETUP.md` for the full trade-off writeup
+(5-minute cron floor vs. the original 1-minute cadence; why this only
+stays free with a public repo) and `CLAUDE.md` Section 6.3 for how this
+relates to the larger, still-future Vercel+QStash re-architecture.
+`VPS_SETUP.md` remains as a fallback path if this turns out to be too
+unreliable or too limited in practice — nothing about this migration
+makes switching back harder.

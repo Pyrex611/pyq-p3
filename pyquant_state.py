@@ -247,6 +247,26 @@ def current_minute_bucket(now: Optional[datetime] = None) -> str:
     return now.strftime("%Y-%m-%dT%H:%M")
 
 
+def current_15min_bucket(now: Optional[datetime] = None) -> str:
+    """
+    GitHub Actions cron migration: fifteen_minute_task() previously relied
+    purely on p4_orchestra.py's schedule library calling it at exactly
+    :00/:15/:30/:45 within one continuous process — it had no bucket guard
+    of its own. A cron-triggered process that calls it unconditionally on
+    every 5-minute tick needs this guard so it still only actually runs
+    once per 15-minute window instead of 3x too often.
+    """
+    now = now or datetime.now(timezone.utc)
+    floored_minute = (now.minute // 15) * 15
+    return now.strftime("%Y-%m-%dT%H:") + f"{floored_minute:02d}"
+
+
+def current_day_bucket(now: Optional[datetime] = None) -> str:
+    """Same rationale as current_15min_bucket(), for daily_optimizer()."""
+    now = now or datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%d")
+
+
 # ── Signals (Phase 2 — UI "Signals"/"Live Monitor" screens) ─────────────────
 #
 # One row per entry taken (or, in paper mode, simulated). Written by

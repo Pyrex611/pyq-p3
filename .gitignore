@@ -15,3 +15,15 @@ pyquant_state.sqlite3-shm
 __pycache__/
 *.pyc
 .vercel/
+
+# GitHub Actions cron migration: the database (pyquant_state.py) is now
+# the source of truth for all of this — these are purely local, best-
+# effort mirrors. Purged from existing git history too (see
+# GITHUB_ACTIONS_SETUP.md's "What was purged" section) since the repo is
+# now public and this is operational/strategy detail, not just clutter.
+*.log
+optimal_params.json
+active_trades.json
+watchdog_trades.json
+last_execution_timestamp.txt
+minute_execution_timestamp.txt

@@ -1,11 +1,20 @@
 """
 p4_orchestra.py
-Master scheduler for pyq_p4. Runs:
+Master scheduler for pyq_p4. Run directly (`python3 p4_orchestra.py`) on a
+continuously-running host (the VPS path — see VPS_SETUP.md), it schedules:
   - daily_optimizer at 00:03 (data refresh + Bayesian parameter search + UKF re-anchoring)
   - hourly_task at :02 past the hour
   - fifteen_minute_task at :00, :15, :30, :45
   - five_minute_task at 5-minute intervals
   - one_minute_task every minute
+
+As of the GitHub Actions cron migration, this file's scheduling/loop code
+is guarded behind `if __name__ == "__main__":` so `daily_optimizer()` can
+also be imported directly by `cron_runner.py` (the stateless, one-shot
+entrypoint used by `.github/workflows/orchestra.yml`) without starting a
+second infinite loop. See `CLAUDE.md` Section 6.3 and `cron_runner.py`'s
+own docstring for the full picture of why a continuous process (this
+file) and a stateless cron tick (`cron_runner.py`) now both exist.
 """
 
 import json
@@ -21,6 +30,16 @@ import pyquant_state as state_store
 
 
 def daily_optimizer():
+    # Cron migration: daily_optimizer() previously had no run-guard of its
+    # own — it relied entirely on schedule.every().day.at("00:03") firing
+    # exactly once within one continuous process. A cron-triggered process
+    # (GitHub Actions' */5 * * * * schedule, see cron_runner.py) calling
+    # this unconditionally on every matching tick needs this guard so it
+    # still only actually runs once per day.
+    if not state_store.try_claim_run("daily_optimizer", state_store.current_day_bucket()):
+        print("[Orchestra] daily_optimizer already ran (or is running) today. Skipping.")
+        return
+
     print("[Orchestra] Starting daily optimisation…")
     try:
         # 1. Download fresh historical data
@@ -61,30 +80,35 @@ def daily_optimizer():
         print(traceback.format_exc())
 
 
-# ── Schedule setup ────────────────────────────────────────────────────────────
+# Guarded behind __main__ (added during the GitHub Actions cron migration)
+# so this module can be safely imported — e.g. by cron_runner.py, which
+# needs daily_optimizer without wanting this file's own infinite loop to
+# start — while `python3 p4_orchestra.py` from the command line (the VPS
+# deployment path in VPS_SETUP.md) behaves exactly as before.
+if __name__ == "__main__":
+    # ── Schedule setup ────────────────────────────────────────────────────
+    schedule.every().day.at("00:03").do(daily_optimizer)
 
-schedule.every().day.at("00:03").do(daily_optimizer)
+    # Scheduled at :02 past the hour to allow Alpaca bar ingestion lag to settle
+    schedule.every().hour.at(":02").do(hourly_task)
 
-# Scheduled at :02 past the hour to allow Alpaca bar ingestion lag to settle
-schedule.every().hour.at(":02").do(hourly_task)
+    for _offset in [":00", ":15", ":30", ":45"]:
+        schedule.every().hour.at(_offset).do(fifteen_minute_task)
 
-for _offset in [":00", ":15", ":30", ":45"]:
-    schedule.every().hour.at(_offset).do(fifteen_minute_task)
+    for _offset in [":00", ":05", ":10", ":15", ":20", ":25",
+                    ":30", ":35", ":40", ":45", ":50", ":55"]:
+        schedule.every().hour.at(_offset).do(five_minute_task)
 
-for _offset in [":00", ":05", ":10", ":15", ":20", ":25",
-                ":30", ":35", ":40", ":45", ":50", ":55"]:
-    schedule.every().hour.at(_offset).do(five_minute_task)
+    schedule.every(1).minutes.do(one_minute_task)
 
-schedule.every(1).minutes.do(one_minute_task)
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
-print("[Orchestra] Scheduler running (pyq_p4). Press Ctrl-C to stop.")
-try:
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("[Orchestra] Shutdown requested.")
-except Exception as e:
-    print(f"[Orchestra] Fatal error: {e}")
-    print(traceback.format_exc())
+    # ── Main loop ─────────────────────────────────────────────────────────
+    print("[Orchestra] Scheduler running (pyq_p4). Press Ctrl-C to stop.")
+    try:
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("[Orchestra] Shutdown requested.")
+    except Exception as e:
+        print(f"[Orchestra] Fatal error: {e}")
+        print(traceback.format_exc())

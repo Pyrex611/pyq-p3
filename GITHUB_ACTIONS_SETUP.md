@@ -1,0 +1,190 @@
+# GitHub Actions Setup Guide — Cron-Based Orchestra (replaces the VPS, for now)
+
+This replaces `VPS_SETUP.md` as the **current** path for running the
+orchestra. `VPS_SETUP.md` is kept in the repo as a fallback — if GitHub
+Actions' scheduling turns out to be too unreliable or too limited in
+practice, that guide still works unchanged, and nothing about this
+migration makes it harder to switch back.
+
+**Read this first if you haven't already:** `CLAUDE.md` Section 6.3 and
+this file's own "What changed and why" section below explain two real
+trade-offs this migration accepts — coarser (5-minute, not 1-minute)
+monitoring granularity, and a public repo. Both were discussed and
+confirmed before this was built; this file is the "how," not the "why."
+
+## What changed and why (short version)
+
+- **GitHub Actions' cron trigger has a 5-minute floor** — there's no way
+  to schedule it every 1 minute. `cron_runner.py` (new) runs once per
+  invocation, calling every task function once; each one already
+  self-guards against running more often than it should (via
+  `pyquant_state.py`'s `try_claim_run()`), so `one_minute_task()` simply
+  ends up running on a 5-minute cadence instead of 1-minute. This means
+  up to ~5 minutes of added latency detecting a fill/TP/SL hit — **not**
+  a reduction in actual risk protection, since the real TP/SL orders are
+  Binance's own exchange-side bracket orders, enforced in real time
+  regardless of how often this bot polls. What gets slower is this bot's
+  own *awareness* (its logging, its Telegram notification, the UI's
+  Signals/Live Monitor update), not Binance's enforcement.
+- **This only stays free if the repo is public.** The dependency stack
+  (numpy/pandas/scikit-learn/filterpy/optuna/alpaca/binance/telegram)
+  takes real time to install; at ~288 runs/day (every 5 minutes), a
+  private repo would very likely exceed GitHub's free 2,000 minutes/month
+  and start being billed — plausibly more than the VPS this replaces. A
+  public repo gets unlimited free Actions minutes. **Before pushing this,
+  the repo needs its git history scrubbed of anything that shouldn't be
+  public** (done as part of this delivery — see "What was purged" below)
+  — actual credentials were never in the code, only in a gitignored
+  `.env`, confirmed never committed.
+- **The UKF filters needed real code changes, not just a new host.**
+  `pyq_p4.py` now persists each of the 18 Kalman filters' internal state
+  (`.x`/`.P`) to the shared database after every tick and restores it at
+  the top of every invocation — without this, a cron-restarted process
+  would silently reset the filters' online learning every 5 minutes.
+  Same reasoning for `btc_tracker`/`eth_tracker` and a handful of other
+  in-memory flags (double-order prevention, which symbol has an open
+  position, etc.) — all now round-trip through the database too.
+  **This has not yet been validated against walkforward** — per the
+  project's standing rule, don't trust `PYQUANT_MODE=paper`/`live` output
+  from this cron-based path until a walkforward comparison confirms the
+  restart-safe UKF behavior matches the original continuous-process
+  behavior closely enough to trust.
+
+## What was purged from git history (before going public)
+
+Three categories of file were removed from **every commit**, not just
+the current one (a public repo exposes full history, not just the
+latest snapshot):
+- `optimal_params.json`, `active_trades.json` — runtime state that
+  reveals live strategy parameters / position detail, and is
+  regenerated automatically anyway (the database is now the source of
+  truth for both — see `DOCS.md` Section 3).
+- `pyq_p3.log`, `pyq_p4.log` — large accumulated run logs with
+  operational detail, already irrelevant now that `pyquant_state.py`'s
+  tables are the real record.
+
+Confirmed before doing this: no real API keys, tokens, or credentials
+were ever committed to this repo at any point in its history (`.env`
+was gitignored from the start) — this purge is about not publishing
+*strategy/operational* detail, not about leaked secrets.
+
+If you ever need the content of those files from before the purge,
+it's still in whatever zip/backup you have from before this change —
+the purge rewrites this repo's history, it doesn't touch any other copy
+you're holding onto.
+
+## Part A — Make the repository public
+
+1. Go to `https://github.com/Pyrex611/pyq-p3`.
+2. Click **Settings** (top nav bar of the repo page — requires owner
+   access).
+3. Scroll to the very bottom — **Danger Zone**.
+4. Click **Change repository visibility**.
+5. Select **Make public**, type the repo name (`Pyrex611/pyq-p3`) to
+   confirm, and click **I understand, change repository visibility**.
+
+Do this **after** the history-purge commit described above has already
+been pushed (force-pushed, since it rewrites history) — not before. If
+you're reading this and the push is still blocked by the GitHub App
+authorization issue (see `CLAUDE.md` Section 5), resolve that first;
+making the repo public with old, unpurged history still visible
+defeats the purpose.
+
+## Part B — Add repository secrets
+
+1. On the repo page, click **Settings** → **Secrets and variables** (left
+   sidebar) → **Actions**.
+2. Click the green **New repository secret** button.
+3. Add each of the following one at a time (**Name** exactly as shown,
+   **Secret** = your actual value, then click **Add secret** — repeat
+   for each row):
+
+| Name | Value |
+|---|---|
+| `BINANCE_API_KEY` | Your Binance Futures mainnet API key |
+| `BINANCE_SECRET_KEY` | Your Binance Futures mainnet secret key |
+| `BINANCE_TESTNET_API_KEY` | Your Binance Futures **testnet** API key (only needed once you actually try `PYQUANT_MODE=paper`) |
+| `BINANCE_TESTNET_SECRET_KEY` | Your Binance Futures testnet secret key |
+| `ALPACA_API_KEY` | Your Alpaca API key |
+| `ALPACA_SECRET_KEY` | Your Alpaca secret key |
+| `TELEGRAM_TOKEN` | Your Telegram bot token |
+| `TELEGRAM_CHAT_ID` | Your Telegram chat id |
+| `DATABASE_URL` | The same Supabase connection string from `SUPABASE_SETUP.md` / your Vercel project's env vars |
+
+A secret's value is never shown again after saving (GitHub masks it) —
+if you need to change one later, you re-add it with the same name; that
+overwrites the old value.
+
+## Part C — Add the `PYQUANT_MODE` repository variable
+
+This one isn't a secret (it's just the word "live" or "paper"), so it
+uses GitHub's separate **Variables** tab instead:
+
+1. Still under **Settings** → **Secrets and variables** → **Actions**,
+   click the **Variables** tab (next to **Secrets**).
+2. Click **New repository variable**.
+3. **Name:** `PYQUANT_MODE`. **Value:** `live` (or `paper` — see
+   `DOCS.md` Section 1 for what each means; given the standing
+   "validate before trusting" note above, starting with `paper` is the
+   safer choice until a walkforward comparison confirms the UKF
+   persistence behaves correctly).
+4. Click **Add variable**.
+
+## Part D — Confirm the workflow file is there and push everything
+
+The workflow file (`.github/workflows/orchestra.yml`) and all the code
+changes described above are included in this delivery's zip/commit.
+Once GitHub push access is restored (see `CLAUDE.md` Section 5 — this is
+the same blocker already reported, not a new one), push normally:
+
+```
+git push origin main
+```
+
+(The history-purge commit, if it hasn't been pushed yet either, needs
+`git push --force origin main` instead, specifically because rewriting
+history changes commit hashes — a normal push is rejected for a rewritten
+branch. Force-pushing is safe here only because this is a single-person
+repo with no other clones/collaborators relying on the old history.)
+
+## Part E — Verify it's running
+
+1. Go to the repo's **Actions** tab.
+2. You should see **PyQuant Orchestra (cron)** listed as a workflow.
+3. To test immediately without waiting for the next 5-minute mark, click
+   it, then click the **Run workflow** dropdown (top right) → **Run
+   workflow** button. This uses the `workflow_dispatch` trigger built
+   into `orchestra.yml` for exactly this purpose.
+4. Click into the new run (it appears at the top of the list within a
+   few seconds) → click the **tick** job → watch the **Run one orchestra
+   tick** step's live log output. You should see lines like
+   `[cron_runner] Calling one_minute_task()…` for each task, and
+   `[cron_runner] Tick complete, no uncaught errors.` at the end if
+   everything succeeded.
+5. If a task fails, its traceback prints directly in this same log —
+   the run is also marked with a red ✕ in the Actions list so you don't
+   have to open it to notice.
+6. Check the UI (`https://pyq-p3.vercel.app/`) — the Live Monitor/
+   Signals/Backtest pages should start showing real data once a few
+   ticks have run (the Dashboard/signals come from the same database
+   this workflow now writes to).
+
+## Part F — What to watch for in normal operation
+
+- **Occasional skipped or delayed ticks.** GitHub's own documentation
+  states scheduled workflows are best-effort and can be delayed,
+  especially for public repos and especially at the top of the hour
+  when many repos' cron jobs fire at once. A skipped tick is not
+  retried — the next scheduled one just picks up from wherever the
+  persisted state left off.
+- **A run that goes past 10 minutes gets killed** (this workflow's
+  `timeout-minutes: 10`) — raise this in `orchestra.yml` if a tick
+  genuinely needs longer (e.g. `daily_optimizer()`'s Bayesian search),
+  but check the run's log first to understand why it was slow rather
+  than just raising the limit blindly.
+- **Actions usage**: Settings → Billing → Plans and usage (at the
+  account level, not the repo level) shows Actions minutes used — on a
+  public repo this should read effectively unlimited/free, so a nonzero
+  but small paid balance there would be worth investigating (it would
+  mean something is still being billed, which shouldn't happen on a
+  public repo).

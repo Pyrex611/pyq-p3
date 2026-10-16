@@ -142,6 +142,92 @@ eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.create_ukf_models
 eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.create_ukf_models("15T", eth_symbols)
 eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models("5T",  eth_symbols)
 
+# ── GitHub Actions cron migration: persist/restore UKF filter state ──────────
+# Each model above is created fresh (a full retrain against history, via
+# create_ukf_models()) at every import — fine for a continuously-running
+# process (it only happens once, at startup), but every one of these
+# filters is then updated INCREMENTALLY, one bar at a time (step_ukf()'s
+# .update()/.predict() calls), for as long as that one process stays
+# alive, and only fully retrained again once a day (retrain_daily_ukfs()).
+#
+# A cron-triggered process (e.g. GitHub Actions) restarts from scratch on
+# every single invocation. Without this, every tick would silently throw
+# away all of that incremental adaptation and start the filters cold —
+# which is a real change to the trading engine's behavior, not just a
+# hosting swap. So: restore each filter's internal state (.x, .P) from
+# the shared state store right after creation above (falling back to the
+# freshly-trained values on a genuine first-ever run, when nothing has
+# been persisted yet), and persist it again at the end of every task tick
+# below and after every retrain_daily_ukfs() call.
+#
+# Per the standing "validate strategy-affecting changes via walkforward
+# before trusting them live" rule: this restart-safe behavior has NOT yet
+# been confirmed to reproduce the original continuous-process behavior —
+# don't trust PYQUANT_MODE=paper/live output until a walkforward run (or
+# an equivalent dedicated check) confirms restoring .x/.P this way tracks
+# the same values a never-restarted process would have held.
+_UKF_STATE_KEY = "pyq_p4_ukf_filter_state"
+
+# Names only, looked up via globals() at call time rather than a dict of
+# object references captured once — retrain_daily_ukfs() REBINDS the six
+# 1H names (btc_ukf/btc_high_ukf/btc_low_ukf/eth_ukf/eth_high_ukf/
+# eth_low_ukf) to brand-new objects each time it runs; a dict built once
+# at import would keep pointing at the stale pre-retrain objects forever.
+_UKF_NAMES = [
+    "btc_ukf", "btc_high_ukf", "btc_low_ukf",
+    "btc_fift_ukf", "btc_fift_high_ukf", "btc_fift_low_ukf",
+    "btc_five_ukf", "btc_five_high_ukf", "btc_five_low_ukf",
+    "eth_ukf", "eth_high_ukf", "eth_low_ukf",
+    "eth_fift_ukf", "eth_fift_high_ukf", "eth_fift_low_ukf",
+    "eth_five_ukf", "eth_five_high_ukf", "eth_five_low_ukf",
+]
+
+
+def _restore_ukf_state():
+    """Best-effort: overwrite each freshly-created filter's .x/.P with the
+    last-persisted values, if any. A miss (first-ever run, or a read
+    error) just leaves the freshly-trained models from above in place."""
+    saved = state_store.get_json(_UKF_STATE_KEY)
+    if not saved:
+        logger.info("No persisted UKF state found — using freshly-trained models (expected on first run).")
+        return
+    restored = 0
+    for name in _UKF_NAMES:
+        ukf = globals().get(name)
+        entry = saved.get(name)
+        if not entry or ukf is None:
+            continue
+        try:
+            ukf.x = np.array(entry["x"], dtype=float)
+            ukf.P = np.array(entry["P"], dtype=float)
+            restored += 1
+        except Exception as e:
+            logger.error(f"UKF state restore failed for {name}: {e}")
+    logger.info(f"Restored persisted UKF state for {restored}/{len(_UKF_NAMES)} models.")
+
+
+def _persist_ukf_state():
+    """Best-effort: snapshot every model's CURRENT .x/.P (via globals(),
+    for the same reason _restore_ukf_state() looks up by name rather than
+    a captured dict — retrain_daily_ukfs() rebinds six of these names).
+    Called at the end of every task tick so a cron-restarted process can
+    resume where the last invocation left off. A failure here never
+    affects trading logic — it only means the next invocation starts from
+    slightly staler state."""
+    try:
+        payload = {}
+        for name in _UKF_NAMES:
+            ukf = globals().get(name)
+            if ukf is None:
+                continue
+            payload[name] = {"x": np.asarray(ukf.x).tolist(), "P": np.asarray(ukf.P).tolist()}
+        state_store.set_json(_UKF_STATE_KEY, payload)
+    except Exception as e:
+        logger.error(f"UKF state persist failed (non-fatal): {e}")
+
+
+_restore_ukf_state()
+
 # ── Signal Generator & PositionGuard ──────────────────────────────────────────
 signal_generator = SignalGenerator()
 
@@ -163,12 +249,26 @@ ukf_mapping = {
 # ── WATCHDOG TRACKER ENGINE ───────────────────────────────────────────────────
 
 class WatchdogTracker:
+    # Cron migration: this used to rely purely on `filename` for
+    # persistence, which is correct for the VPS path (a real, persistent
+    # disk) but not for GitHub Actions, where `actions/checkout` gives
+    # every invocation a brand-new, empty working directory — a local
+    # file written by one tick is simply gone by the next. The shared
+    # state store (same DB pyquant_state.py already uses everywhere else)
+    # is now the primary store; `filename` is kept as a best-effort local
+    # mirror only, exactly like optimal_params.json's own local-file
+    # mirror elsewhere in this project.
+    _STATE_KEY = "pyq_p4_watchdog_trades"
+
     def __init__(self, filename="watchdog_trades.json"):
         self.filename = filename
         self.lock = threading.Lock()
         self.trades = self.load_trades()
 
     def load_trades(self) -> dict:
+        remote = state_store.get_json(self._STATE_KEY)
+        if isinstance(remote, dict):
+            return remote
         if os.path.exists(self.filename):
             try:
                 with open(self.filename, "r") as f:
@@ -179,10 +279,14 @@ class WatchdogTracker:
 
     def save_trades(self):
         try:
+            state_store.set_json(self._STATE_KEY, self.trades)
+        except Exception as e:
+            logger.error(f"WatchdogTracker state-store save error (non-fatal): {e}")
+        try:
             with open(self.filename, "w") as f:
                 json.dump(self.trades, f, indent=4)
         except Exception as e:
-            logger.error(f"WatchdogTracker save error: {e}")
+            logger.error(f"WatchdogTracker local-file mirror save error (non-fatal): {e}")
 
     def register_signal(self, signal: dict, is_test_mode: bool = False, is_unfunded: bool = False):
         if not signal or "symbol" not in signal:
@@ -346,6 +450,63 @@ eth_tracker = {
     "expected_max_loss": None,
 }
 
+# ── GitHub Actions cron migration: persist/restore the tracker/flag state ──
+# Same rationale as the UKF persistence above, for a different kind of
+# state: btc_tracker/eth_tracker and the scalar flags below (double-order
+# prevention, which symbol currently has an open position, etc.) are
+# plain in-memory globals today, correct only because one continuous
+# process keeps them alive between ticks. A cron-restarted process needs
+# them restored from the shared state store instead.
+_RUNTIME_FLAGS_KEY = "pyq_p4_runtime_flags"
+_RUNTIME_SCALAR_NAMES = [
+    "ordered", "double_order", "order_changed", "position_closed",
+    "wallet_balance", "btc_balance", "eth_balance",
+    "btc_ordered_signal", "eth_ordered_signal",
+    "btc_position", "eth_position", "bo_declared", "eo_declared",
+]
+
+
+def _restore_runtime_flags():
+    """Best-effort: overwrite the freshly-initialized defaults above with
+    the last-persisted values, if any. Mirrors _restore_ukf_state()'s
+    fallback behavior — a miss just leaves today's module-level defaults
+    (all cleared/False/None) in place, which is exactly right on a
+    genuine first-ever run."""
+    saved = state_store.get_json(_RUNTIME_FLAGS_KEY)
+    if not saved:
+        logger.info("No persisted runtime-flag state found — using fresh defaults (expected on first run).")
+        return
+    g = globals()
+    try:
+        if isinstance(saved.get("btc_tracker"), dict):
+            g["btc_tracker"].update(saved["btc_tracker"])
+        if isinstance(saved.get("eth_tracker"), dict):
+            g["eth_tracker"].update(saved["eth_tracker"])
+        for name in _RUNTIME_SCALAR_NAMES:
+            if name in saved:
+                g[name] = saved[name]
+        logger.info("Restored persisted runtime-flag state (tracker dicts + scalar flags).")
+    except Exception as e:
+        logger.error(f"Runtime-flag state restore failed: {e}")
+
+
+def _persist_runtime_flags():
+    """Best-effort: snapshot btc_tracker/eth_tracker + the scalar flags.
+    Called at the same points as _persist_ukf_state() — see that
+    function's docstring for why this has to be a snapshot-every-tick
+    operation rather than a one-time save."""
+    try:
+        g = globals()
+        payload = {"btc_tracker": dict(g["btc_tracker"]), "eth_tracker": dict(g["eth_tracker"])}
+        for name in _RUNTIME_SCALAR_NAMES:
+            payload[name] = g.get(name)
+        state_store.set_json(_RUNTIME_FLAGS_KEY, payload)
+    except Exception as e:
+        logger.error(f"Runtime-flag state persist failed (non-fatal): {e}")
+
+
+_restore_runtime_flags()
+
 LAST_RESORT_MULTIPLIER = 1.5
 HARD_DOLLAR_SL_FLOOR    = -0.20
 
@@ -386,6 +547,13 @@ def retrain_daily_ukfs():
             logger.info(f"[UKF Retrain] Successfully re-anchored 1H UKF for {symb_short} on {len(bars)} bars.")
         except Exception as e:
             logger.error(f"[UKF Retrain] Error re-anchoring 1H UKF for {symbol_alpaca}: {e}")
+
+    # Cron migration: this just rebound six of the global UKF names to
+    # brand-new objects — persist immediately so the new post-retrain
+    # state (not the pre-retrain snapshot from the top of this same
+    # invocation) is what the next cron tick restores.
+    _persist_ukf_state()
+    _persist_runtime_flags()
 
 
 # Phase 1: run guards now live in pyquant_state (SQLite locally, Postgres
@@ -1095,8 +1263,21 @@ def hourly_task():
     except Exception as e:
         logger.error(f"Signal execution error: {e}\n{traceback.format_exc()}")
 
+    _persist_ukf_state()      # cron migration — best-effort, see definition above
+    _persist_runtime_flags()  # cron migration — best-effort, see definition above
+
 
 def fifteen_minute_task():
+    # Cron migration: fifteen_minute_task() previously had no run-guard of
+    # its own — it relied entirely on p4_orchestra.py's schedule library
+    # calling it at exactly :00/:15/:30/:45 within one continuous process.
+    # A cron-triggered process calling it unconditionally on every 5-minute
+    # tick needs this guard so it still only runs once per 15-minute
+    # window, not 3x too often.
+    if not state_store.try_claim_run("fifteen_minute_task", state_store.current_15min_bucket()):
+        print("15-minute task already ran (or is running) this window. Skipping.")
+        return
+
     global order_changed, my_signal, btc_ordered_signal, eth_ordered_signal
 
     try:
@@ -1138,6 +1319,9 @@ def fifteen_minute_task():
     except Exception as e:
         print(f"15-minute task error: {e}\n{traceback.format_exc()}")
 
+    _persist_ukf_state()      # cron migration — best-effort, see definition above
+    _persist_runtime_flags()  # cron migration — best-effort, see definition above
+
 
 def five_minute_task():
     global order_changed, signal, my_signal
@@ -1175,6 +1359,9 @@ def five_minute_task():
 
     except Exception as e:
         print(f"5-minute task error: {e}\n{traceback.format_exc()}")
+
+    _persist_ukf_state()      # cron migration — best-effort, see definition above
+    _persist_runtime_flags()  # cron migration — best-effort, see definition above
 
 
 def one_minute_task():
@@ -1405,3 +1592,6 @@ def one_minute_task():
 
     except Exception as e:
         print(f"1-minute task fatal error: {e}\n{traceback.format_exc()}")
+
+    _persist_ukf_state()      # cron migration — best-effort, see definition above
+    _persist_runtime_flags()  # cron migration — best-effort, see definition above

@@ -27,8 +27,8 @@ Section 6 for what's next.
 ## 2. Architecture at a glance
 
 ```
-┌─────────────────────────┐        ┌──────────────────────────┐
-│   VPS (or equivalent)    │        │         Vercel            │
+┌──────────────────────────┐        ┌────────────────────────────┐
+│   VPS (or equivalent)    │        │         Vercel             │
 │                          │        │                            │
 │  p4_orchestra.py         │  reads │  api/index.py (FastAPI)    │
 │   - the ONLY process     │◄──────►│   - read-only over the     │
@@ -38,10 +38,10 @@ Section 6 for what's next.
 │     schedule-based ticks │        │     pages) from the SAME   │
 │     (1 min / 5 min /     │        │     app via a StaticFiles  │
 │     15 min / hourly /    │        │     mount                  │
-│     daily)               │        └──────────────┬─────────────┘
-└────────────┬─────────────┘                       │
+│     daily)               │        └───────────────┬────────────┘
+└────────────┬─────────────┘                        │
              │                                      │
-             └──────────────┐        ┌──────────────┘
+             └───────────────┐        ┌─────────────┘
                              ▼        ▼
                     ┌──────────────────────┐
                     │   Supabase Postgres    │
@@ -97,6 +97,10 @@ protective orders).
   Order (bracket order) API calls.
 - `data_download.py`, `p4_search.py` — called by `p4_orchestra.py`'s
   `daily_optimizer()` (historical data refresh, Bayesian/grid search).
+- `cron_runner.py` — the GitHub Actions cron entrypoint (current
+  orchestra deployment path, see Section 5/6.3). Stateless, one-shot:
+  calls every task function once and exits, relying on each one's own
+  `try_claim_run()` guard to no-op if it isn't actually due yet.
 - `api/index.py` — Phase 2's FastAPI backend, deployed to Vercel.
 - `web/` — Phase 2's five static frontend pages (Dashboard, Live
   Monitor, Signals, Backtest, Settings) + `assets/style.css`,
@@ -157,16 +161,44 @@ reason `pyquant_signal_math.py` exists as a shared module.
   with no orchestra explanation — that endpoint silently falls back to
   an ephemeral local SQLite file without it.)
 
-### Not yet done
-- **VPS / orchestra deployment** — `p4_orchestra.py` has not been moved
-  to an always-on host yet. `VPS_SETUP.md` has the full guide
-  (DigitalOcean primary path) plus a brainstormed table of free/
-  free-tier alternatives (Oracle Cloud's Always Free tier is the
-  standout "actually free forever" option; see that file's opening
-  section for the full evaluation and trade-offs). **This is the
-  current top priority** — until the orchestra is running somewhere
-  persistent, Phase 2's logging tables and OFF switch have nothing
-  feeding them, and the UI will show empty data.
+### Orchestra deployment: migrated from "needs a VPS" to GitHub Actions cron
+Per explicit direction, the orchestra's hosting plan changed from the VPS
+path to a GitHub Actions cron job (`cron_runner.py` + `.github/workflows/
+orchestra.yml`), with the full Vercel+QStash re-architecture (Section 6.3)
+deferred to later. This was **not** a drop-in hosting swap — it required
+real code changes to the trading engine (detailed in `DOCS.md` Section 8):
+externalizing the 18 UKF filters' internal state, the legacy tracker
+dicts/flags, and `WatchdogTracker`'s trade log, all now round-tripping
+through `pyquant_state.py` every tick instead of living only in one
+continuous process's memory. Two missing run-guards
+(`fifteen_minute_task()`, `daily_optimizer()`) were also added, since a
+cron caller invokes every task unconditionally and relies entirely on
+each one's own guard to self-limit.
+
+**Status of this migration:**
+- Code changes: done (see `DOCS.md` Section 8 for the full list).
+- `GITHUB_ACTIONS_SETUP.md`: written — repo secrets, the `PYQUANT_MODE`
+  variable, making the repo public (required for this to stay actually
+  free at a 5-minute cadence — see that file's cost analysis), and the
+  git-history purge of `optimal_params.json`/`active_trades.json`/the
+  log files (strategy/operational detail, not credentials — confirmed
+  no real secrets were ever committed) needed before going public.
+- **Not yet done:** pushing any of this (blocked by the same GitHub App
+  authorization issue in Section 5 below — now blocking more than just
+  routine commits, since the history-purge force-push and the
+  public-visibility change both depend on push access too), actually
+  flipping the repo to public, adding the GitHub Secrets, and running a
+  walkforward comparison to validate the restart-safe UKF/tracker
+  persistence before trusting `PYQUANT_MODE=paper`/`live` output from
+  this path (see `GITHUB_ACTIONS_SETUP.md`'s "What changed and why").
+- `VPS_SETUP.md` (DigitalOcean primary path + a free-tier alternatives
+  table, Oracle Cloud's Always Free tier standing out) remains in the
+  repo as a fallback if the GitHub Actions path proves too unreliable or
+  too limited.
+- **Until this is actually pushed and running**, Phase 2's logging
+  tables and OFF switch have nothing feeding them, and the UI will show
+  empty data — this remains the top priority once GitHub push access is
+  restored.
 - **GitHub push** — local commits are ahead of `origin/main` and can't
   be pushed: Claude's GitHub App isn't authorized for
   `Pyrex611/pyq-p3`. Remedy is one of:
@@ -257,21 +289,28 @@ a new mechanism.
 - **Per-symbol pause** (finer-grained than the current global
   `trading_enabled` switch).
 
-### 6.3 Bigger architecture option: eliminate the VPS entirely
+### 6.3 Bigger architecture option: eliminate persistent hosting entirely (Vercel + QStash)
 
-Brainstormed in full in `VPS_SETUP.md`'s "free alternatives" section.
-Short version: if `p4_orchestra.py`'s `while True` loop were broken into
-independent HTTP-triggered functions (one per task — `hourly_task`,
-`five_minute_task`, `one_minute_task`, `daily_optimizer`) invoked on
-schedule by Upstash QStash, the orchestra could live inside the same
-Vercel project as the UI/API, and no VPS would be needed at all. This
-is a genuine architecture change (today's in-memory per-tick state —
-`btc_tracker`, `eth_tracker`, the hourly run guards — would all need to
-move into `pyquant_state.py`, which Phase 1 already mostly prepared for
-with `try_claim_run()`), not a quick swap. Tracked here as a Phase 3+
-candidate; the VPS path in `VPS_SETUP.md` remains the near-term choice
-because it requires zero changes to the orchestra's already-tested
-scheduling logic.
+Brainstormed in full in `VPS_SETUP.md`'s "free alternatives" section;
+**the GitHub Actions cron migration (above, Section 5) was the first,
+immediate step in this direction** — it already proved out the hard
+part (externalizing the UKF filters' state and the tracker/flag globals
+into `pyquant_state.py` so the trading engine survives a cold restart
+between ticks). The deferred, later step: move off GitHub Actions'
+5-minute cron floor onto Upstash QStash scheduling Vercel serverless
+functions directly — one per task (`hourly_task`, `five_minute_task`,
+`one_minute_task`, `daily_optimizer`), each its own HTTP-triggered
+endpoint in `api/index.py` (or a sibling module) instead of a script
+GitHub checks out and runs. QStash can schedule at finer granularity
+than GitHub Actions and avoids the "needs a public repo to stay free"
+trade-off entirely, at the cost of a real deployment-shape change
+(these functions would need to call Alpaca/Binance directly from inside
+the Vercel project, which currently deliberately holds no exchange
+credentials — see Section 7's standing rule on this — so this also
+means revisiting that trust boundary, not just where the code runs).
+Tracked here as the next step after the GitHub Actions path is confirmed
+stable; `VPS_SETUP.md` and the GitHub Actions path both remain usable
+fallbacks if/when this is attempted.
 
 ## 7. Standing rules (apply these without being re-asked)
 
@@ -304,6 +343,17 @@ scheduling logic.
   store plus the one OFF-switch write. Keep it that way; route anything
   that needs to actually trade or run compute-heavy backtests through
   the orchestra process instead (see Section 6.1's design for why).
+- **This repo is public** (as of the GitHub Actions cron migration,
+  Section 5) — real credentials must only ever live in GitHub Secrets/
+  Vercel env vars/the VPS's `.env`, never in code or in a committed file.
+  Before adding any new file that logs or dumps runtime state (another
+  `*_trades.json`-style mirror, say), add it to `.gitignore` in the same
+  change, not as a follow-up.
+- **Any new task function called from `cron_runner.py` must self-guard**
+  with `state_store.try_claim_run()` on its own bucket (see
+  `pyquant_state.py`'s `current_*_bucket()` helpers) — `cron_runner.py`
+  calls every task unconditionally on every invocation and relies
+  entirely on each task deciding for itself whether it's actually due.
 
 ## 8. Document map
 
@@ -314,8 +364,12 @@ scheduling logic.
   done yet.
 - **`SUPABASE_SETUP.md`** — database provisioning, `DATABASE_URL`,
   direct vs. pooled connections, confirming tables exist.
-- **`VPS_SETUP.md`** — orchestra hosting: DigitalOcean step-by-step,
-  the free/free-tier alternatives brainstorm, systemd service setup.
+- **`GITHUB_ACTIONS_SETUP.md`** — orchestra hosting, current path: repo
+  secrets, the `PYQUANT_MODE` variable, making the repo public, the
+  git-history purge needed first, verifying the workflow runs.
+- **`VPS_SETUP.md`** — orchestra hosting, fallback path: DigitalOcean
+  step-by-step, the free/free-tier alternatives brainstorm, systemd
+  service setup.
 - **`VERCEL_DEPLOY.md`** — API+frontend deploy: CLI/dashboard setup,
   env vars, the 404 root-cause writeup, troubleshooting.
 - **Claude Docs plan doc** (`https://claude.ai/code/artifact/2a54f458-6ebe-423b-b4c8-e2deac599d7c`)
@@ -327,7 +381,17 @@ scheduling logic.
   code actually reads (cross-check against both the VPS's `.env` and
   Vercel's project env vars).
 
-## 9. Resuming in a new session — quick checklist
+## 9. Keep this file current
+
+The person maintaining this project asked explicitly: **update this file
+as development progresses**, not just at major phase boundaries. When you
+finish a change that affects Section 5's status, Section 6's plan, or
+adds/removes a standing rule in Section 7, update this file in the same
+turn — don't let it drift back out of sync with reality. A future
+session (or a different model) relies on this file being accurate more
+than it relies on any other single thing in this repo.
+
+## 10. Resuming in a new session — quick checklist
 
 1. Read this file fully before touching code.
 2. Check `git log --oneline -5` and `git status` — confirm what's
