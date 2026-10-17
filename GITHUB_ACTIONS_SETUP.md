@@ -36,6 +36,17 @@ confirmed before this was built; this file is the "how," not the "why."
   public** (done as part of this delivery — see "What was purged" below)
   — actual credentials were never in the code, only in a gitignored
   `.env`, confirmed never committed.
+- **The orchestra needs an actual `.env` file on disk, not just matching
+  process environment variables.** `p4_utils.py` and `pyq_p4.py` both
+  run a hard check — `if not _ENV_PATH.exists(): raise
+  FileNotFoundError(...)` — **before** calling `load_dotenv()`. Setting
+  the right values in the workflow's `env:` block is not enough on its
+  own; the process still fails immediately because no literal `.env`
+  file exists. The workflow's "Create .env file from secrets" step
+  writes one from the repo's secrets before the run (this was caught
+  and fixed directly in the workflow file, not in `pyq_p4.py`/
+  `p4_utils.py` themselves — those files' behavior here is correct and
+  intentional, just undocumented until now).
 - **The UKF filters needed real code changes, not just a new host.**
   `pyq_p4.py` now persists each of the 18 Kalman filters' internal state
   (`.x`/`.P`) to the shared database after every tick and restores it at
@@ -105,6 +116,8 @@ defeats the purpose.
 | `BINANCE_SECRET_KEY` | Your Binance Futures mainnet secret key |
 | `BINANCE_TESTNET_API_KEY` | Your Binance Futures **testnet** API key (only needed once you actually try `PYQUANT_MODE=paper`) |
 | `BINANCE_TESTNET_SECRET_KEY` | Your Binance Futures testnet secret key |
+| `BYBIT_API_KEY` | Your Bybit API key (hard-required by `_require_env()` in both `p4_utils.py` and `pyq_p4.py`, even though Bybit isn't the active execution exchange — the process raises `EnvironmentError` at startup without it) |
+| `BYBIT_SECRET_KEY` | Your Bybit secret key (same reason as above) |
 | `ALPACA_API_KEY` | Your Alpaca API key |
 | `ALPACA_SECRET_KEY` | Your Alpaca secret key |
 | `TELEGRAM_TOKEN` | Your Telegram bot token |
@@ -115,10 +128,11 @@ A secret's value is never shown again after saving (GitHub masks it) —
 if you need to change one later, you re-add it with the same name; that
 overwrites the old value.
 
-## Part C — Add the `PYQUANT_MODE` repository variable
+## Part C — Add repository variables (`PYQUANT_MODE`, `SIGNAL_ONLY_MODE`)
 
-This one isn't a secret (it's just the word "live" or "paper"), so it
-uses GitHub's separate **Variables** tab instead:
+These aren't secrets (one's the word "live"/"paper", the other is
+"true"/"false"), so they use GitHub's separate **Variables** tab
+instead:
 
 1. Still under **Settings** → **Secrets and variables** → **Actions**,
    click the **Variables** tab (next to **Secrets**).
@@ -129,6 +143,24 @@ uses GitHub's separate **Variables** tab instead:
    safer choice until a walkforward comparison confirms the UKF
    persistence behaves correctly).
 4. Click **Add variable**.
+5. Click **New repository variable** again.
+6. **Name:** `SIGNAL_ONLY_MODE`. **Value:** `true` to start — this is
+   the new signal-generation-only mode (see `DOCS.md` Section 9): the
+   engine generates real signals from live Alpaca data, logs them to
+   `pyquant_signals` (`mode="simulated"`), and runs the existing
+   per-minute tracker's simulated TP/SL check against real market
+   prices — but makes **zero** Binance order-placement calls, live or
+   testnet. Leave it `true` until you're ready to let the engine place
+   real orders (at which point set it to `false` and rely on
+   `PYQUANT_MODE`/`trading_enabled` as before — see that section for the
+   precedence between all three).
+7. Click **Add variable**.
+
+If you don't add this variable at all, `cron_runner.py` defaults
+`SIGNAL_ONLY_MODE` to `false` — i.e., full normal behavior gated only by
+`PYQUANT_MODE` and the UI's trading on/off switch, same as before this
+mode existed. Set it explicitly to `true` if the goal right now is
+"watch it generate and log signals without risking anything."
 
 ## Part D — Confirm the workflow file is there and push everything
 

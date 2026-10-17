@@ -161,7 +161,7 @@ reason `pyquant_signal_math.py` exists as a shared module.
   with no orchestra explanation — that endpoint silently falls back to
   an ephemeral local SQLite file without it.)
 
-### Orchestra deployment: migrated from "needs a VPS" to GitHub Actions cron
+### Orchestra deployment: migrated from "needs a VPS" to GitHub Actions cron — LIVE
 Per explicit direction, the orchestra's hosting plan changed from the VPS
 path to a GitHub Actions cron job (`cron_runner.py` + `.github/workflows/
 orchestra.yml`), with the full Vercel+QStash re-architecture (Section 6.3)
@@ -175,33 +175,76 @@ continuous process's memory. Two missing run-guards
 cron caller invokes every task unconditionally and relies entirely on
 each one's own guard to self-limit.
 
+**This is now actually deployed and running** — the repo is public, the
+secrets/variables are set, and `.github/workflows/orchestra.yml` is
+firing every 5 minutes. **The push happened directly from the person's
+own machine, not through Claude** — Claude's GitHub App authorization
+for `Pyrex611/pyq-p3` remains blocked (see the standing note at the end
+of this section), so the delivered code had to be applied and pushed by
+hand. Confirmed by `git fetch origin` from this session: `origin/main`
+now carries that push (`df3b617`, "Fixed github actions .env file
+error" — the person iterated on the `.env`-file fix themselves across
+several commits before landing on the version now live). **The
+git-history purge described below was never actually applied to
+`origin/main`** — it only ever happened in a local, disposable clone
+during the session that proposed it, and the person's direct push went
+public without it. This is a non-issue in practice (no real secrets
+were ever committed, confirmed before the purge was even proposed; the
+purge was about strategy/operational detail in `optimal_params.json`/
+`active_trades.json`/the log files, not credentials) — it's now a
+nice-to-have cleanup item, not a blocker, and this file previously
+overstated it as done.
+
 **Status of this migration:**
-- Code changes: done (see `DOCS.md` Section 8 for the full list).
-- `GITHUB_ACTIONS_SETUP.md`: written — repo secrets, the `PYQUANT_MODE`
-  variable, making the repo public (required for this to stay actually
-  free at a 5-minute cadence — see that file's cost analysis), and the
-  git-history purge of `optimal_params.json`/`active_trades.json`/the
-  log files (strategy/operational detail, not credentials — confirmed
-  no real secrets were ever committed) needed before going public.
-- **Not yet done:** pushing any of this (blocked by the same GitHub App
-  authorization issue in Section 5 below — now blocking more than just
-  routine commits, since the history-purge force-push and the
-  public-visibility change both depend on push access too), actually
-  flipping the repo to public, adding the GitHub Secrets, and running a
-  walkforward comparison to validate the restart-safe UKF/tracker
-  persistence before trusting `PYQUANT_MODE=paper`/`live` output from
-  this path (see `GITHUB_ACTIONS_SETUP.md`'s "What changed and why").
-- `VPS_SETUP.md` (DigitalOcean primary path + a free-tier alternatives
-  table, Oracle Cloud's Always Free tier standing out) remains in the
-  repo as a fallback if the GitHub Actions path proves too unreliable or
-  too limited.
-- **Until this is actually pushed and running**, Phase 2's logging
-  tables and OFF switch have nothing feeding them, and the UI will show
-  empty data — this remains the top priority once GitHub push access is
-  restored.
-- **GitHub push** — local commits are ahead of `origin/main` and can't
-  be pushed: Claude's GitHub App isn't authorized for
-  `Pyrex611/pyq-p3`. Remedy is one of:
+- Code changes (UKF/tracker persistence, run-guards): done and deployed.
+- Repo is public, secrets + `PYQUANT_MODE` variable are set, workflow is
+  running — confirmed via `git fetch` showing active commits on
+  `origin/main` through mid-October.
+- **Not yet done:** the walkforward comparison to validate the
+  restart-safe UKF/tracker persistence before trusting
+  `PYQUANT_MODE=paper`/`live` output from this path (see
+  `GITHUB_ACTIONS_SETUP.md`'s "What changed and why") — this is why
+  `SIGNAL_ONLY_MODE` (new, see below) exists: it lets the platform start
+  producing real signal/log/track output immediately without waiting on
+  that validation, since it never risks capital either way.
+- `VPS_SETUP.md` remains in the repo as a fallback if the GitHub Actions
+  path proves too unreliable or too limited.
+
+### Signal-only mode (`SIGNAL_ONLY_MODE`) — built this session, NOT yet pushed
+Added to satisfy the explicit ask: "the platform needs to at least be
+able to start generating, logging and tracking live signals (without
+any trading attempts at all, not even Binance paper, just our simulated
+check if TP/SL hit)." Full design/rationale in `DOCS.md` Section 9 —
+short version: a new env-driven `SIGNAL_ONLY_MODE` flag, a new
+`simulate_signal_entry()` function (zero exchange calls — no
+`futures_create_order`, no `futures_change_leverage`, no
+`futures_exchange_info`), and three call-site changes in
+`hourly_task()`'s signal branches that take priority over `TEST_MODE`/
+`trading_enabled`. `TEST_MODE=True` alone could not satisfy this ask —
+its existing implementation suppresses `signal_executor()` entirely,
+which is also where the Phase 2 `log_signal()` call lives, so it would
+have silenced logging along with order placement.
+
+**Status:** code written and `py_compile`-clean, **not yet pushed** —
+blocked by the same GitHub App authorization issue below. Delivered as
+a zip instead (just the changed files — `pyq_p4.py`, `DOCS.md`,
+`GITHUB_ACTIONS_SETUP.md`, `.env.example`,
+`.github/workflows/orchestra.yml`, this file — per the person's
+standing zip-format instruction in Section 7). **To actually turn this
+on**: apply the zip, push from a machine with real GitHub access (same
+as the orchestra migration above), then add the `SIGNAL_ONLY_MODE`
+repository Variable (`true`) per `GITHUB_ACTIONS_SETUP.md` Part C. Until
+then, the live workflow keeps running exactly as it already does today
+(code without this change is what's currently deployed) — this is purely
+additive and off by default (`SIGNAL_ONLY_MODE` defaults to `false` if
+the variable is never added).
+
+**Standing blocker — GitHub push access:** Claude's GitHub App still
+isn't authorized for `Pyrex611/pyq-p3` (confirmed again this session: a
+`git fetch` succeeds — it's a public repo, reads don't need auth — but
+`git push` still 403s with the same GitHub App message). Every future
+code change from a Claude session will need to be delivered the same
+way this one was (zip of changed files) until one of these is done:
   - Install the Claude GitHub App:
     https://github.com/apps/claude/installations/select_target
   - Reconnect GitHub from claude.ai settings:
@@ -239,15 +282,37 @@ Right now `web/backtest.html` is read-only — it lists past
 person to go run `python3 walkforward.py` by hand for a new one. Goal:
 configure and launch a backtest from the UI itself.
 
-**Why this can't be a direct Vercel endpoint:** `walkforward.py` is
-compute-heavy (UKF training + a 150-trial Optuna search over 15+ days of
-data) and depends on local CSV files (`btc_back366.csv`/`eth_back366.csv`,
-both gitignored, living wherever the orchestra runs) — it doesn't fit
-Vercel's serverless function time/memory limits or filesystem. It has to
-run on the same machine as the orchestra (VPS or equivalent).
+**Is Vercel compute enough for this? No — confirmed, not a close call.**
+Two independent, both-disqualifying reasons: (1) **time limit** —
+`walkforward.py` is compute-heavy (UKF training + a 150-trial Optuna
+search over 15+ days of data), which runs for minutes; even Vercel Pro's
+longest configurable serverless duration (800s) is tight-to-insufficient
+for this specific workload, and Hobby's is far shorter. (2) **no durable
+filesystem** — it depends on local CSV files (`btc_back366.csv`/
+`eth_back366.csv`, both gitignored) that need to exist going in; Vercel
+functions get only an ephemeral `/tmp`, wiped between invocations, with
+no mechanism to pre-populate it from a 50+ MB historical dataset on every
+cold start. This isn't a plan-tier question — no Vercel tier fixes
+either constraint for this specific workload.
 
-**Proposed design**, reusing the state-store job-queue pattern this
-project already established in Phase 2:
+**So: Kaggle, not Colab, and not the orchestra process either.** The
+person already uses both Kaggle and Google Colab for this exact
+workload "due to the computational requirements," which independently
+confirms point (1) above. Between the two, **Kaggle is the one with a
+public, programmatic trigger API** (`kaggle kernels push` / `kaggle
+kernels status`, using just an account API token) — Colab's free/Pro
+tiers have no equivalent; triggering a Colab notebook without a human in
+the loop needs paid Colab Enterprise/Vertex AI, which isn't worth
+adding for this. That makes Kaggle the natural fit for "press a button
+in the UI, a backtest runs, the UI picks up the result" — Colab stays
+exactly what it already is today: a notebook the person runs by hand
+when they want to.
+
+This also means the original design below should route through Kaggle
+instead of the GitHub-Actions-hosted orchestra process (which has no
+persistent disk for the historical CSVs either, being a fresh checkout
+every 5-minute tick — see Section 5). Updated design, same state-store
+job-queue pattern this project already established in Phase 2:
 1. **Refactor `walkforward.run_walk_forward()` to accept an optional
    params/overrides argument** (it's currently a zero-argument function
    reading module-level constants — `WALK_FORWARD_DAYS`,
@@ -259,24 +324,33 @@ project already established in Phase 2:
    `status="queued"` and the chosen params as its JSON payload, instead
    of a completed run's metrics.
 3. **New `POST /api/backtests` endpoint** in `api/index.py` — accepts
-   the form's params, writes the queued row via a new
-   `pyquant_state.py` function (e.g. `request_backtest(params)`),
-   returns its id immediately (the actual run happens asynchronously).
-4. **Orchestra-side poller** — `p4_orchestra.py` gains a new scheduled
-   check (reusing its existing `schedule` library, e.g. every
-   `five_minute_task` tick) that looks for `status="queued"` rows, runs
-   `walkforward.run_walk_forward(params)` for each, and writes the
-   result back via the existing `record_run()` (flipping status to
-   `"completed"` or `"failed"` with the error).
+   the form's params and calls the Kaggle API directly (`kernels push`)
+   to launch a run with those params baked into the kernel's metadata/
+   inputs, rather than writing a queued row for a poller to find — no
+   poller is needed with this design, since Kaggle's API itself is the
+   trigger. The endpoint needs a Kaggle API token as a new Vercel env
+   var (a new, narrow credential — it can only launch/read kernel runs,
+   not trade, so this doesn't reopen the "API never holds exchange
+   credentials" trust boundary in Section 7).
+4. **The Kaggle notebook writes its own result directly to the shared
+   Postgres DB** when it finishes — needs `DATABASE_URL` added as a
+   Kaggle Secret in the notebook's environment, and either a trimmed
+   copy of `pyquant_state.py`'s `record_run()` (just the one INSERT) or
+   `psycopg2` calls equivalent to it. This is the one new moving part:
+   the notebook needs network egress to Supabase, which Kaggle's
+   standard (CPU) kernels allow.
 5. **UI**: a form on `backtest.html` (symbol(s), date-range/day-count,
    leverage, Bayesian on/off + trial count) that `POST`s to
-   `/api/backtests`, plus polling/refresh so a queued run's status
-   visibly progresses to completed without a page reload.
+   `/api/backtests`, plus polling/refresh (`/api/runs`) so a queued run's
+   status visibly progresses to completed without a page reload.
 
-This mirrors the existing Phase 2 architecture exactly (Vercel writes a
-request, the orchestra — the only process with the compute and the data
-files — picks it up and writes the result back) rather than introducing
-a new mechanism.
+This is simpler than the original VPS-poller design (no polling loop at
+all — the Kaggle API call *is* the trigger) and reuses compute the
+person already has and already pays nothing for. The complexity lands
+entirely in one-time setup, exactly as anticipated: a Kaggle API token,
+a notebook template committed to the repo, and a `DATABASE_URL` secret
+added to that notebook's environment — not implemented yet, this is the
+confirmed direction for when it's picked up.
 
 ### 6.2 Other UI-completion candidates (noted, not yet designed in detail)
 - **Trigger `daily_optimizer()` on demand from the UI**, same queued-job
@@ -314,6 +388,14 @@ fallbacks if/when this is attempted.
 
 ## 7. Standing rules (apply these without being re-asked)
 
+- **Zip deliveries contain only new/modified files, each with its full,
+  unabridged current content — never a whole-repo re-zip.** Explicit
+  standing feedback: "GOING FORWARD, THE ZIP FILE SHOULD ONLY CONTAIN
+  THE FULL, UNABRIDGED CODE FOR UPDATED/MODIFIED FILES RATHER THAN
+  PROVIDING THE ENTIRE REPO ALL OVER." This matters more now that the
+  person applies these zips by hand and pushes from their own machine
+  (see Section 5's GitHub push blocker) — a whole-repo zip makes that
+  manual diff/merge step much harder than it needs to be.
 - **"Testing deferred to integration" means the live trading engine
   specifically** — don't ad hoc test `pyq_p4.py`/`p4_orchestra.py`
   against a real exchange outside an explicit integration-testing pass.

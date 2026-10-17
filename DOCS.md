@@ -210,3 +210,93 @@ relates to the larger, still-future Vercel+QStash re-architecture.
 `VPS_SETUP.md` remains as a fallback path if this turns out to be too
 unreliable or too limited in practice — nothing about this migration
 makes switching back harder.
+
+## 9. Signal-only mode (`SIGNAL_ONLY_MODE`) — generate/log/track with zero exchange calls
+
+Added so the platform can start producing real, trackable output —
+signals generated from live Alpaca data, logged to `pyquant_signals`,
+and watched for simulated TP/SL hits against real market prices —
+*before* the GitHub Actions UKF-persistence migration above has been
+validated against walkforward, and without taking on any execution risk
+while that validation is pending.
+
+**Why `TEST_MODE=True` alone could not do this.** `TEST_MODE`'s
+existing implementation (predates this change) only logs a
+`"[TEST MODE] ... bypassed"` message in `hourly_task()`'s signal-
+execution branches and does nothing else — it does not update
+`btc_tracker`/`eth_tracker`, does not set `btc_ordered_signal`/
+`eth_ordered_signal`, and critically does not call
+`state_store.log_signal(...)`, because that call lives *inside*
+`signal_executor()`, reached only after a real
+`binance_client.futures_create_order(...)` call succeeds.
+`TEST_MODE=True` means `signal_executor()` is never called at all —
+so turning it on would stop order placement AND all logging/tracking
+in one move, which is not what "generate, log, and track" asked for.
+
+**What was actually added** (`pyq_p4.py`):
+- `SIGNAL_ONLY_MODE` — a new env-driven flag (unlike the hardcoded
+  `TEST_MODE`/`WATCHDOG_MODE`), read once at import:
+  `os.environ.get("SIGNAL_ONLY_MODE", "false")...`. Settable via a
+  GitHub Actions repository **Variable** (same mechanism as
+  `PYQUANT_MODE`) with no code change or redeploy — see
+  `GITHUB_ACTIONS_SETUP.md` Part C.
+- `simulate_signal_entry(signal, trade_val)` — a new function, the
+  signal-only counterpart to `signal_executor()`. It makes **no**
+  exchange calls at all (no `futures_change_leverage()`, no
+  `futures_exchange_info()` lot-size lookup, no
+  `futures_create_order()`). It computes an unrounded approximate `qty`
+  for display purposes only, calls `state_store.log_signal(...,
+  mode="simulated")` so the row is visibly distinct from a real
+  live/paper entry on the UI's Signals page, and returns the same
+  `signal` dict back as the "ordered" signal — `generate_signal()`
+  already populates every key `one_minute_task()`'s legacy tracker
+  reads (`order_type`, `entry_price`, `order_side`, `tp_price`,
+  `sl_price`, `current_price`, `current_bal`), so no reshaping is
+  needed for the tracker to work unchanged.
+- `hourly_task()`'s three signal-execution branches (double-signal,
+  BTC-only, ETH-only) each gained a new `if SIGNAL_ONLY_MODE:` branch
+  ahead of the existing `if not TEST_MODE and trading_enabled: / elif
+  not trading_enabled: / else:` chain — **`SIGNAL_ONLY_MODE` takes
+  priority over both `TEST_MODE` and the UI's `trading_enabled`
+  switch**: if it's on, no order is ever placed regardless of either.
+  The new branch calls `simulate_signal_entry()` instead of
+  `signal_executor()`, skips `guard.start_guard_for_order()` entirely
+  (PositionGuard watches real Binance order ids — there is never one in
+  this mode), and updates `btc_tracker`/`eth_tracker` the same way the
+  real path does otherwise.
+- `one_minute_task()`'s dynamic last-resort stop-loss check (which
+  calls `check_open_position()` — a real Binance read) is now also
+  gated `if not TEST_MODE and not SIGNAL_ONLY_MODE:` — there's never a
+  real position to check for a signal-only "trade," so this avoids a
+  needless Binance call every tick.
+
+**What this does *not* change:** the legacy per-minute tracker
+(`bo_signal`/`eo_signal` fill + TP/SL detection in `one_minute_task()`)
+runs exactly as it always has — real incoming market bars are compared
+against the (simulated) entry/TP/SL prices, and a hit is logged via the
+same `_log_signal_close()` path a real trade would use. This is
+deliberate: it's the "just our simulated check if TP/SL hit" the user
+asked for, reusing the already-trusted tracker code rather than writing
+a parallel implementation. Two existing read-only Binance/account calls
+(`get_equities()` when a tracker's `open_trade` flag is true, and
+`check_open_position()` inside the PositionGuard virtual-safeguard loop,
+which never finds a monitored order in this mode and so is a no-op) can
+still fire — these are account/position *reads*, never order
+placements, and are the same calls the tracker already made before this
+mode existed.
+
+**Relationship to `PYQUANT_MODE`:** independent axis. `PYQUANT_MODE`
+only selects which Binance credentials/endpoint would be used *if* an
+order were placed (mainnet vs. testnet) — `SIGNAL_ONLY_MODE=true` means
+no order is placed either way, so `PYQUANT_MODE` can stay at whatever
+value it will eventually run under without affecting this mode's
+behavior now.
+
+**Recommended rollout** (see `CLAUDE.md` Section 5 for current status):
+start with `SIGNAL_ONLY_MODE=true` as soon as the GitHub Actions cron
+migration is actually pushed and running, so the UI's Signals/Live
+Monitor pages start showing real (simulated-mode) data immediately,
+independent of the still-pending walkforward validation of the UKF
+restart-persistence. Once that validation passes and `trading_enabled`
+is deliberately turned on from the UI, flip `SIGNAL_ONLY_MODE` to
+`false` to let the engine place real (paper, then live) orders.

@@ -100,6 +100,24 @@ UKF_TRAIN_DAYS     = 30
 TEST_MODE     = False  # Set to True to bypass live order execution on Binance
 WATCHDOG_MODE = True   # Set to True to track all signals bar-by-bar to TP/SL
 
+# SIGNAL_ONLY_MODE: env-driven (not hardcoded, unlike TEST_MODE/WATCHDOG_MODE
+# above) so it can be turned on/off via a GitHub Actions repository
+# Variable — the same mechanism already used for PYQUANT_MODE — without a
+# code change or redeploy. When true, hourly_task() takes a third branch
+# ahead of the existing TEST_MODE/trading_enabled checks: it generates and
+# LOGS signals (via simulate_signal_entry(), see below) and still runs the
+# existing one_minute_task() tracker's simulated TP/SL check against real
+# market data, but makes ZERO calls to any exchange client — not
+# futures_create_order(), not futures_change_leverage(), not even
+# futures_exchange_info(). This is distinct from TEST_MODE, whose current
+# implementation only logs a message and does nothing further (see DOCS.md
+# Section 9 for why TEST_MODE alone could not satisfy this requirement —
+# log_signal() is called from inside signal_executor(), which TEST_MODE
+# skips entirely). SIGNAL_ONLY_MODE takes priority over TEST_MODE and the
+# trading_enabled UI switch: if it's on, no order is ever placed,
+# regardless of either of those.
+SIGNAL_ONLY_MODE = os.environ.get("SIGNAL_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes")
+
 # ── Clients ───────────────────────────────────────────────────────────────────
 api = tradeapi.REST(
     ALPACA_API_KEY, ALPACA_SECRET_KEY,
@@ -644,6 +662,75 @@ def get_live_atr(symbol_alpaca: str) -> float:
         return 0.0
 
 
+def simulate_signal_entry(signal: dict, trade_val: float):
+    """SIGNAL_ONLY_MODE counterpart to signal_executor() below — same
+    calling convention (hourly_task() calls this instead of
+    signal_executor() when SIGNAL_ONLY_MODE is on), but makes NO exchange
+    calls whatsoever: no futures_change_leverage(), no
+    futures_exchange_info() lot-size lookup, no futures_create_order().
+
+    It still does the one thing the user actually asked for: logs the
+    signal to pyquant_signals (mode="simulated", so it's visibly distinct
+    from a real live/paper entry on the UI's Signals page) and returns an
+    ordered_signal dict with the exact keys one_minute_task()'s legacy
+    tracker reads (order_type, entry_price, order_side, tp_price,
+    sl_price, current_price, current_bal) — generate_signal() already
+    produces all of these, so this function reuses `signal` itself rather
+    than reshaping it. That tracker then runs its simulated TP/SL check
+    against real incoming market bars exactly as it would for a real
+    trade, which is the "just our simulated check if TP/SL hit" the user
+    asked for — it's the same code path, just never preceded by a real
+    order.
+
+    Returns (signal, ordered) to match signal_executor()'s
+    (signal, response, ordered) shape closely enough for the call sites
+    below — ordered is True iff the signal had a usable entry_price.
+    """
+    global ordered
+
+    if not signal or signal.get("entry_price") is None:
+        logger.warning("simulate_signal_entry: invalid signal – nothing logged.")
+        ordered = False
+        return signal, ordered
+
+    symbol      = signal["symbol"]
+    order_side  = signal["order_side"].upper()
+    entry_price = float(signal["entry_price"])
+
+    # Approximate qty for display/logging only. Real orders round this to
+    # the exchange's LOT_SIZE step (see signal_executor()) — that lookup
+    # itself requires an exchange call this function must not make, and
+    # the figure is never used to place an order here, so an unrounded
+    # approximation is sufficient.
+    try:
+        qty = (trade_val * LEVERAGE) / entry_price if entry_price else 0.0
+    except Exception:
+        qty = 0.0
+    signal["qty"] = qty
+
+    logger.info(f"[SIGNAL-ONLY] {symbol} {order_side} {signal['order_type']} @ {entry_price} "
+                f"— simulated entry, no exchange call made.")
+
+    try:
+        signal["state_signal_id"] = state_store.log_signal(
+            symbol=symbol,
+            side=order_side,
+            entry_price=entry_price,
+            sl_price=signal.get("sl_price"),
+            tp_price=signal.get("tp_price"),
+            qty=qty,
+            entry_capital=trade_val,
+            expected_max_loss=signal.get("expected_max_loss"),
+            mode="simulated",
+        )
+    except Exception as e:
+        logger.warning(f"simulate_signal_entry: log_signal failed (non-fatal): {e}")
+
+    signals.append(signal)
+    ordered = True
+    return signal, ordered
+
+
 def signal_executor(signal: dict, trade_val: float):
     global ordered, signals
     response = None
@@ -1168,7 +1255,32 @@ def hourly_task():
             btc_signal["expected_max_loss"] = signal_math.expected_max_loss(
                 btc_signal["entry_price"], btc_signal["sl_price"], trade_value, LEVERAGE)
 
-            if not TEST_MODE and trading_enabled:
+            if SIGNAL_ONLY_MODE:
+                # See SIGNAL_ONLY_MODE's definition above: generate + log +
+                # simulated-track, zero exchange calls, takes priority over
+                # TEST_MODE/trading_enabled below.
+                try:
+                    eth_ordered_signal, eth_ordered = simulate_signal_entry(eth_signal, trade_value)
+                except Exception as e:
+                    logger.error(f"ETH signal-only simulate error: {e}")
+                    eth_ordered_signal, eth_ordered = None, False
+
+                try:
+                    btc_ordered_signal, btc_ordered = simulate_signal_entry(btc_signal, trade_value)
+                except Exception as e:
+                    logger.error(f"BTC signal-only simulate error: {e}")
+                    btc_ordered_signal, btc_ordered = None, False
+
+                double_order = True
+                signal_generator.sig_gened = True
+                ordered = True
+                eth_tracker.update({"sig_gened": True, "ordered": eth_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
+                                     "expected_max_loss": eth_signal.get("expected_max_loss")})
+                btc_tracker.update({"sig_gened": True, "ordered": btc_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
+                                     "expected_max_loss": btc_signal.get("expected_max_loss")})
+            elif not TEST_MODE and trading_enabled:
                 try:
                     eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
                     if eth_response:
@@ -1203,7 +1315,22 @@ def hourly_task():
             # not the full wallet_balance generate_signal() saw.
             btc_signal["expected_max_loss"] = signal_math.expected_max_loss(
                 btc_signal["entry_price"], btc_signal["sl_price"], trade_value, LEVERAGE)
-            if not TEST_MODE and trading_enabled:
+            if SIGNAL_ONLY_MODE:
+                try:
+                    btc_ordered_signal, btc_ordered = simulate_signal_entry(btc_signal, trade_value)
+                except Exception as e:
+                    logger.error(f"BTC signal-only simulate error: {e}")
+                    btc_ordered_signal, btc_ordered = None, False
+
+                eth_ordered_signal = None
+                signal_generator.sig_gened = True
+                ordered      = True
+                double_order = False
+                btc_tracker.update({"ordered": btc_ordered, "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
+                                     "expected_max_loss": btc_signal.get("expected_max_loss")})
+                eth_tracker["sig_gened"] = False
+            elif not TEST_MODE and trading_enabled:
                 btc_ordered_signal, btc_response, btc_ordered = signal_executor(btc_signal, trade_value)
                 try:
                     if btc_response:
@@ -1230,7 +1357,23 @@ def hourly_task():
             # not the full wallet_balance generate_signal() saw.
             eth_signal["expected_max_loss"] = signal_math.expected_max_loss(
                 eth_signal["entry_price"], eth_signal["sl_price"], trade_value, LEVERAGE)
-            if not TEST_MODE and trading_enabled:
+            if SIGNAL_ONLY_MODE:
+                try:
+                    eth_ordered_signal, eth_ordered = simulate_signal_entry(eth_signal, trade_value)
+                except Exception as e:
+                    logger.error(f"ETH signal-only simulate error: {e}")
+                    eth_ordered_signal, eth_ordered = None, False
+
+                btc_ordered_signal = None
+                signal_generator.sig_gened = True
+                ordered      = True
+                double_order = False
+                eth_tracker.update({"sig_gened": True, "ordered": eth_ordered,
+                                     "last_event_timestamp": now,
+                                     "entry_balance": wallet_balance, "entry_capital": trade_value,
+                                     "expected_max_loss": eth_signal.get("expected_max_loss")})
+                btc_tracker["sig_gened"] = False
+            elif not TEST_MODE and trading_enabled:
                 eth_ordered_signal, eth_response, eth_ordered = signal_executor(eth_signal, trade_value)
                 try:
                     if eth_response:
@@ -1484,8 +1627,11 @@ def one_minute_task():
                                 elif order_info["symbol"] == "ETHUSDT":
                                     eth_tracker.update({"open_trade": False, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})
 
-            # Dynamic last-resort PnL-based stop loss
-            if not TEST_MODE:
+            # Dynamic last-resort PnL-based stop loss — also skipped in
+            # SIGNAL_ONLY_MODE: there is never a real position to check for
+            # a signal-only "trade" (no order was ever placed for it), so
+            # this would just be a needless Binance read call every tick.
+            if not TEST_MODE and not SIGNAL_ONLY_MODE:
                 if i in ("BTC/USD", "BTCUSDT") and btc_tracker["open_trade"]:
                     if last_resort_stop_loss_check("BTCUSDT", btc_tracker):
                         btc_tracker.update({"open_trade": False, "sl_hit": True, "entry_balance": None, "entry_capital": None, "expected_max_loss": None})

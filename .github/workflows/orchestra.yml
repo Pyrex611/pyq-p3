@@ -1,11 +1,38 @@
 name: PyQuant Orchestra (cron)
 
+# GitHub Actions cron migration — see CLAUDE.md Section 6.3 and
+# GITHUB_ACTIONS_SETUP.md for the full writeup (why 5 minutes, not 1;
+# why this needs a public repo to stay actually free; what cron_runner.py
+# does differently from p4_orchestra.py).
+#
+# `*/5 * * * *` is GitHub Actions' documented minimum schedule
+# granularity — there is no 1-minute option. GitHub's own docs also note
+# that scheduled runs are best-effort and can be delayed under load,
+# especially for public repos at the top of the hour — expect occasional
+# skipped/delayed ticks, not a perfectly metronomic 5 minutes.
+#
+# The "Create .env file from secrets" step below is required, not
+# cosmetic: p4_utils.py and pyq_p4.py both do
+#   if not _ENV_PATH.exists(): raise FileNotFoundError(...)
+# BEFORE calling load_dotenv() — so setting equivalent values in the
+# `env:` block on the final step alone is NOT enough, the process still
+# fails immediately because no literal .env file exists on disk. This
+# was caught and fixed by hand (not by Claude) after the first version
+# of this workflow shipped without it — see GITHUB_ACTIONS_SETUP.md's
+# "What changed and why" section for the full story. The final step's
+# `env:` block is kept anyway as a second, redundant source for the same
+# values (defense in depth: load_dotenv(override=True) will read the
+# .env file regardless, but if that step is ever skipped or edited, the
+# process environment is still correct).
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}    # lets you trigger a tick manually from the Actions tab, for testing
+  workflow_dispatch: {}   # lets you trigger a tick manually from the Actions tab, for testing
 
 concurrency:
+  # Prevents two ticks from ever running at once if one run takes longer
+  # than 5 minutes (slow Alpaca/Binance API calls, etc.) — the next
+  # scheduled tick waits for the previous one instead of overlapping it.
   group: pyquant-orchestra
   cancel-in-progress: false
 
@@ -25,19 +52,22 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-        
+
       - name: Create .env file from secrets
         run: |
           echo "DATABASE_URL=${{ secrets.DATABASE_URL }}" > .env
           echo "ALPACA_API_KEY=${{ secrets.ALPACA_API_KEY }}" >> .env
+          echo "ALPACA_SECRET_KEY=${{ secrets.ALPACA_SECRET_KEY }}" >> .env
           echo "BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}" >> .env
           echo "BINANCE_SECRET_KEY=${{ secrets.BINANCE_SECRET_KEY }}" >> .env
-          echo "ALPACA_SECRET_KEY=${{ secrets.ALPACA_SECRET_KEY }}" >> .env
+          echo "BINANCE_TESTNET_API_KEY=${{ secrets.BINANCE_TESTNET_API_KEY }}" >> .env
+          echo "BINANCE_TESTNET_SECRET_KEY=${{ secrets.BINANCE_TESTNET_SECRET_KEY }}" >> .env
+          echo "BYBIT_API_KEY=${{ secrets.BYBIT_API_KEY }}" >> .env
+          echo "BYBIT_SECRET_KEY=${{ secrets.BYBIT_SECRET_KEY }}" >> .env
           echo "TELEGRAM_TOKEN=${{ secrets.TELEGRAM_TOKEN }}" >> .env
           echo "TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}" >> .env
           echo "PYQUANT_MODE=${{ vars.PYQUANT_MODE }}" >> .env
-          echo "BYBIT_API_KEY=${{ secrets.BYBIT_API_KEY }}" >> .env
-          echo "BYBIT_SECRET_KEY=${{ secrets.BYBIT_SECRET_KEY }}" >> .env
+          echo "SIGNAL_ONLY_MODE=${{ vars.SIGNAL_ONLY_MODE }}" >> .env
 
       - name: Verify .env file exists (Debug)
         run: |
@@ -47,12 +77,17 @@ jobs:
 
       - name: Run one orchestra tick
         env:
-          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
-          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+          BINANCE_TESTNET_SECRET_KEY: ${{ secrets.BINANCE_TESTNET_SECRET_KEY }}
+          BYBIT_API_KEY: ${{ secrets.BYBIT_API_KEY }}
+          BYBIT_SECRET_KEY: ${{ secrets.BYBIT_SECRET_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PYQUANT_MODE: ${{ vars.PYQUANT_MODE }}
+          SIGNAL_ONLY_MODE: ${{ vars.SIGNAL_ONLY_MODE }}
         run: python3 cron_runner.py
