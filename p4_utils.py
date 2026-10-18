@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_FLOOR
 from pathlib import Path
 from queue import Queue
-from typing import Dict, Any, Set, Tuple
+from typing import Dict, Any, Set, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -108,7 +108,24 @@ else:
 _binance_lock = threading.Lock()
 
 
-def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Client:
+def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Optional[Client]:
+    """
+    GitHub Actions cron migration, follow-up fix: Binance's compliance
+    system geo-/datacenter-IP-blocks requests from GitHub Actions'
+    hosted-runner IP ranges — the error looks like "Service unavailable
+    from a restricted location according to 'b. Eligibility'..." and is
+    NOT transient (it will fail identically on every retry and every
+    future tick, unlike a real network blip). Before this fix, that
+    exception propagated out of this function as a raised
+    ConnectionError, which crashed the entire `import pyq_p4` at the top
+    of cron_runner.py — killing EVERY task on EVERY tick, not just the
+    ones that actually need a live Binance connection. See
+    BINANCE_GEOBLOCK.md for the full diagnosis and the options going
+    forward; this function's job is narrower: don't let that block take
+    down SIGNAL_ONLY_MODE, which makes no exchange calls that need a
+    working connection in the first place.
+    """
+    signal_only_mode = os.environ.get("SIGNAL_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes")
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -119,13 +136,41 @@ def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Client
             return client
         except Exception as e:
             last_err = e
+            is_geoblock = "restricted location" in str(e).lower() or "eligibility" in str(e).lower()
+            if is_geoblock:
+                print(f"[Startup] Binance attempt {attempt}/{max_retries}: BLOCKED — this host's IP is in a "
+                      f"range Binance's compliance system rejects outright (see BINANCE_GEOBLOCK.md). "
+                      f"Retrying anyway in case it's a different, transient issue, but a geo-block won't "
+                      f"clear on retry. Raw error: {e}")
+            else:
+                print(f"[Startup] Binance attempt {attempt}/{max_retries} failed: {e}.")
             if attempt < max_retries:
-                print(f"[Startup] Binance attempt {attempt}/{max_retries} failed: {e}. Retrying in {retry_delay}s…")
+                print(f"[Startup] Retrying in {retry_delay}s…")
                 time.sleep(retry_delay)
+
+    if signal_only_mode:
+        print(
+            f"[Startup] WARNING: Binance unreachable after {max_retries} attempts "
+            f"(last error: {last_err}) — continuing WITHOUT a validated connection because "
+            f"SIGNAL_ONLY_MODE is on, which never calls the exchange. Any code path that still "
+            f"tries to use binance_client will raise and be caught by that call site's own "
+            f"existing error handling (check_open_position()/get_equities()/etc. already fail "
+            f"closed on a Binance error), same as a real outage — it will NOT crash the process."
+        )
+        try:
+            return Client(_BINANCE_KEY, _BINANCE_SECRET, testnet=IS_PAPER_MODE)
+        except Exception as e2:
+            print(f"[Startup] Could not even construct a Binance Client object ({e2}) — binance_client will be None.")
+            return None
+
     raise ConnectionError(
         f"\n{'='*60}\n  Cannot connect to Binance after {max_retries} attempts.\n"
         f"  Last error: {last_err}\n"
-        f"  Check internet, credentials, API permissions.\n{'='*60}\n"
+        f"  If this is a 'restricted location'/'eligibility' error, this is a geo-IP compliance\n"
+        f"  block, not a credentials or network problem — see BINANCE_GEOBLOCK.md. Setting\n"
+        f"  SIGNAL_ONLY_MODE=true lets the process continue without a working Binance connection\n"
+        f"  (it makes no exchange calls), but REAL order placement from this host will not work\n"
+        f"  until the host itself is not geo-blocked.\n{'='*60}\n"
     ) from last_err
 
 
@@ -252,6 +297,37 @@ class UKFModel:
     @staticmethod
     def _stabilise_P(ukf, floor: float = 1e-6):
         _stabilise_P(ukf, floor)
+
+    @staticmethod
+    def make_ukf_shell(symbol: str) -> Tuple[Any, Any, Any]:
+        """Cheap counterpart to create_ukf_models() — builds 3 UKF objects
+        (close/high/low) with the right hyperparameters/dimensionality but
+        makes NO Alpaca API call and runs NO historical training loop.
+
+        GitHub Actions cron migration: pyq_p4.py calls this instead of
+        create_ukf_models() whenever persisted UKF state already exists in
+        pyquant_state.py — it's about to overwrite .x/.P with that
+        persisted state immediately anyway (see pyq_p4.py's
+        _restore_ukf_state()), so the full historical fetch + the
+        thousands-of-bars-long _train_ukf() loop that create_ukf_models()
+        does are pure waste in that case: every value they'd produce gets
+        discarded the moment restore runs. .Q/.R/.points/.fx/.hx are set
+        from the same per-symbol hyperparameters either way (they don't
+        depend on training data), so a shell restored this way is exactly
+        equivalent to a freshly-trained one that was then restored — only
+        cheaper and with no network dependency on the hot path.
+
+        Only create_ukf_models() is used on a genuine first-ever run (no
+        persisted state yet) — that's the one time real historical values
+        are needed to seed a reasonable starting point.
+        """
+        p = ({'alpha': 0.001, 'beta': 7.0, 'kappa': 0, 'P': 0.001, 'Q': 1.0, 'R': 0.01}
+             if symbol == 'BTC' else
+             {'alpha': 0.001, 'beta': 4.0, 'kappa': 1, 'P': 0.1,   'Q': 1.0, 'R': 0.01})
+        a, b, k, P, Q, R = p['alpha'], p['beta'], p['kappa'], p['P'], p['Q'], p['R']
+        return (_make_ukf(0.0, a, b, k, P, Q, R),
+                _make_ukf(0.0, a, b, k, P, Q, R),
+                _make_ukf(0.0, a, b, k, P, Q, R))
 
     def create_ukf_models(self, timeframe: str, or_symbols: list):
         symb = "BTC" if or_symbols == ["BTC/USD"] else "ETH"

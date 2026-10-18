@@ -300,3 +300,156 @@ independent of the still-pending walkforward validation of the UKF
 restart-persistence. Once that validation passes and `trading_enabled`
 is deliberately turned on from the UI, flip `SIGNAL_ONLY_MODE` to
 `false` to let the engine place real (paper, then live) orders.
+
+## 10. Reliability fix: cheap UKF shells instead of per-tick retraining
+
+Found by checking the live GitHub Actions run history (`gh api
+repos/Pyrex611/pyq-p3/actions/workflows/.../runs`) before starting new
+work, per the standing practice of checking what's actually deployed
+before assuming it works: 6 of the last 9 scheduled ticks had failed,
+each within ~50 seconds of the "Run one orchestra tick" step starting —
+too fast to be the workflow's 10-minute timeout, consistent with a
+transient failure early in the process.
+
+**Root cause**: `pyq_p4.py`'s module-level UKF setup
+(`ukf_model.create_ukf_models(...)`, called 6 times — 1H/15T/5T ×
+BTC/ETH) runs unconditionally on every import. Each call does one
+`crypto_client.get_crypto_bars()` Alpaca API call (fetching up to ~60
+days of history) followed by `_train_ukf()`, which iterates every
+single historical bar through `.predict()`/`.update()` for 3 sub-models
+(close/high/low) — 18 full filter trainings total. On a continuously-
+running process (the original VPS design) this happens once, at
+startup. On a cron-triggered process restarting from scratch every 5
+minutes (the GitHub Actions migration), it was happening on **every
+single tick** — expensive, wasteful, and a real Alpaca-API/network
+dependency on the hot path that the existing `_restore_ukf_state()` call
+(which runs right after, overwriting `.x`/`.P` from the database) made
+entirely pointless 5 out of every 6 ticks (everywhere except the very
+first run, before any state exists to restore).
+
+**Fix**: `p4_utils.py`'s `UKFModel` gained a new static method,
+`make_ukf_shell(symbol)` — builds the same 3 UKF objects
+(`_make_ukf(0.0, ...)` with each symbol's hyperparameters) but makes no
+Alpaca call and runs no training loop. This is exactly equivalent to a
+freshly-trained-then-restored filter for any tick where persisted state
+already exists: `.Q`/`.R`/`.points`/`.fx`/`.hx` depend only on the
+per-symbol hyperparameters (alpha/beta/kappa/P/Q/R), never on training
+data — only `.x`/`.P` are data-dependent, and those get completely
+overwritten by `_restore_ukf_state()` immediately after either path
+anyway. `pyq_p4.py` now checks `state_store.get_json(_UKF_STATE_KEY)`
+**before** building any models: if persisted state exists, it calls
+`make_ukf_shell()` six times (no network call, no training loop) instead
+of `create_ukf_models()`; only a genuine first-ever run (nothing
+persisted yet) pays the real historical-fetch-and-train cost, exactly
+once, which then seeds persisted state for every tick after it.
+
+**Explicitly unchanged**: `retrain_daily_ukfs()` (the intentional,
+once-daily full re-anchor on a trailing 30-day window, guarded by its
+own day-bucket run guard) still does a real `get_crypto_bars()` fetch +
+`build_ukfs()` training call — this fix only removes the *unconditional,
+every-5-minutes* version of that cost, not the deliberate once-a-day one.
+
+**Not yet validated end-to-end against a real GitHub Actions run** (the
+same push-access blocker applies — see `CLAUDE.md` Section 5) — the fix
+was verified by code inspection (confirming `_make_ukf()`'s hyperparameter-
+only, data-independent construction) and `py_compile`, not by observing
+an actual post-fix tick succeed. Worth specifically re-checking the
+Actions run history after this ships.
+
+## 11. Kaggle backtest integration
+
+See `KAGGLE.md` for the full setup guide and `CLAUDE.md` Section 6.1 for
+the design rationale (why Kaggle, why one reused kernel slug, why
+`walkforward.py`'s module constants are overridden rather than the
+function being given a params argument). Code summary:
+
+- `pyquant_state.py`: `pyquant_runs` gained `status`/`kaggle_ref`/`error`
+  columns (migrated via `ADD COLUMN IF NOT EXISTS` for Postgres, a
+  try/except for SQLite — safe against an existing database) and two new
+  functions, `request_backtest()` and `update_run_status()`, giving a run
+  a real `queued → running → completed/failed` lifecycle instead of only
+  ever being written once, complete, at the end (`record_run()`'s
+  original behavior, kept unchanged and still used by manual
+  `python3 walkforward.py` runs and `daily_optimizer()`).
+- `walkforward.py`: new `_SUPPRESS_AUTO_RECORD_RUN` flag (default
+  `False`) lets a caller that's tracking its own `pyquant_runs` row (the
+  Kaggle path) skip the function's own automatic `record_run()` call at
+  the end, so the UI's queued row gets updated in place instead of
+  ending up with an orphaned queued row plus an unrelated duplicate
+  completed one. No other change to this file.
+- `api/index.py`: new `POST /api/backtests` — writes the queued row,
+  then pushes a new version of a single, reused Kaggle kernel (via the
+  `kaggle` PyPI package) with this run's id + param overrides baked into
+  a `params.json`. Needs `KAGGLE_USERNAME`/`KAGGLE_KEY`/
+  `KAGGLE_DATASET_SLUG` as new Vercel env vars.
+- `kaggle_backtest/run_backtest.py` + `kernel-metadata.json`: the
+  kernel's own code (clones the public repo, installs deps, copies the
+  attached dataset's CSVs into place, applies overrides, calls
+  `walkforward.run_walk_forward()`, reports status back) and its push
+  template.
+- `web/backtest.html`: a form (days, Bayesian trials, leverage, Bayesian
+  on/off, ATR-adaptive SL on/off) that `POST`s to `/api/backtests` and
+  polls `/api/runs/{id}` every 15s until the run completes or fails.
+
+## 12. Binance "restricted location" cron outage: unconditional client construction at import time
+
+See `BINANCE_GEOBLOCK.md` for the full diagnosis, the recommended
+hosting split, and the architectural implication for other free-tier
+hosts. Technical summary of the fix itself:
+
+**The bug.** `p4_utils.py` has always built the Binance client at
+module scope — `binance_client = _create_binance_client()` — rather than
+lazily on first use. `_create_binance_client()` retries up to 5 times
+(5s apart) and, if every attempt fails, `raise`s a `ConnectionError`.
+That's fine when the failure is a real, transient outage worth crashing
+loudly over — but Binance's compliance/geofencing block on GitHub
+Actions' hosted-runner IPs is deterministic, not transient: every single
+retry fails identically, so the function always ends up raising. Because
+`cron_runner.py` does an unguarded top-level `import pyq_p4` (which
+transitively imports `p4_utils` before any of `pyq_p4.py`'s own module-
+level code, including the UKF setup covered in Section 10, runs at all),
+that one raised exception aborts the whole Python process — meaning the
+tick fails as a hard crash before `SIGNAL_ONLY_MODE`'s checks, before
+signal generation, before logging, before anything.
+
+Confirmed via `gh api repos/Pyrex611/pyq-p3/actions/workflows/<id>/runs`
+against the actual run history: 100% failure across the most recent 15
+runs, every one dying in ~60 seconds (5 retries × 5s delay ≈ 25-30s, plus
+import/connection overhead on both sides) — consistent with a crash
+during import, not a timeout partway through real work.
+
+**The fix.** `_create_binance_client()` now reads `SIGNAL_ONLY_MODE`
+directly (`os.environ.get("SIGNAL_ONLY_MODE", "false")...` — duplicated
+from `pyq_p4.py`'s own check rather than imported, since `p4_utils.py`
+doesn't otherwise depend on `pyq_p4.py` and shouldn't start now just for
+this one flag). Behavior after all retries are exhausted:
+- `SIGNAL_ONLY_MODE` true → logs a diagnostic that explicitly calls out
+  a detected "restricted location"/"eligibility" error as a geo-block
+  (vs. some other kind of failure), then attempts to still construct and
+  return a `Client` object with no `.ping()` validation; falls back to
+  returning `None` only if constructing the object itself raises.
+  Either way, the process does **not** crash — `binance_client` ends up
+  either an untested `Client` or `None`, and every other call site that
+  actually uses it (`check_open_position()`, `get_equities()`, etc.)
+  already wraps its own calls in try/except with a graceful fallback, so
+  those degrade the same way they would during any other real Binance
+  outage, rather than the crash happening one layer upstream of where
+  that handling lives.
+- `SIGNAL_ONLY_MODE` false (default) → unchanged, still raises
+  `ConnectionError` and crashes the process loudly. This mode means real
+  order placement is intended; silently proceeding with no validated
+  exchange connection in that case is a correctness/safety issue, not
+  just a reliability one, so the original fail-loud behavior is kept.
+
+**Verification.** `py_compile`-clean. Not verified against a live
+GitHub Actions run yet (same standing push-access blocker as the rest of
+this delivery — see `CLAUDE.md` Section 5) — worth specifically
+re-checking the Actions run history after this ships, same as the UKF
+fix in Section 10.
+
+**What this does not fix.** This makes the signal-only pipeline survive
+Binance being unreachable; it does not make Binance reachable. Real
+order placement (paper or live) from GitHub Actions, or from most
+free-tier cloud/VPS hosts, is still expected to hit the same geo-block —
+see `BINANCE_GEOBLOCK.md` for the recommended split (signal-only on
+GitHub Actions, real trading from a residential/home IP).

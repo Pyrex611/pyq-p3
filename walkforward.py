@@ -74,6 +74,23 @@ USE_BAYESIAN          = True
 BAYESIAN_TRIALS       = 150
 PARAM_SMOOTHING_ALPHA = 0.7
 
+# Kaggle backtest integration: a caller that already has its OWN
+# pyquant_runs row to update (the Kaggle-invoked path — see
+# kaggle_backtest/run_backtest.py) sets this True before calling
+# run_walk_forward(), so the function's own automatic record_run() call
+# near the end (which always creates a brand-new row with no knowledge of
+# any caller-tracked run id) is skipped — the caller does its own
+# state_store.update_run_status(run_id, ...) instead, so the UI's queued
+# row gets updated in place rather than ending up with an orphaned
+# "queued" row plus an unrelated duplicate "completed" one. Deliberately
+# a tiny, additive, logging-only guard, not a change to any strategy
+# logic — consistent with this project's "testing deferred to
+# integration" rule only restricting touches to the actual trading
+# decisions, not to purely-additive Phase 2 instrumentation. Manual CLI
+# usage (`python3 walkforward.py`) is completely unaffected — this stays
+# False unless a caller explicitly sets it.
+_SUPPRESS_AUTO_RECORD_RUN = False
+
 USE_ATR_SL            = True    # ATR-adaptive SL is active
 ATR_PERIOD            = 14
 ATR_SL_RANGE          = (1.0, 3.0)
@@ -1163,23 +1180,27 @@ def run_walk_forward():
 
     # Phase 2: log this run for the UI's "Backtest" screen. Purely
     # additive — a logging failure must never affect the run's own
-    # output/return value, so it's wrapped and never re-raised.
-    try:
-        metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
-        state_store.record_run(
-            run_type="walkforward",
-            metrics=metrics_dict,
-            symbol="BTC+ETH",
-            params={
-                "leverage": LEVERAGE, "initial_capital": INITIAL_CAPITAL,
-                "walk_forward_days": WALK_FORWARD_DAYS,
-                "use_bayesian": bool(USE_BAYESIAN and OPTUNA_AVAILABLE),
-                "use_atr_sl": USE_ATR_SL,
-                "use_pessimistic_exits": USE_PESSIMISTIC_EXITS,
-            },
-        )
-    except Exception as e:
-        print(f"  (non-fatal) run logging failed: {e}")
+    # output/return value, so it's wrapped and never re-raised. Skipped
+    # when a caller is tracking its own pyquant_runs row (see
+    # _SUPPRESS_AUTO_RECORD_RUN's definition above) — manual CLI usage
+    # (the normal case) always hits this branch unchanged.
+    if not _SUPPRESS_AUTO_RECORD_RUN:
+        try:
+            metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
+            state_store.record_run(
+                run_type="walkforward",
+                metrics=metrics_dict,
+                symbol="BTC+ETH",
+                params={
+                    "leverage": LEVERAGE, "initial_capital": INITIAL_CAPITAL,
+                    "walk_forward_days": WALK_FORWARD_DAYS,
+                    "use_bayesian": bool(USE_BAYESIAN and OPTUNA_AVAILABLE),
+                    "use_atr_sl": USE_ATR_SL,
+                    "use_pessimistic_exits": USE_PESSIMISTIC_EXITS,
+                },
+            )
+        except Exception as e:
+            print(f"  (non-fatal) run logging failed: {e}")
 
     print(f"\n{'─'*80}")
     print(f"  Net: {((capital/INITIAL_CAPITAL)-1)*100:+.4f}%  |  "

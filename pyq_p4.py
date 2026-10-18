@@ -152,31 +152,63 @@ ukf_model = UKFModel(crypto_client, start_date)
 eth_symbols = ["ETH/USD"]
 btc_symbols = ["BTC/USD"]
 
-btc_ukf,      btc_high_ukf,      btc_low_ukf      = ukf_model.create_ukf_models("1H",  btc_symbols)
-btc_fift_ukf, btc_fift_high_ukf, btc_fift_low_ukf = ukf_model.create_ukf_models("15T", btc_symbols)
-btc_five_ukf, btc_five_high_ukf, btc_five_low_ukf = ukf_model.create_ukf_models("5T",  btc_symbols)
-
-eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.create_ukf_models("1H",  eth_symbols)
-eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.create_ukf_models("15T", eth_symbols)
-eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models("5T",  eth_symbols)
-
 # ── GitHub Actions cron migration: persist/restore UKF filter state ──────────
-# Each model above is created fresh (a full retrain against history, via
-# create_ukf_models()) at every import — fine for a continuously-running
-# process (it only happens once, at startup), but every one of these
-# filters is then updated INCREMENTALLY, one bar at a time (step_ukf()'s
-# .update()/.predict() calls), for as long as that one process stays
-# alive, and only fully retrained again once a day (retrain_daily_ukfs()).
+# create_ukf_models() is expensive: one Alpaca get_crypto_bars() call plus
+# an 18-model _train_ukf() loop over every historical bar (up to ~60 days
+# at 5-minute resolution). On a continuously-running process that only
+# ever happens once, at startup. On a cron-triggered process (GitHub
+# Actions) restarting from scratch every 5 minutes, it happens on EVERY
+# tick — which is not just wasteful, it was the actual cause of this
+# workflow's real, observed intermittent failures after the GitHub
+# Actions migration shipped (confirmed via the Actions run history: most
+# "Run one orchestra tick" failures happened within the first ~50s, well
+# under the job's 10-minute timeout, consistent with a transient Alpaca
+# API hiccup hitting this unconditional, un-cached, every-tick fetch —
+# not a timeout, not a logic bug in the task functions themselves).
 #
-# A cron-triggered process (e.g. GitHub Actions) restarts from scratch on
-# every single invocation. Without this, every tick would silently throw
-# away all of that incremental adaptation and start the filters cold —
-# which is a real change to the trading engine's behavior, not just a
-# hosting swap. So: restore each filter's internal state (.x, .P) from
-# the shared state store right after creation above (falling back to the
-# freshly-trained values on a genuine first-ever run, when nothing has
-# been persisted yet), and persist it again at the end of every task tick
-# below and after every retrain_daily_ukfs() call.
+# Fix: define the state key and check for persisted state FIRST. If it
+# exists, build cheap "shell" models via UKFModel.make_ukf_shell() (no
+# Alpaca call, no training loop — see that function's docstring for why
+# this is exactly equivalent once _restore_ukf_state() below overwrites
+# .x/.P from the persisted values anyway) instead of create_ukf_models().
+# Only a genuine first-ever run (nothing persisted yet) pays the real
+# historical-fetch-and-train cost, exactly once, which then seeds
+# persisted state for every tick after it.
+_UKF_STATE_KEY = "pyq_p4_ukf_filter_state"
+_have_persisted_ukf_state = False
+try:
+    _have_persisted_ukf_state = bool(state_store.get_json(_UKF_STATE_KEY))
+except Exception as e:
+    logger.warning(f"UKF persisted-state existence check failed (treating as first run): {e}")
+
+if _have_persisted_ukf_state:
+    logger.info("Persisted UKF state found — using cheap shells (no Alpaca fetch/retrain this tick).")
+    btc_ukf,      btc_high_ukf,      btc_low_ukf      = ukf_model.make_ukf_shell("BTC")
+    btc_fift_ukf, btc_fift_high_ukf, btc_fift_low_ukf = ukf_model.make_ukf_shell("BTC")
+    btc_five_ukf, btc_five_high_ukf, btc_five_low_ukf = ukf_model.make_ukf_shell("BTC")
+
+    eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.make_ukf_shell("ETH")
+    eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.make_ukf_shell("ETH")
+    eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.make_ukf_shell("ETH")
+else:
+    logger.info("No persisted UKF state found — doing a full historical fetch + retrain (expected on first run only).")
+    btc_ukf,      btc_high_ukf,      btc_low_ukf      = ukf_model.create_ukf_models("1H",  btc_symbols)
+    btc_fift_ukf, btc_fift_high_ukf, btc_fift_low_ukf = ukf_model.create_ukf_models("15T", btc_symbols)
+    btc_five_ukf, btc_five_high_ukf, btc_five_low_ukf = ukf_model.create_ukf_models("5T",  btc_symbols)
+
+    eth_ukf,      eth_high_ukf,      eth_low_ukf       = ukf_model.create_ukf_models("1H",  eth_symbols)
+    eth_fift_ukf, eth_fift_high_ukf, eth_fift_low_ukf  = ukf_model.create_ukf_models("15T", eth_symbols)
+    eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models("5T",  eth_symbols)
+
+# Original rationale for the restore/persist pair below, kept for context:
+# every one of these filters is updated INCREMENTALLY, one bar at a time
+# (step_ukf()'s .update()/.predict() calls), for as long as a process
+# stays alive, and only fully retrained again once a day
+# (retrain_daily_ukfs()). A cron-triggered process restarts from scratch
+# on every invocation, so without restoring .x/.P here, every tick would
+# silently throw away all of that incremental adaptation and start the
+# filters cold — a real change to the trading engine's behavior, not
+# just a hosting swap.
 #
 # Per the standing "validate strategy-affecting changes via walkforward
 # before trusting them live" rule: this restart-safe behavior has NOT yet
@@ -184,7 +216,6 @@ eth_five_ukf, eth_five_high_ukf, eth_five_low_ukf  = ukf_model.create_ukf_models
 # don't trust PYQUANT_MODE=paper/live output until a walkforward run (or
 # an equivalent dedicated check) confirms restoring .x/.P this way tracks
 # the same values a never-restarted process would have held.
-_UKF_STATE_KEY = "pyq_p4_ukf_filter_state"
 
 # Names only, looked up via globals() at call time rather than a dict of
 # object references captured once — retrain_daily_ukfs() REBINDS the six

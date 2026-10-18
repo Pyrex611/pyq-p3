@@ -88,6 +88,19 @@ class TradingSwitch(BaseModel):
     enabled: bool
 
 
+class BacktestRequest(BaseModel):
+    """Params the Backtest page's form submits. All optional — a field
+    left out means "use walkforward.py's own default for that constant"
+    (see kaggle_backtest/run_backtest.py, which only overrides a
+    walkforward.py module constant when the matching field here is not
+    None)."""
+    walk_forward_days: Optional[int] = None
+    bayesian_trials: Optional[int] = None
+    use_bayesian: Optional[bool] = None
+    leverage: Optional[float] = None
+    use_atr_sl: Optional[bool] = None
+
+
 # ── Health ───────────────────────────────────────────────────────────────
 
 @app.get("/api/health")
@@ -174,6 +187,100 @@ def get_run(run_id: int):
     if run is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
+
+
+# ── Backtests (Kaggle integration — Backtest screen's "Run" button) ─────
+#
+# See KAGGLE.md for full setup/rationale. Short version: Vercel has
+# neither the compute time nor a durable filesystem for walkforward.py's
+# UKF-training + 150-trial Optuna search, so this endpoint doesn't run it
+# itself — it writes an immediate "queued" pyquant_runs row (so the UI has
+# something to show right away) and triggers a Kaggle kernel run with
+# this run's id + params baked in. The kernel (kaggle_backtest/
+# run_backtest.py) updates that same row to "running" then "completed"/
+# "failed" as it progresses — the UI just keeps polling GET
+# /api/runs/{id}, exactly like any other run.
+
+@app.post("/api/backtests")
+def create_backtest(body: BacktestRequest):
+    kaggle_username = os.environ.get("KAGGLE_USERNAME", "").strip()
+    kaggle_key = os.environ.get("KAGGLE_KEY", "").strip()
+    dataset_slug = os.environ.get("KAGGLE_DATASET_SLUG", "").strip()
+    if not (kaggle_username and kaggle_key and dataset_slug):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Kaggle isn't configured on this deployment (missing "
+                "KAGGLE_USERNAME / KAGGLE_KEY / KAGGLE_DATASET_SLUG env vars) "
+                "— see KAGGLE.md Part C."
+            ),
+        )
+
+    params = body.model_dump(exclude_none=True)
+    run_id = state_store.request_backtest(run_type="walkforward", params=params, symbol="BTC+ETH")
+    if run_id is None:
+        raise HTTPException(status_code=500, detail="Could not create the queued run (state store write failed)")
+
+    try:
+        _push_kaggle_kernel(run_id, params, kaggle_username, kaggle_key, dataset_slug)
+    except Exception as e:
+        # The queued row stays "queued" forever if we don't mark it —
+        # fail it immediately so the UI shows a real error instead of a
+        # run that silently never progresses.
+        state_store.update_run_status(run_id, "failed", error=f"Kaggle push failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not start the Kaggle run: {e}")
+
+    return {"run_id": run_id, "status": "queued"}
+
+
+def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, dataset_slug: str) -> None:
+    """Copies the kaggle_backtest/ template into a temp dir with this
+    run's params.json baked in, points kernel-metadata.json at the
+    configured dataset, and pushes a NEW VERSION of the SAME kernel slug
+    every time (not a new slug per run) — deliberately, so the DATABASE_URL
+    Kaggle Secret attached once, by hand, in the Kaggle web editor (see
+    KAGGLE.md Part D) stays attached across every push. Kaggle attaches a
+    secret to a kernel, not to one specific version of it, so pushing new
+    code/params to the same existing kernel id keeps that attachment —
+    pushing under a fresh slug per run would NOT (a brand-new kernel has
+    no secrets attached until someone opens it in the editor and toggles
+    one on, which defeats the point of triggering runs with no human in
+    the loop). The practical corollary: only one backtest can usefully be
+    in flight at a time — a second push while one is still running starts
+    a new version of the same kernel, and KAGGLE.md documents this as a
+    known, accepted limitation rather than something this code tries to
+    queue or serialize itself.
+
+    Raises on any failure — the caller above turns that into a failed run
+    + a 502, rather than leaving the run stuck."""
+    import json
+    import shutil
+    import tempfile
+
+    os.environ.setdefault("KAGGLE_USERNAME", username)
+    os.environ.setdefault("KAGGLE_KEY", key)
+    from kaggle.api.kaggle_api_extended import KaggleApi  # local import: optional dep, see KAGGLE.md
+
+    template_dir = _REPO_ROOT / "kaggle_backtest"
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(template_dir / "run_backtest.py", os.path.join(tmp, "run_backtest.py"))
+
+        with open(template_dir / "kernel-metadata.json") as f:
+            meta = json.load(f)
+        meta["id"] = f"{username}/pyquant-backtest-runner"
+        meta["dataset_sources"] = [dataset_slug]
+        with open(os.path.join(tmp, "kernel-metadata.json"), "w") as f:
+            json.dump(meta, f)
+
+        run_params = dict(params)
+        run_params["run_id"] = run_id
+        run_params["dataset_slug"] = dataset_slug
+        with open(os.path.join(tmp, "params.json"), "w") as f:
+            json.dump(run_params, f)
+
+        api = KaggleApi()
+        api.authenticate()
+        api.kernels_push(tmp)
 
 
 # ── Dashboard summary ────────────────────────────────────────────────────

@@ -124,6 +124,17 @@ def _bootstrap_postgres(conn) -> None:
             )
             """
         )
+        # Kaggle backtest-integration addition: a run now has a lifecycle
+        # (queued -> running -> completed/failed) instead of only ever
+        # being written once, complete, at the end (record_run()'s
+        # original and still-valid use for daily_optimizer()/manual
+        # walkforward.py runs). ADD COLUMN IF NOT EXISTS is safe to repeat
+        # on every startup and a no-op for rows that predate this change
+        # (they default to 'completed', which is correct — they really
+        # were completed runs with no queued phase).
+        cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'")
+        cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS kaggle_ref TEXT")
+        cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS error TEXT")
 
 
 @contextmanager
@@ -154,6 +165,19 @@ def _sqlite_conn():
             "  run_type TEXT NOT NULL, symbol TEXT, params TEXT, metrics TEXT NOT NULL,"
             "  started_at TEXT, finished_at TEXT NOT NULL)"
         )
+        # Kaggle backtest-integration addition — see the matching Postgres
+        # comment above. SQLite's ADD COLUMN has no IF NOT EXISTS, so this
+        # is tried once per connection and the "duplicate column" error is
+        # swallowed on every call after the first.
+        for _ddl in (
+            "ALTER TABLE pyquant_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
+            "ALTER TABLE pyquant_runs ADD COLUMN kaggle_ref TEXT",
+            "ALTER TABLE pyquant_runs ADD COLUMN error TEXT",
+        ):
+            try:
+                conn.execute(_ddl)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         yield conn
         conn.commit()
     finally:
@@ -413,8 +437,11 @@ def record_run(
         return None
 
 
+_RUN_COLUMNS = ["id", "run_type", "symbol", "params", "metrics", "started_at", "finished_at", "status", "kaggle_ref", "error"]
+
+
 def _row_to_run(row: tuple) -> dict:
-    d = dict(zip(["id", "run_type", "symbol", "params", "metrics", "started_at", "finished_at"], row))
+    d = dict(zip(_RUN_COLUMNS, row))
     try:
         d["metrics"] = json.loads(d["metrics"]) if d["metrics"] else {}
     except Exception:
@@ -432,22 +459,99 @@ def list_runs(run_type: Optional[str] = None, limit: int = 50) -> list[dict]:
     if run_type:
         clause = " WHERE run_type = %s" if _using_postgres() else " WHERE run_type = ?"
         params.append(run_type)
+    cols = ", ".join(_RUN_COLUMNS)
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:
                 cur.execute(
-                    f"SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
-                    f"FROM pyquant_runs{clause} ORDER BY id DESC LIMIT %s", (*params, limit),
+                    f"SELECT {cols} FROM pyquant_runs{clause} ORDER BY id DESC LIMIT %s", (*params, limit),
                 )
                 return [_row_to_run(row) for row in cur.fetchall()]
         with _lock, _sqlite_conn() as conn:
             rows = conn.execute(
-                f"SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
-                f"FROM pyquant_runs{clause} ORDER BY id DESC LIMIT ?", (*params, limit),
+                f"SELECT {cols} FROM pyquant_runs{clause} ORDER BY id DESC LIMIT ?", (*params, limit),
             ).fetchall()
             return [_row_to_run(row) for row in rows]
     except Exception:
         return []
+
+
+# ── Kaggle backtest integration (Section 6.1 of CLAUDE.md) ──────────────────
+#
+# A UI-submitted backtest request doesn't run synchronously inside the
+# Vercel API (see CLAUDE.md/KAGGLE.md for why — Vercel has neither the
+# compute time nor a durable filesystem for this). Instead, the API calls
+# Kaggle's API directly to launch a kernel with the chosen params, writes
+# an immediate "queued" row here so the UI has something to show right
+# away, and the Kaggle notebook itself calls update_run_status() (via a
+# small HTTP call back to a new API endpoint, or directly against this
+# same DATABASE_URL — see KAGGLE.md for which) as it moves from queued to
+# running to completed/failed, with the real metrics attached at the end.
+
+def request_backtest(run_type: str, params: dict, kaggle_ref: Optional[str] = None,
+                      symbol: Optional[str] = None) -> Optional[int]:
+    """Writes a new 'queued' row for a UI-submitted backtest/optimizer
+    request. Returns the new row's id (the UI polls get_run(id) for
+    status), or None on failure."""
+    now = datetime.now(timezone.utc).isoformat()
+    params_json = json.dumps(params, default=str) if params is not None else None
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pyquant_runs (run_type, symbol, params, metrics, started_at, finished_at, status, kaggle_ref) "
+                    "VALUES (%s,%s,%s,%s,now(),now(),'queued',%s) RETURNING id",
+                    (run_type, symbol, params_json, "{}", kaggle_ref),
+                )
+                return cur.fetchone()[0]
+        with _lock, _sqlite_conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO pyquant_runs (run_type, symbol, params, metrics, started_at, finished_at, status, kaggle_ref) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (run_type, symbol, params_json, "{}", now, now, "queued", kaggle_ref),
+            )
+            return cur.lastrowid
+    except Exception:
+        # Best-effort, matching this module's other writers — logged by
+        # the caller (the API layer), which has a logger; this module
+        # intentionally has none.
+        return None
+
+
+def update_run_status(run_id: int, status: str, metrics: Optional[dict] = None,
+                       kaggle_ref: Optional[str] = None, error: Optional[str] = None) -> bool:
+    """Moves a queued/running row forward (status='running'|'completed'|
+    'failed'). When metrics is given, also overwrites metrics and bumps
+    finished_at to now() — call this on the terminal transition
+    (completed/failed), not on the queued->running one. Best-effort: never
+    raises, returns False on failure so a caller (the Kaggle notebook, or
+    a status-check endpoint) can log and move on rather than crash."""
+    try:
+        sets, vals = ["status = " + ("%s" if _using_postgres() else "?")], [status]
+        if metrics is not None:
+            sets.append("metrics = " + ("%s" if _using_postgres() else "?"))
+            vals.append(json.dumps(metrics, default=str))
+            sets.append("finished_at = now()" if _using_postgres() else "finished_at = ?")
+            if not _using_postgres():
+                vals.append(datetime.now(timezone.utc).isoformat())
+        if kaggle_ref is not None:
+            sets.append("kaggle_ref = " + ("%s" if _using_postgres() else "?"))
+            vals.append(kaggle_ref)
+        if error is not None:
+            sets.append("error = " + ("%s" if _using_postgres() else "?"))
+            vals.append(error)
+        vals.append(run_id)
+        set_clause = ", ".join(sets)
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(f"UPDATE pyquant_runs SET {set_clause} WHERE id = %s", vals)
+        else:
+            with _lock, _sqlite_conn() as conn:
+                conn.execute(f"UPDATE pyquant_runs SET {set_clause} WHERE id = ?", vals)
+        return True
+    except Exception:
+        # Best-effort — logged by the caller, same convention as above.
+        return False
 
 
 # ── Trading on/off switch (Phase 2 — UI's LIVE/PAPER/OFF control) ───────────
@@ -480,20 +584,15 @@ def set_trading_enabled(enabled: bool) -> None:
 
 def get_run(run_id: int) -> Optional[dict]:
     """Returns a single run by id, or None if not found/on error."""
+    cols = ", ".join(_RUN_COLUMNS)
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:
-                cur.execute(
-                    "SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
-                    "FROM pyquant_runs WHERE id = %s", (run_id,),
-                )
+                cur.execute(f"SELECT {cols} FROM pyquant_runs WHERE id = %s", (run_id,))
                 row = cur.fetchone()
                 return _row_to_run(row) if row else None
         with _lock, _sqlite_conn() as conn:
-            row = conn.execute(
-                "SELECT id, run_type, symbol, params, metrics, started_at, finished_at "
-                "FROM pyquant_runs WHERE id = ?", (run_id,),
-            ).fetchone()
+            row = conn.execute(f"SELECT {cols} FROM pyquant_runs WHERE id = ?", (run_id,)).fetchone()
             return _row_to_run(row) if row else None
     except Exception:
         return None

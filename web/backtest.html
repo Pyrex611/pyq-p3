@@ -28,6 +28,24 @@
   </nav>
   <main>
     <div id="banner-slot"></div>
+    <div class="card" style="margin-bottom:16px;">
+      <h3>Run a new backtest</h3>
+      <p class="hint" style="margin-top:-4px;">
+        Runs on Kaggle (not on this server) — see KAGGLE.md if this returns
+        a "Kaggle isn't configured" error. A run typically takes a few
+        minutes to start (Kaggle's own queue) plus however long the
+        walkforward engine itself takes once it starts.
+      </p>
+      <form id="backtest-form" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+        <label>Days<br><input type="number" name="walk_forward_days" placeholder="15" min="1" style="width:80px;"></label>
+        <label>Bayesian trials<br><input type="number" name="bayesian_trials" placeholder="150" min="1" style="width:90px;"></label>
+        <label>Leverage<br><input type="number" name="leverage" placeholder="10" min="1" step="0.5" style="width:80px;"></label>
+        <label><input type="checkbox" name="use_bayesian" checked> Bayesian (Optuna)</label>
+        <label><input type="checkbox" name="use_atr_sl" checked> ATR-adaptive SL</label>
+        <button type="submit">Run Backtest</button>
+      </form>
+      <div id="backtest-status" class="mono" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>
+    </div>
     <div class="grid cols-2">
       <div class="card">
         <h3>Walkforward Runs</h3>
@@ -114,6 +132,54 @@ async function loadRuns() {
   }
 }
 loadRuns();
+
+// ── Run-a-backtest form (Kaggle integration — see KAGGLE.md) ─────────────
+let _pollTimer = null;
+
+function _pollRun(runId) {
+  const statusEl = document.getElementById("backtest-status");
+  clearInterval(_pollTimer);
+  _pollTimer = setInterval(async () => {
+    try {
+      const run = await apiGet(`/runs/${runId}`);
+      if (run.status === "completed") {
+        clearInterval(_pollTimer);
+        statusEl.textContent = `Run #${runId} completed.`;
+        loadRuns();
+      } else if (run.status === "failed") {
+        clearInterval(_pollTimer);
+        statusEl.textContent = `Run #${runId} failed: ${run.error || "unknown error"}`;
+      } else {
+        statusEl.textContent = `Run #${runId}: ${run.status}…`;
+      }
+    } catch (e) {
+      statusEl.textContent = `Lost track of run #${runId} (${e.message}) — check the Kaggle dashboard directly.`;
+      clearInterval(_pollTimer);
+    }
+  }, 15000); // Kaggle's own queue is usually minutes, not seconds — no need to poll faster
+}
+
+document.getElementById("backtest-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const statusEl = document.getElementById("backtest-status");
+  const fd = new FormData(e.target);
+  const body = {};
+  for (const k of ["walk_forward_days", "bayesian_trials"]) {
+    if (fd.get(k)) body[k] = parseInt(fd.get(k), 10);
+  }
+  if (fd.get("leverage")) body.leverage = parseFloat(fd.get("leverage"));
+  body.use_bayesian = fd.get("use_bayesian") === "on";
+  body.use_atr_sl = fd.get("use_atr_sl") === "on";
+
+  statusEl.textContent = "Submitting…";
+  try {
+    const result = await apiPost("/backtests", body);
+    statusEl.textContent = `Run #${result.run_id} queued — Kaggle is starting it now.`;
+    _pollRun(result.run_id);
+  } catch (err) {
+    statusEl.textContent = "Could not start the run: " + err.message;
+  }
+});
 </script>
 </body>
 </html>

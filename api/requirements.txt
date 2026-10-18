@@ -17,3 +17,9 @@ pydantic>=2.6.0
 # requirements.txt, so it's already installed whenever DATABASE_URL does
 # get set in the Vercel project's environment variables.
 psycopg2-binary>=2.9.9
+
+# Kaggle backtest integration (KAGGLE.md) — POST /api/backtests uses this
+# package's Python API (KaggleApi().kernels_push(...)) to trigger a
+# kernel run. Pure Python, no native deps, so it's cheap to include even
+# though it's only exercised when KAGGLE_USERNAME/KAGGLE_KEY are set.
+kaggle>=1.6.0

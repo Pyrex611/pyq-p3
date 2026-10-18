@@ -210,6 +210,90 @@ overstated it as done.
 - `VPS_SETUP.md` remains in the repo as a fallback if the GitHub Actions
   path proves too unreliable or too limited.
 
+### Reliability bug found and fixed: per-tick UKF retraining — built this session, NOT yet pushed
+Investigated because the person asked to "proceed with the development
+sprint... need the platform up and running, generating and storing
+signals" — before building anything new, the live GitHub Actions run
+history was checked via `gh api`, and it showed a high failure rate (6
+of the last 9 ticks failed, each within ~50 seconds — not a timeout).
+Root cause: `pyq_p4.py`'s module-level UKF setup always called the
+expensive `create_ukf_models()` (one Alpaca history fetch + an
+18-model, every-historical-bar training loop) **on every single
+import** — meaning every 5-minute cron tick, not just the first one
+ever. The UKF-persistence work from the earlier GitHub Actions migration
+restored `.x`/`.P` from the database right after this, but only after
+paying this full, unnecessary, network-dependent cost first — explaining
+both the waste and the intermittent failures (a transient Alpaca hiccup
+during this unconditional fetch kills the whole tick).
+
+**Fix**: `p4_utils.py`'s `UKFModel` gained `make_ukf_shell(symbol)` — builds
+the 3 per-symbol UKF objects with the right hyperparameters but no
+Alpaca call and no training loop (their `.x`/`.P` get overwritten by the
+existing restore step immediately anyway, so a shell is exactly
+equivalent to a freshly-trained-then-restored filter, just cheaper and
+with no network dependency). `pyq_p4.py` now checks for persisted UKF
+state FIRST: if found, it uses six `make_ukf_shell()` calls instead of
+the six `create_ukf_models()` calls; only a genuine first-ever run (no
+persisted state yet) pays the real cost. `retrain_daily_ukfs()` (the
+intentional once-daily full re-anchor) is unchanged — this fix only
+touches the unconditional per-tick path. Full writeup: `DOCS.md`
+Section 10.
+
+**Status**: code written, `py_compile`-clean, **not yet pushed** — same
+GitHub App blocker. This needs to land before the next few ticks to stop
+wasting Alpaca calls/compute — **but see the next item below: this fix
+alone does NOT currently resolve the live outage**, because a second,
+unrelated bug is killing every tick earlier in the process than this one.
+
+### Binance "restricted location" error — 100% cron failure rate, root-caused and fixed this session, NOT yet pushed
+Reported directly by the person: GitHub Actions cron runs started failing
+with Binance rejecting every request as coming from a restricted
+location. Confirmed via `gh api` against the workflow's run history:
+100% failure across the last 15 runs, each dying in a consistent ~60
+seconds. Root cause: `p4_utils.py` builds the Binance client
+**unconditionally at module import time**
+(`binance_client = _create_binance_client()`), with a 5-retry × 5s-delay
+loop that raises `ConnectionError` if every retry fails against Binance's
+geo-compliance block. Because `cron_runner.py` does a plain top-level
+`import pyq_p4` with no try/except, that one exception kills the
+**entire process** on every tick — before any of `pyq_p4.py`'s own logic
+(including `SIGNAL_ONLY_MODE`'s checks, and the UKF fix above) ever runs.
+This is a separate bug from the UKF retraining issue above, earlier in
+module load order — fixing one does not fix the other; both need to ship.
+
+This is a real compliance geofencing block, not a transient network
+issue or a credentials problem — Binance's compliance system is known to
+reject requests from broad categories of cloud/datacenter IP ranges, not
+just specific geographies, specifically to block exactly this kind of
+automated-bot/cloud-runner traffic. It will not clear up on retry, and
+is very likely not specific to GitHub Actions — see `BINANCE_GEOBLOCK.md`
+for the full diagnosis and why this also puts most of the free-tier VPS
+options in `VPS_SETUP.md` (Oracle, GCP/AWS free tier, DigitalOcean,
+Hetzner) under the same suspicion.
+
+**Fix**: `_create_binance_client()` now checks `SIGNAL_ONLY_MODE`
+directly. With it on, an unreachable Binance no longer crashes the
+process — it logs a clear diagnostic (detecting "restricted location"/
+"eligibility" in the error) and returns a `Client` object built without
+the validating `.ping()` (or `None` if even that fails), letting the
+other call sites' *existing* try/except fallbacks (`check_open_position()`,
+`get_equities()`, etc. already degrade gracefully) do their job instead
+of the whole tick dying before it gets there. With `SIGNAL_ONLY_MODE`
+off (real trading intended), the crash-loud behavior is unchanged —
+silently continuing without a validated exchange connection while real
+order placement is believed to be active would be dangerous.
+
+**Recommendation (see `BINANCE_GEOBLOCK.md` for full reasoning)**: split
+hosting by concern. Keep signal generation/storage/simulated TP-SL
+(`SIGNAL_ONLY_MODE=true`) on GitHub Actions — it needs no working
+Binance connection at all with this fix, and it's free. Run real order
+placement (paper or live, `SIGNAL_ONLY_MODE=false`) from a host on a
+residential/home IP instead of any datacenter VPS, since that's the one
+class of IP this kind of geo-block generally doesn't catch.
+
+**Status**: code written, `py_compile`-clean, **not yet pushed** — same
+GitHub App blocker, delivered as a zip alongside the UKF fix above.
+
 ### Signal-only mode (`SIGNAL_ONLY_MODE`) — built this session, NOT yet pushed
 Added to satisfy the explicit ask: "the platform needs to at least be
 able to start generating, logging and tracking live signals (without
@@ -308,49 +392,69 @@ in the UI, a backtest runs, the UI picks up the result" — Colab stays
 exactly what it already is today: a notebook the person runs by hand
 when they want to.
 
-This also means the original design below should route through Kaggle
-instead of the GitHub-Actions-hosted orchestra process (which has no
-persistent disk for the historical CSVs either, being a fresh checkout
-every 5-minute tick — see Section 5). Updated design, same state-store
-job-queue pattern this project already established in Phase 2:
-1. **Refactor `walkforward.run_walk_forward()` to accept an optional
-   params/overrides argument** (it's currently a zero-argument function
-   reading module-level constants — `WALK_FORWARD_DAYS`,
-   `UKF_TRAIN_DAYS`, `LEVERAGE`, `USE_BAYESIAN`, `BAYESIAN_TRIALS`, etc.)
-   while keeping today's no-argument manual CLI usage working unchanged
-   (overrides default to the existing module constants).
-2. **New state-store table or a new `status` value on `pyquant_runs`** —
-   a UI-submitted backtest request is written as a row with
-   `status="queued"` and the chosen params as its JSON payload, instead
-   of a completed run's metrics.
-3. **New `POST /api/backtests` endpoint** in `api/index.py` — accepts
-   the form's params and calls the Kaggle API directly (`kernels push`)
-   to launch a run with those params baked into the kernel's metadata/
-   inputs, rather than writing a queued row for a poller to find — no
-   poller is needed with this design, since Kaggle's API itself is the
-   trigger. The endpoint needs a Kaggle API token as a new Vercel env
-   var (a new, narrow credential — it can only launch/read kernel runs,
-   not trade, so this doesn't reopen the "API never holds exchange
-   credentials" trust boundary in Section 7).
-4. **The Kaggle notebook writes its own result directly to the shared
-   Postgres DB** when it finishes — needs `DATABASE_URL` added as a
-   Kaggle Secret in the notebook's environment, and either a trimmed
-   copy of `pyquant_state.py`'s `record_run()` (just the one INSERT) or
-   `psycopg2` calls equivalent to it. This is the one new moving part:
-   the notebook needs network egress to Supabase, which Kaggle's
-   standard (CPU) kernels allow.
-5. **UI**: a form on `backtest.html` (symbol(s), date-range/day-count,
-   leverage, Bayesian on/off + trial count) that `POST`s to
-   `/api/backtests`, plus polling/refresh (`/api/runs`) so a queued run's
-   status visibly progresses to completed without a page reload.
+**Implemented, not yet pushed** (same GitHub-push blocker as everything
+else from a Claude session — see Section 5's standing note). Final
+design, routing through Kaggle instead of the originally-sketched
+VPS-poller pattern:
+1. **`walkforward.py` was NOT given a params argument** — a signature
+   refactor touching a validated backtest engine's entry point was
+   judged too risky for the benefit. Instead, a new
+   `_SUPPRESS_AUTO_RECORD_RUN` module flag (default `False`, so manual
+   `python3 walkforward.py` usage is completely unaffected) plus the
+   standard "override module constants before calling the function"
+   pattern — `walkforward.WALK_FORWARD_DAYS = ...` etc. — set by the
+   Kaggle-side caller. Zero changes to the function's internals.
+2. **`pyquant_state.py` gained a real run lifecycle**: `pyquant_runs`
+   now has `status` (`queued`/`running`/`completed`/`failed`,
+   defaulting to `completed` for pre-existing rows written by the old
+   `record_run()` path, which is unchanged and still used by manual
+   runs and `daily_optimizer()`), `kaggle_ref`, and `error` columns
+   (added via `ADD COLUMN IF NOT EXISTS` / a try/except for SQLite, so
+   this is safe to run against an existing database). New functions
+   `request_backtest(...)` (creates the queued row) and
+   `update_run_status(...)` (moves it forward) — unit-tested against a
+   disposable SQLite file in this session (request → running →
+   completed, plus backward-compat with the old `record_run()` path).
+3. **`POST /api/backtests`** in `api/index.py` — accepts the form's
+   params, writes the queued row, then pushes a new version of a
+   **single, reused Kaggle kernel** (`kaggle_backtest/`, via the
+   `kaggle` PyPI package's `KaggleApi().kernels_push()`) with this run's
+   id + param overrides baked into a `params.json` written alongside the
+   kernel's code at push time. Needs three new Vercel env vars:
+   `KAGGLE_USERNAME`, `KAGGLE_KEY`, `KAGGLE_DATASET_SLUG` — a narrow
+   credential (launch/read kernel runs only, never trading), consistent
+   with Section 7's "API never holds exchange credentials" rule.
+4. **Why one reused kernel slug, not a fresh one per run**: Kaggle
+   attaches a secret (`DATABASE_URL`, needed so the kernel can write its
+   result back) to a kernel, not to one version of it — so a fresh slug
+   per run would need someone to open it in the Kaggle editor and
+   re-attach the secret by hand every single time, defeating the point
+   of a no-human-in-the-loop trigger. One kernel, set up once (`KAGGLE.md`
+   Part D/F), gets a new version pushed per run instead. Known
+   consequence: only one backtest usefully in flight at a time.
+5. **`kaggle_backtest/run_backtest.py`** — the kernel's own code. Clones
+   this public repo fresh (always current), installs
+   `requirements.txt`, copies the attached Kaggle Dataset's CSVs into
+   place as `btc_back366.csv`/`eth_back366.csv`, applies this run's
+   module-constant overrides, calls `walkforward.run_walk_forward()`,
+   and reports `running`/`completed`/`failed` back via
+   `update_run_status()` — using `DATABASE_URL` from the Kaggle Secret,
+   same database the orchestra and Vercel API already both write to.
+6. **UI**: a form on `backtest.html` (days, Bayesian trials, leverage,
+   Bayesian on/off, ATR-adaptive SL on/off) that `POST`s to
+   `/api/backtests` and polls `/api/runs/{id}` every 15s until
+   completed/failed.
 
-This is simpler than the original VPS-poller design (no polling loop at
-all — the Kaggle API call *is* the trigger) and reuses compute the
-person already has and already pays nothing for. The complexity lands
-entirely in one-time setup, exactly as anticipated: a Kaggle API token,
-a notebook template committed to the repo, and a `DATABASE_URL` secret
-added to that notebook's environment — not implemented yet, this is the
-confirmed direction for when it's picked up.
+Full setup instructions (Kaggle token, the one-time kernel + dataset +
+secret setup, troubleshooting): **`KAGGLE.md`**.
+
+**Confirmed while building this, worth restating**: the hourly/live
+signal-generation loop does **not** need Kaggle — it was never the
+heavy workload, and a real reliability bug found during this same pass
+(every 5-minute cron tick was unnecessarily re-running the full,
+expensive UKF historical-training step — see `DOCS.md` Section 10) is
+now fixed, making that loop cheap and reliable on GitHub Actions'
+standard runner on its own.
 
 ### 6.2 Other UI-completion candidates (noted, not yet designed in detail)
 - **Trigger `daily_optimizer()` on demand from the UI**, same queued-job
@@ -454,6 +558,12 @@ fallbacks if/when this is attempted.
   service setup.
 - **`VERCEL_DEPLOY.md`** — API+frontend deploy: CLI/dashboard setup,
   env vars, the 404 root-cause writeup, troubleshooting.
+- **`KAGGLE.md`** — backtest-from-UI integration (Section 6.1): why
+  Kaggle and not Vercel/Colab/the orchestra, one-time Kaggle account/
+  kernel/dataset/secret setup, testing, known limitations.
+- **`BINANCE_GEOBLOCK.md`** — the Binance "restricted location" cron
+  outage: root cause, the fix, and why real order placement likely needs
+  a residential/home IP rather than any datacenter VPS going forward.
 - **Claude Docs plan doc** (`https://claude.ai/code/artifact/2a54f458-6ebe-423b-b4c8-e2deac599d7c`)
   — the original strategy/performance deep-dive and the phased
   development plan at dev-plan level; this file (`CLAUDE.md`) is now the
