@@ -1,14 +1,27 @@
 # ============================================================
 # PyQuant Control Center API — Vercel serverless function deps
 # ============================================================
-# Deliberately NOT the root requirements.txt: this function is a thin
-# read layer over pyquant_state.py and must stay small (Vercel's Python
-# functions have a size/cold-start budget) — it never imports pyq_p4.py,
-# p4_utils.py, walkforward.py or any of the Alpaca/Binance/Bybit/UKF/
-# Optuna stack those files pull in. Vercel's Python builder prefers a
-# requirements.txt placed next to the function (this file) over the
-# project-root one, which is what keeps this function's dependency set
-# scoped to just these three packages.
+# CORRECTED 2026-10-19: this file is NOT what Vercel actually installs
+# from under the current framework-preset deployment (pyproject.toml's
+# [tool.vercel] entrypoint, set up when VERCEL_DEPLOY.md's 404 was fixed)
+# — pyproject.toml's `dependencies` list is the real, authoritative
+# source (see CLAUDE.md Section 3). This file's previous header claimed
+# the opposite ("Vercel's Python builder prefers a requirements.txt
+# placed next to the function") — that was true of the OLDER, legacy
+# Vercel Python runtime, not the framework-preset mode this project
+# switched to; the claim was stale and actively misleading. It cost a
+# live 502 on every backtest attempt: `kaggle` was added here (only)
+# and never installed, so `from kaggle.api.kaggle_api_extended import
+# KaggleApi` raised ModuleNotFoundError before any Kaggle API call was
+# even attempted. Fixed by adding kaggle to pyproject.toml instead — see
+# that file's comment on the same line for the full incident writeup.
+#
+# This file is kept only as a human-readable manifest of what the
+# function depends on (and for local `pip install -r` convenience) —
+# every package listed here MUST also be listed in pyproject.toml's
+# `dependencies`, or it silently will not be installed on Vercel. Adding
+# a package to only one of the two is exactly the mistake that caused
+# this incident; do not repeat it.
 fastapi>=0.110.0
 pydantic>=2.6.0
 

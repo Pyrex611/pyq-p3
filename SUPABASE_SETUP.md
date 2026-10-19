@@ -14,65 +14,91 @@ Vercel deployment steps themselves, see `VPS_SETUP.md` and
 | Publishable key | No | A client-side REST API key — same reason |
 | Anon public key | No | Same — for Supabase's data API, which `pyquant_state.py` never touches |
 | Service role key | **No — and don't put it anywhere** | Bypasses Row Level Security on Supabase's API — unneeded here, and a needless secret to have floating in an env file |
-| **Direct connection string** | **Yes** | This is the raw Postgres connection `pyquant_state.py`'s `psycopg2` backend speaks — the only thing `DATABASE_URL` needs |
-| **Password** | **Yes** | Substituted into the Direct connection string's placeholder |
+| **Pooled connection string (Transaction pooler, port 6543)** | **Yes — use this, not the Direct one** | The raw Postgres connection `pyquant_state.py`'s `psycopg2` backend speaks, routed through Supavisor over IPv4. See the IPv6 incident note below for why this is the one to use. |
+| ~~Direct connection string~~ | **No — do not use, see below** | IPv6-only on current Supabase projects; breaks on any host without IPv6 egress |
+| **Password** | **Yes** | Substituted into the pooled connection string's placeholder |
 
 In short: `pyquant_state.py` talks to Postgres directly, not through
 Supabase's own API layer — four of your six values aren't used by
 anything in this codebase.
 
-## Step 1 — Build `DATABASE_URL` from the Direct connection string
+## ⚠️ IPv6 incident (2026-10-19) — read this before Step 1
 
-Supabase's Direct connection string looks like:
+This guide originally pointed `DATABASE_URL` at Supabase's **Direct**
+connection string (`db.PROJECT_REF.supabase.co:5432`). That broke
+every GitHub Actions cron tick the moment it was set: Supabase's Direct
+connection now resolves **IPv6-only** on current projects (Supabase
+moved off dedicated IPv4 for this endpoint), and GitHub Actions' hosted
+runners have **no outbound IPv6 connectivity**. The live symptom, seen
+in a real run:
+
 ```
-postgresql://postgres:[YOUR-PASSWORD]@db.YOUR_PROJECT_REF.supabase.co:5432/postgres
+connection to server at "db.<ref>.supabase.co" (2a05:d012:...), port 5432 failed: Network is unreachable
 ```
 
-1. Replace `[YOUR-PASSWORD]` with your actual password. If it contains
+Every `pyquant_state.py` write failed (non-fatal — each call catches
+its own exception) — but the consequence was worse than "state doesn't
+persist": `try_claim_run()`'s except-block **fails open** (deliberately,
+so a state-store outage can't silently stop the strategy from running
+at all — see its docstring) — meaning when the DB is unreachable, every
+task believes its bucket has never been claimed, **every single tick**.
+The live log confirmed this directly: `daily_optimizer()` — meant to
+run once a day — ran on a 5-minute GitHub Actions tick, downloading
+fresh historical data and running a full 150-trial Bayesian search
+every single invocation. Same story for `hourly_task()` and
+`fifteen_minute_task()` running every 5 minutes instead of their real
+cadence, and the UKF per-tick-retraining fix (`DOCS.md` Section 10)
+being unable to do its job, since "no persisted state" was true on
+every tick, not just the first.
+
+**Fix: use the Pooled connection string (Transaction mode, port
+`6543`) instead — it's IPv4-compatible.** This is a config-only change
+(`DATABASE_URL`'s value, in both the GitHub Actions repo secret and the
+Vercel project's env vars) — no code changes needed, and this guide's
+original "skip pooling, direct is simpler" advice (previously Step 2)
+is now actively wrong for any host without IPv6 and has been removed.
+
+## Step 1 — Build `DATABASE_URL` from the Pooled connection string
+
+1. Open your Supabase project → **Settings → Database → Connection
+   pooling** (or **Connect** → **Connection string** → **Transaction
+   pooler**, depending on your project's dashboard version).
+2. Copy the **Transaction pooler** string. It looks like:
+   ```
+   postgresql://postgres.YOUR_PROJECT_REF:[YOUR-PASSWORD]@aws-0-REGION.pooler.supabase.com:6543/postgres
+   ```
+   (Note the username is `postgres.YOUR_PROJECT_REF`, not plain
+   `postgres` — the pooler uses this to route to your project; don't
+   "simplify" it back to `postgres`, that's a different, wrong value.)
+3. Replace `[YOUR-PASSWORD]` with your actual password. If it contains
    `@`, `:`, `/`, `#`, `?` or `%`, URL-encode that character first
    (`@` → `%40`, `#` → `%23`, etc.) — an unencoded special character
    silently breaks the connection string's parsing.
-2. Append `?sslmode=require` — Supabase requires SSL.
+4. Append `?sslmode=require` — Supabase requires SSL.
 
 Result (example, not your real values):
 ```
-postgresql://postgres:MyP%40ss123@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require
+postgresql://postgres.abcdefghijkl:MyP%40ss123@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require
 ```
 
-This one string is the entire integration — no SDK, no client library,
-nothing else to configure. Set it as `DATABASE_URL` in both the
-orchestra's `.env` (`VPS_SETUP.md` Part H) and the Vercel project's
-environment variables (`VERCEL_DEPLOY.md` Part C).
+Set this one string as `DATABASE_URL` in **both** the GitHub Actions
+repo secret (`GITHUB_ACTIONS_SETUP.md`) and the Vercel project's
+environment variables (`VERCEL_DEPLOY.md` Part C) — both the orchestra
+(via `cron_runner.py`, one-shot per tick) and the API (Vercel, one-shot
+per request) are now short-lived-invocation shapes, so the same
+Transaction-mode pooled string suits both; there's no longer a reason
+to use two different connection strings for the two deployments the
+way the old Direct-vs-pooled split implied.
 
-## Step 2 — Direct connection vs. pooled connection (and the one real UI visit)
+**If you're running `p4_orchestra.py` directly on a VPS instead**
+(`VPS_SETUP.md`'s fallback path, a genuinely long-running process) —
+the Transaction pooler string above still works fine for
+`pyquant_state.py`'s usage pattern (simple autocommit queries, no
+prepared statements or session-level features), so there's no need to
+special-case that deployment path either. Use the same string
+everywhere unless you have a specific reason not to.
 
-`pyquant_state.py` opens one persistent connection per process and
-reuses it (its `_pg_pool` lazy singleton). That's exactly right for
-`p4_orchestra.py` — one long-running process, one connection, for its
-entire lifetime. The Direct connection string from Step 1 is correct
-for it as-is.
-
-Vercel's serverless functions are a different shape: many short-lived
-invocations, each potentially opening its own connection, against
-Supabase's free-tier cap of roughly 60 direct Postgres connections. A
-burst of dashboard traffic could exhaust that. Supabase's answer is a
-separate **pooled connection string** (PgBouncer, port `6543`,
-"Transaction" mode) — and this is the one place this guide can't hand
-you a software-free shortcut: the exact pooled hostname depends on your
-project's AWS region, which isn't derivable from anything in your
-"what you have" list without opening **Settings → Database** in the
-Supabase dashboard once.
-
-**Practical recommendation: skip this for now.** Use the same Direct
-connection `DATABASE_URL` for both the orchestra and the Vercel API. A
-personal/small-team read-only dashboard is extremely unlikely to open 60
-concurrent connections. If you ever see "too many connections" errors in
-the API's logs, that's the signal to make the one dashboard visit, copy
-the pooled string from **Settings → Database → Connection pooling**, and
-set it as the Vercel project's `DATABASE_URL` specifically (the orchestra
-keeps using the Direct one).
-
-## Step 3 — Tables create themselves (no SQL editor needed)
+## Step 2 — Tables create themselves (no SQL editor needed)
 
 `pyquant_state.py`'s `_bootstrap_postgres()` runs `CREATE TABLE IF NOT
 EXISTS` automatically, the first time *any* process calls any of its
@@ -98,7 +124,7 @@ fast-fail you want before restarting the orchestra). Run it again after
 the orchestra's first cycle — expect to see `pyquant_kv`,
 `pyquant_run_guard`, `pyquant_signals`, `pyquant_runs`.
 
-## Step 4 — Row Level Security: nothing to do, here's why
+## Step 3 — Row Level Security: nothing to do, here's why
 
 Supabase's dashboard will likely flag these new tables as "Unrestricted"
 the first time anyone looks at them in Table Editor — that warning is

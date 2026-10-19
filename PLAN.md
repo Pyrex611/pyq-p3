@@ -1,7 +1,8 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-19 (after the Binance fix round 2 + call-site
-audit; not yet pushed).
+**Last updated:** 2026-10-19 (live-run audit: Supabase IPv6 config bug
++ Kaggle dependency config bug found and fixed; CLAUDE.md/DOCS.md/
+SPEC.md condensed for token economy).
 
 This is the living, checklist-level tracker — update it in the same
 turn as any change that finishes an item, starts a new one, or makes a
@@ -41,21 +42,33 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [ ] **Switch `DATABASE_URL` to Supabase's Transaction pooler string**
+  (both the GitHub Actions secret and Vercel's env var) — the Direct
+  connection string is IPv6-only and GitHub Actions has no IPv6 egress;
+  confirmed live via a real run's "Network is unreachable" error on
+  every state-store call. **Config-only, no code/push needed** — see
+  `SUPABASE_SETUP.md`'s IPv6 incident note. Urgent: while broken,
+  run-guards fail open, so `daily_optimizer()` (meant to run once a day)
+  has been running on every 5-minute tick.
+- [x] **Fix the Kaggle-backtest 502** — `kaggle` was listed only in
+  `api/requirements.txt`, which Vercel's framework-preset deploy doesn't
+  read; added to `pyproject.toml`. Code-complete, not yet pushed.
 - [ ] **Push the pending zip** — UKF per-tick retraining fix, Kaggle
   backtest-from-UI integration, Binance geo-block fix (rounds 1 **and**
-  2), `BINANCE_GEOBLOCK.md`, this file + `INTENT.md`/`SPEC.md`. Blocked
-  on manual apply+push (Claude's GitHub App has no push access to
-  `Pyrex611/pyq-p3` — standing issue, see Decisions below).
-- [ ] **Confirm the Binance fix (round 2) actually resolves the live
-  outage** — round 1 alone did not (see Decisions, 2026-10-18); round 2
-  is verified by an isolated unit test and code review but not yet
-  against a real GitHub Actions run. Re-check the Actions run history
-  within a few ticks of the next push.
-- [ ] **Confirm the UKF per-tick retraining fix** the same way — also
-  not yet verified live (`filterpy` doesn't build in the dev sandbox).
+  2), the `pyproject.toml`/`api/requirements.txt`/`SUPABASE_SETUP.md`/
+  `VERCEL_DEPLOY.md` fixes, and all planning docs. Blocked on manual
+  apply+push (Claude's GitHub App has no push access — standing issue,
+  see Decisions below).
+- [ ] **Confirm both Binance fix rounds and the UKF fix actually resolve
+  the live outage** — verified by unit test/code review, not yet by a
+  live run with persistence also working (the Supabase outage above
+  means no live run so far has had working state-store access to fully
+  confirm the UKF fix's "no persisted state only on first run" claim).
+  Re-check Actions run history after both the DB and Kaggle-dep fixes
+  are pushed together.
 - [ ] **One-time Kaggle setup** (account token, kernel, dataset, secret
-  — `KAGGLE.md`) — not yet done on the Kaggle side; needed before
-  `POST /api/backtests` will actually work even after the zip is pushed.
+  — `KAGGLE.md`) — not yet done on the Kaggle side; needed in addition
+  to the dependency fix above before `POST /api/backtests` fully works.
 - [ ] **Decide the real-trading hosting split** — residential/home IP
   vs. any datacenter VPS, per the Binance geo-block finding (see
   Decisions, 2026-10-18). Not urgent while `SIGNAL_ONLY_MODE=true`, but
@@ -82,9 +95,21 @@ here before moving on, even if you also wrote it up elsewhere.
   via an actual walkforward comparison (this is the validation
   `SIGNAL_ONLY_MODE` was built to let the project proceed without
   waiting on).
+- [ ] Automate the Kaggle dataset refresh (currently manual — `KAGGLE.md`
+  Part I has 3 brainstormed options; leaning recommendation is adding a
+  `dataset_create_version()` call to `daily_optimizer()`, reusing data
+  it already downloads). Not yet designed in code-level detail.
 
 ## Done (newest first)
 
+- **2026-10-19** — Found (via live cron + Vercel logs) and fixed two
+  config bugs, neither requiring code changes to behave correctly once
+  applied: Supabase `DATABASE_URL` was the IPv6-only Direct connection
+  string (fix: `SUPABASE_SETUP.md` now specifies the Transaction pooler
+  string); `kaggle` dependency was only in `api/requirements.txt`, which
+  Vercel doesn't read (fix: added to `pyproject.toml`). Also condensed
+  `CLAUDE.md` (650→~240 lines) and tightened `DOCS.md`/`SPEC.md` for
+  token economy — no information removed, moved into cross-references.
 - **2026-10-19** — Binance fix round 2: `PositionGuard._detect_hedge_mode()`
   was the next crash after round 1 (a live run found it); fixed, audited
   every other Binance call site in both files, verified with an
@@ -106,6 +131,17 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Decisions
 
+- **2026-10-19** — Use Supabase's Transaction pooler connection string
+  (port 6543, IPv4) for `DATABASE_URL` everywhere — GitHub Actions and
+  Vercel are both now short-lived-invocation shapes (neither is the
+  long-running VPS process the old Direct-vs-pooled split assumed), so
+  one string suits both; no need to maintain two connection strings.
+- **2026-10-19** — A dependency used only by `api/index.py` must be
+  added to `pyproject.toml`'s `dependencies`, never only to
+  `api/requirements.txt` (which Vercel's framework-preset deploy does
+  not read) — `api/requirements.txt` is kept only as a human-readable
+  manifest and local-dev convenience; every package in it must also be
+  in `pyproject.toml` or it silently isn't installed.
 - **2026-10-19** — `_detect_hedge_mode()` checks `SIGNAL_ONLY_MODE`
   directly rather than `self.binance is None`, because a geo-blocked
   but non-`None` client object fails every real call just as fatally —

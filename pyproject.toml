@@ -15,6 +15,20 @@ dependencies = [
     # backend) — listed unconditionally so it's already installed whenever
     # DATABASE_URL does get set in the Vercel project's environment variables.
     "psycopg2-binary>=2.9.9",
+    # Kaggle backtest integration (KAGGLE.md) — POST /api/backtests uses
+    # this package's Python API (KaggleApi().kernels_push(...)) to trigger
+    # a kernel run. Found missing here 2026-10-19: it was added to
+    # api/requirements.txt instead, which this deployment's framework
+    # preset does NOT read (see this file's own header comment, and
+    # VERCEL_DEPLOY.md) — the exact same class of mistake that caused the
+    # original 404 this project already debugged once. The symptom was a
+    # 502 on every backtest attempt with "No outgoing requests" in the
+    # Vercel log: `from kaggle.api.kaggle_api_extended import KaggleApi`
+    # was raising ModuleNotFoundError before any Kaggle API call was ever
+    # attempted, caught by create_backtest()'s except block. Pure Python,
+    # no native deps, cheap to include even though only exercised when
+    # KAGGLE_USERNAME/KAGGLE_KEY are set.
+    "kaggle>=1.6.0",
 ]
 
 # This is what makes Vercel's Python framework preset find the app: without

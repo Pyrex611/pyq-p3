@@ -126,7 +126,7 @@ Set at minimum:
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | Your Supabase **direct connection** string (see `SUPABASE_SETUP.md`) |
+| `DATABASE_URL` | Your Supabase **Transaction pooler** string, port `6543` — **not** the Direct connection string, which is IPv6-only and breaks on hosts without IPv6 egress (GitHub Actions' runners among them). See `SUPABASE_SETUP.md`'s IPv6 incident note. |
 | `FRONTEND_ORIGIN` | `https://pyq-p3.vercel.app` (tightens CORS; `*` also works if you'd rather skip this) |
 | `PYQUANT_MODE` | `live` or `paper` — purely informational on this API; matches whatever your VPS orchestra process is actually running under |
 

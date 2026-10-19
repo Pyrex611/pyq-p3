@@ -198,3 +198,53 @@ pushes to this same kernel slug.
   (Kaggle API error, bad credentials), the queued row is marked
   "failed" immediately with that error — press the button again after
   fixing whatever Part G's troubleshooting step points to.
+
+## Part I — Brainstorm: refreshing the Kaggle dataset from the platform itself
+
+Raised 2026-10-19: can "No automatic dataset refresh" (Part H) be
+automated, rather than a manual CSV upload every time? Three options,
+roughly cheapest-to-build to most capable:
+
+1. **Add a dataset-refresh step to `daily_optimizer()`.** It already
+   does `data_download.py`'s full historical refresh once a day
+   (`btc_back366.csv`/`eth_back366.csv` get written fresh on whatever
+   host runs it — currently GitHub Actions). The Kaggle API's
+   `dataset_create_version()` call is the same shape as
+   `kernels_push()` (already used by `_push_kaggle_kernel()`) — point
+   it at a folder containing the two refreshed CSVs and a
+   `dataset-metadata.json` naming the existing dataset slug. This is a
+   small, contained addition: a new `_push_kaggle_dataset_version()`
+   helper near `_push_kaggle_kernel()` in `api/index.py`, OR directly in
+   `p4_orchestra.py`'s `daily_optimizer()` if the orchestra host should
+   own it instead (it already has the fresh CSVs on disk, avoiding a
+   round trip through the API). Needs `KAGGLE_USERNAME`/`KAGGLE_KEY` as
+   secrets wherever it runs — already a Vercel env var; would need
+   adding as a GitHub Actions secret too if done from the orchestra side.
+2. **Trigger it from the UI instead of automatically** — a "Refresh
+   Kaggle dataset" button next to "Run Backtest" on `backtest.html`,
+   calling a new `POST /api/kaggle-dataset/refresh` that does the same
+   `dataset_create_version()` call on demand, using whatever CSVs the
+   Vercel function has access to (which, per `SPEC.md`'s "no durable
+   filesystem" constraint, means it would need to re-download fresh data
+   itself via `data_download.py`'s logic first — more self-contained
+   than option 1, but duplicates the daily download the orchestra
+   already does).
+3. **Skip the Kaggle Dataset mechanism entirely** — have
+   `run_backtest.py` (the kernel itself) download fresh data directly
+   from Alpaca at the start of each run, the same way `data_download.py`
+   already does, instead of reading from an attached Dataset at all.
+   Removes Part E's one-time Dataset setup and the "stale until
+   manually refreshed" problem completely, at the cost of needing
+   Alpaca credentials available to the Kaggle kernel (a new Kaggle
+   Secret, `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` — a real scope increase
+   for a kernel that currently only needs `DATABASE_URL`) and adding
+   Alpaca API latency to every backtest run instead of just once a day.
+
+**Leaning recommendation if/when this gets built:** option 1, run from
+`daily_optimizer()` rather than the API — it reuses data already being
+downloaded for another reason, needs no new credential surface beyond
+one more Kaggle secret in the same place `SIGNAL_ONLY_MODE`/
+`PYQUANT_MODE` already live, and keeps the "Vercel never does heavy
+work" rule intact. Not yet designed in code-level detail or built —
+tracked as a backlog candidate in `PLAN.md` if the owner wants to pick
+it up.

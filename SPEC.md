@@ -101,7 +101,7 @@ exact names.
 | --- | --- | --- | --- |
 | Binance Futures API | Order placement, position/account reads | Geo-compliance block from cloud/datacenter IPs (see `BINANCE_GEOBLOCK.md`) — deterministic, not transient | Non-fatal under `SIGNAL_ONLY_MODE` (as of the round-2 fix); fatal (by design) otherwise |
 | Alpaca Market Data API | OHLCV bars for UKF training/stepping | Transient outages, rate limits | Caught per-call; a failure during UKF shell construction is now avoided entirely when persisted state exists (see `DOCS.md` Section 10) |
-| Supabase Postgres | Shared state store | Connection pool exhaustion, cold-start latency | `pyquant_state.py` falls back to a local SQLite file if `DATABASE_URL` is unset — **silently**, which is a known footgun (`/api/dashboard` can show empty data with no explanation) — always confirm `DATABASE_URL` is actually set before debugging "empty data" |
+| Supabase Postgres | Shared state store | (a) Falls back to local SQLite **silently** if `DATABASE_URL` is unset — confirm it's actually set before debugging "empty data." (b) `DATABASE_URL` must be the **Transaction pooler** string (port 6543, IPv4) — the Direct connection string is IPv6-only and breaks on any host without IPv6 egress (GitHub Actions among them); see `SUPABASE_SETUP.md`'s IPv6 incident note. (c) Connection pool exhaustion, cold-start latency. |
 | Kaggle API | On-demand backtest trigger | Push failure (bad credentials, slug mismatch) | `POST /api/backtests` marks the run `"failed"` immediately with the real error if the push itself fails |
 | GitHub Actions | Cron scheduling | 5-minute minimum granularity; requires a public repo for free minutes | Accepted constraint, not worked around |
 
