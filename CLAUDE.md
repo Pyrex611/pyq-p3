@@ -291,8 +291,42 @@ placement (paper or live, `SIGNAL_ONLY_MODE=false`) from a host on a
 residential/home IP instead of any datacenter VPS, since that's the one
 class of IP this kind of geo-block generally doesn't catch.
 
-**Status**: code written, `py_compile`-clean, **not yet pushed** — same
-GitHub App blocker, delivered as a zip alongside the UKF fix above.
+**Round 1 status**: pushed (you applied it manually). **A live run after
+that push surfaced an incomplete fix** — see the next item.
+
+### Binance fix round 2 — `PositionGuard` crashed one call site further down, now fixed
+A live GitHub Actions run after round 1 landed still crashed, just later
+in the chain: `PositionGuard.__init__()` (instantiated unconditionally
+at `pyq_p4.py` import time, same timing problem as before) calls
+`self._detect_hedge_mode()`, which assumed `self.binance` was always a
+*working* client. With `binance_client` now `None` or an unvalidated
+client (round 1's deliberate change), every hedge-mode-detection retry
+failed, and the function's own `raise ConnectionError(...)` crashed the
+process again — observed live as `'NoneType' object has no attribute
+'futures_get_position_mode'` repeated 4 times then a traceback.
+
+**Fix**: `_detect_hedge_mode()` now checks `SIGNAL_ONLY_MODE` directly
+(not "is `self.binance` `None`" — a geo-blocked but non-`None` client
+object fails identically, so that was the wrong test) and skips
+detection entirely when it's on, defaulting to one-way mode (never
+actually consulted, since no real order is placed in that mode) instead
+of retrying against a connection known not to work. A full audit of
+every other `binance_client`/`self.binance` call site was done alongside
+this fix, not just a reactive patch — see `BINANCE_GEOBLOCK.md`'s "Audit
+of every Binance call site" section for the complete list and why each
+one is already safe. One more spot fixed opportunistically:
+`hourly_task()`'s stale-open-order cancellation was non-fatal already
+but logged a pointless error every tick under `SIGNAL_ONLY_MODE` — now
+gated on `not SIGNAL_ONLY_MODE` too.
+
+**Verification**: an isolated unit test (4 cases, including
+reconstructing the exact live failure — a geo-blocked non-`None` client
+object — under `SIGNAL_ONLY_MODE`) confirms the short-circuit is taken
+correctly and the original crash-loud behavior is preserved when
+`SIGNAL_ONLY_MODE` is off. `py_compile`-clean on both files.
+
+**Status**: code written and verified, **not yet pushed** — same GitHub
+App blocker, delivered as a zip this round.
 
 ### Signal-only mode (`SIGNAL_ONLY_MODE`) — built this session, NOT yet pushed
 Added to satisfy the explicit ask: "the platform needs to at least be
@@ -544,6 +578,20 @@ fallbacks if/when this is attempted.
 ## 8. Document map
 
 - **`CLAUDE.md`** (this file) — start here in a new session.
+- **`INTENT.md`** — the *why*: the problem this project solves, who
+  it's for, what "done" looks like, explicit non-goals, and risk
+  posture. Changes rarely — only when the actual intent changes, not
+  with every feature.
+- **`SPEC.md`** — the *what*, as a structured current-state reference:
+  components, execution tiers, task schedule, the API's trust boundary,
+  data model, configuration, external dependencies and their failure
+  modes, non-functional requirements, known gaps. Check this before
+  changing an interface to confirm what's actually guaranteed today.
+- **`PLAN.md`** — the *when*: a checklist-level roadmap (phase status,
+  active items, backlog, done-log, decision-log). Update this in the
+  same turn as any change that finishes an item, starts one, or makes a
+  decision worth remembering — it's the file most likely to go stale if
+  not touched every session.
 - **`DOCS.md`** — architecture/code reference: the three execution
   tiers, the signal-math unification, externalized state, resilience,
   capital-base fixes, Phase 2's feature list, what's explicitly not
@@ -586,13 +634,17 @@ than it relies on any other single thing in this repo.
 ## 10. Resuming in a new session — quick checklist
 
 1. Read this file fully before touching code.
-2. Check `git log --oneline -5` and `git status` — confirm what's
+2. Read `PLAN.md`'s "Active" section — it's the fastest answer to "what
+   was I in the middle of," more current than this file's Section 5 can
+   stay turn-to-turn.
+3. Check `git log --oneline -5` and `git status` — confirm what's
    actually committed vs. still local-only (the GitHub push blocker in
    Section 5 means local and `origin/main` can genuinely diverge).
-3. Check Section 5 for current deployment status before assuming
+4. Check Section 5 for current deployment status before assuming
    anything is live — "code complete" and "deployed" are tracked
    separately throughout this file on purpose.
-4. Pick up the top unchecked item in Section 5 ("Not yet done") before
-   starting new Phase 3 feature work, unless the person explicitly
-   redirects — the VPS deployment is the current blocker for the
-   already-built UI actually showing real data.
+5. Pick up the top item in `PLAN.md`'s "Active" list before starting new
+   feature work, unless the person explicitly redirects.
+6. If a design decision feels ambiguous, check `INTENT.md` (is this in
+   scope at all?) and `SPEC.md` (what's actually guaranteed today?)
+   before guessing.

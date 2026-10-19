@@ -108,6 +108,20 @@ else:
 _binance_lock = threading.Lock()
 
 
+def _signal_only_mode_enabled() -> bool:
+    """
+    Shared SIGNAL_ONLY_MODE check, read directly from the environment
+    rather than imported from pyq_p4.py — this module doesn't otherwise
+    depend on pyq_p4.py and shouldn't start now just for one flag.
+    Every Binance-related startup path that needs to behave differently
+    under signal-only mode (client construction, hedge-mode detection,
+    and anywhere else this turns up — see BINANCE_GEOBLOCK.md) should
+    call this instead of re-deriving the check inline, so there's one
+    place to fix if the env var name or truthy-value set ever changes.
+    """
+    return os.environ.get("SIGNAL_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes")
+
+
 def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Optional[Client]:
     """
     GitHub Actions cron migration, follow-up fix: Binance's compliance
@@ -124,8 +138,23 @@ def _create_binance_client(max_retries: int = 5, retry_delay: int = 5) -> Option
     forward; this function's job is narrower: don't let that block take
     down SIGNAL_ONLY_MODE, which makes no exchange calls that need a
     working connection in the first place.
+
+    NOTE: this function returning a non-crashing result (a Client object
+    or None) is necessary but not sufficient — see PositionGuard's
+    _detect_hedge_mode() below, which was the next thing to crash the
+    process after this fix shipped, because it assumed self.binance was
+    always a *working* client rather than possibly None or an
+    unvalidated/geo-blocked one. Any other Binance call site that runs
+    unconditionally at import time (i.e. before cron_runner.py's own
+    per-task try/except gets a chance to catch anything) needs the same
+    "check _signal_only_mode_enabled() before trusting this client"
+    treatment — call sites inside task functions are already safe,
+    either because they're wrapped in their own try/except (most of
+    PositionGuard's methods, check_open_position(), get_equities()) or
+    because they're simply never reached in signal-only mode
+    (signal_executor(), start_guard_for_order()).
     """
-    signal_only_mode = os.environ.get("SIGNAL_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes")
+    signal_only_mode = _signal_only_mode_enabled()
     last_err = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -727,6 +756,41 @@ class PositionGuard:
             pass  # best-effort only; the state-store write above is authoritative
 
     def _detect_hedge_mode(self, max_retries: int = 5, retry_delay: int = 3) -> bool:
+        # Found live, 2026-10-18: _create_binance_client() (p4_utils.py,
+        # see its docstring) stops SIGNAL_ONLY_MODE from crashing the
+        # process when Binance is geo-blocked — but it can only control
+        # what IT returns (None, or an unvalidated Client whose every
+        # real call still gets geo-blocked). It can't control what every
+        # OTHER caller assumes about that return value. This constructor
+        # (PositionGuard.__init__) runs unconditionally at pyq_p4.py's
+        # import time, before cron_runner.py's own per-task try/except
+        # ever gets a chance to catch anything — so this was the very
+        # next thing to crash the whole process after that fix shipped:
+        # self.binance.futures_get_position_mode() either raised
+        # AttributeError (binance is None) or the same geo-block
+        # APIError (binance is a real but unvalidated Client), retried 5
+        # times, then raised ConnectionError here, same fatal outcome.
+        #
+        # Checking SIGNAL_ONLY_MODE directly (not "is self.binance
+        # None") is deliberate: a geo-blocked but non-None Client object
+        # would still fail every real call below just as fatally, so
+        # "is it None" is the wrong test — "do we even need a correct
+        # answer" is the right one. Hedge/one-way mode only matters for
+        # the positionSide param on a REAL bracket order
+        # (_place_bracket_order()/_place_bracket_order_fallback()) — in
+        # signal-only mode no order of any kind is ever placed, so the
+        # true mode is simply never consulted, and defaulting to ONE-WAY
+        # (the common default on a fresh Binance account) is safe.
+        if _signal_only_mode_enabled():
+            logger.info(
+                "[PositionGuard] SIGNAL_ONLY_MODE is on — skipping hedge-mode "
+                "detection entirely rather than retrying against a binance_client "
+                "that's possibly None or geo-blocked (see BINANCE_GEOBLOCK.md). "
+                "Defaulting to ONE-WAY; this value is never actually used in this "
+                "mode since no real order is ever placed."
+            )
+            return False
+
         last_err = None
         for attempt in range(1, max_retries + 1):
             try:

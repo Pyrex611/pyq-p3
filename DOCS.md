@@ -441,11 +441,9 @@ this one flag). Behavior after all retries are exhausted:
   exchange connection in that case is a correctness/safety issue, not
   just a reliability one, so the original fail-loud behavior is kept.
 
-**Verification.** `py_compile`-clean. Not verified against a live
-GitHub Actions run yet (same standing push-access blocker as the rest of
-this delivery — see `CLAUDE.md` Section 5) — worth specifically
-re-checking the Actions run history after this ships, same as the UKF
-fix in Section 10.
+**Verification (round 1, superseded).** `py_compile`-clean, not verified
+against a live run at the time. **It was pushed, and a live run then
+found it incomplete** — see Section 13.
 
 **What this does not fix.** This makes the signal-only pipeline survive
 Binance being unreachable; it does not make Binance reachable. Real
@@ -453,3 +451,83 @@ order placement (paper or live) from GitHub Actions, or from most
 free-tier cloud/VPS hosts, is still expected to hit the same geo-block —
 see `BINANCE_GEOBLOCK.md` for the recommended split (signal-only on
 GitHub Actions, real trading from a residential/home IP).
+
+## 13. Binance geo-block, round 2: `PositionGuard._detect_hedge_mode()` crashed the process the same way
+
+**How it was found.** Section 12's fix was pushed and ran live. The
+resulting GitHub Actions log showed the process still crashing — just
+one call site later: `PositionGuard.__init__()` (instantiated
+unconditionally at `pyq_p4.py` import time, same timing problem as
+Section 12) calls `self._detect_hedge_mode()`, which retried 5 times
+against `self.binance.futures_get_position_mode()` — raising
+`AttributeError` each time (`binance_client` was `None`, per round 1's
+`SIGNAL_ONLY_MODE` fallback) — then raised its own `ConnectionError`,
+uncaught, same fatal outcome as before.
+
+**Root cause.** Round 1 only changed what `_create_binance_client()`
+itself returns. It did not audit whether every *other* piece of code
+that uses that return value could tolerate it being `None` or an
+unvalidated/geo-blocked `Client` object instead of a working one.
+`_detect_hedge_mode()` was the first such caller that both (a) runs
+unconditionally at import time (before `cron_runner.py`'s own per-task
+try/except can catch anything) and (b) has no fallback of its own for a
+non-functional `self.binance`.
+
+**The fix.** `_detect_hedge_mode()` now checks `SIGNAL_ONLY_MODE`
+directly, before attempting anything — deliberately not "is
+`self.binance` `None`", because a geo-blocked but non-`None` `Client`
+object (the other branch round 1 can produce) fails every real call
+just as fatally, so that would have been the wrong test. The right test
+is "do we even need a correct answer": hedge/one-way mode only affects
+the `positionSide` param on a *real* bracket order
+(`_place_bracket_order()`/`_place_bracket_order_fallback()`), and no
+order of any kind is ever placed in signal-only mode — so when
+`SIGNAL_ONLY_MODE` is on, the function now skips detection entirely,
+logs a diagnostic, and returns `False` (one-way, the common default;
+never actually consulted in this mode). When it's off, the original
+retry-then-raise behavior is unchanged — real trading still needs a
+confirmed, correct hedge-mode value, and silently guessing would be a
+correctness risk, not just a reliability one.
+
+**Full call-site audit (done alongside this fix, not just a reactive
+patch of the one that crashed).** Every `binance_client`/`self.binance`
+reference in `p4_utils.py` and `pyq_p4.py` was checked against: does it
+run unconditionally at import time, and if so, is it actually reached
+under `SIGNAL_ONLY_MODE`?
+- `PositionGuard`'s other Binance-calling methods (`check_all_orders_and_positions()`,
+  `_check_and_place_bracket()`, `_place_bracket_order()`,
+  `_place_bracket_order_fallback()`, `_check_bracket_fills()`,
+  `_cancel_sibling_algo_order()`) — already wrapped in their own
+  try/except, and `check_all_orders_and_positions()` no-ops immediately
+  when `monitored_orders`/`monitored_positions`/`_bracket_orders` are
+  all empty, which they always are in signal-only mode (nothing ever
+  populates them, since `start_guard_for_order()` is skipped in favor of
+  `simulate_signal_entry()`). Already safe.
+- `check_open_position()`, `get_equities()` — already wrapped with a
+  graceful zero/default fallback. Already safe.
+- `signal_executor()`, `start_guard_for_order()` — never called at all
+  under `SIGNAL_ONLY_MODE`. Not a risk.
+- `hourly_task()`'s stale-open-order cancellation
+  (`futures_get_open_orders()`/`futures_cancel_all_open_orders()`) — was
+  already non-fatal, but ran and logged a spurious error every tick for
+  no reason under `SIGNAL_ONLY_MODE`. Fixed opportunistically: now
+  gated on `not TEST_MODE and not SIGNAL_ONLY_MODE`.
+- `PositionGuard.__init__`'s `_detect_hedge_mode()` call — the one
+  actually crashing the process. Fixed as described above.
+
+Nothing else in either file touches a Binance client unconditionally at
+import time.
+
+**Verification.** `py_compile`-clean on both files. Additionally, an
+isolated unit test (run in this sandbox, `python-binance` installed
+specifically for this) exercised the new logic directly in 4 cases:
+`SIGNAL_ONLY_MODE` on with `binance=None`; `SIGNAL_ONLY_MODE` on with a
+client object that raises a geo-block error on every call (reconstructing
+the exact live failure precisely, not just the `None` case); `SIGNAL_ONLY_MODE`
+off with `binance=None` (confirms the crash-loud behavior is preserved);
+`SIGNAL_ONLY_MODE` off with a working client (confirms the real
+detection path is unaffected). All 4 passed. Not yet verified against an
+actual live GitHub Actions run — same standing push-access blocker; this
+is the second time a fix in this area needed a live run to surface what
+code review alone missed, so specifically re-checking the Actions run
+history after this ships is worth doing before considering this area closed.

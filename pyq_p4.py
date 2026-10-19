@@ -1116,7 +1116,12 @@ def hourly_task():
                 logger.error(f"Error getting balance: {e}")
                 time.sleep(2)
 
-        if not TEST_MODE:
+        # SIGNAL_ONLY_MODE never places an order, so there's never a stale
+        # one to cancel here — skip rather than let this throw every tick
+        # against a binance_client that may be None/geo-blocked (this was
+        # already non-fatal, since it's wrapped below, but was logging a
+        # spurious error every single hourly tick for no reason).
+        if not TEST_MODE and not SIGNAL_ONLY_MODE:
             try:
                 open_orders         = binance_client.futures_get_open_orders()
                 symbols_with_orders = {o["symbol"] for o in open_orders}
