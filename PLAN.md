@@ -45,6 +45,44 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [ ] **Backtest POST still 502s after the Kaggle one-time setup +
+  pyproject.toml fix were both confirmed deployed (origin/main has them;
+  Vercel got a fresh deployment ID).** The real cause is currently
+  unknown because the frontend was silently discarding the API's actual
+  error `detail` on any non-2xx response — fixed 2026-10-20
+  (`web/assets/app.js`'s `apiGet`/`apiPost` now surface it; added a
+  catch-all FastAPI exception handler in `api/index.py` so even a raw,
+  unhandled crash returns `{"detail": ..., "trace": ...}` instead of an
+  empty 502 body). **Next step is simply to retry the backtest button and
+  read the now-detailed error message** — no further guessing until that
+  text is in hand.
+- [ ] **Suspected (not yet confirmed) second DB-config issue: Vercel's own
+  `DATABASE_URL` may not match the GitHub Actions secret.** Evidence: a
+  direct `GET /api/runs` (no filter) on the live deployment returned
+  `{"runs":[]}` — completely empty, not just the daily-optimizer type —
+  while the engine side's cron log shows `daily_optimizer()` believing
+  it already ran today. `pyquant_state.py`'s `get_json()`/`list_runs()`/
+  `is_trading_enabled()` all silently swallow a DB error and return a
+  safe-looking default (confirmed by reading the code: `is_trading_enabled()`
+  defaults to `True` on **any** failure, which is why `/api/dashboard`
+  showing `"trading_enabled": true` is NOT proof the DB read actually
+  succeeded) — so "everything empty" and "DB totally unreachable from
+  Vercel" look identical from the API's responses alone, and can't be
+  told apart without actually reading the real exception. The GitHub
+  Actions secret and Vercel's own environment variable are two
+  *independent* places `DATABASE_URL` is set — it's easy to have updated
+  one and not the other, or for one to have a stale value. Action:
+  compare them character-for-character in the Vercel dashboard and the
+  GitHub repo secret; once the error-detail fix above is deployed, a
+  failing DB call directed through `/api/heartbeat` or `/api/dashboard`
+  should also become loud (anything calling `_pg_conn()` for the first
+  time on a bad connection string raises, which the engine's own
+  try/except still swallows per standing rule, but the API's new
+  catch-all handler won't hide if it surfaces from a route that doesn't
+  already catch it itself — most routes here DO catch via `get_json()`'s
+  own try/except, so this specific suspicion still needs a direct check
+  of the two secrets, not just better error text).
+
 - [x] **Switch `DATABASE_URL` to Supabase's Transaction pooler string** —
   confirmed fixed via the 2026-10-19 22:55 UTC live cron log: no
   "Network is unreachable" errors, UKF state restored 18/18 models, and

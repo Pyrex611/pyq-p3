@@ -14,6 +14,28 @@
  */
 const API_BASE = window.PYQUANT_API_BASE || "/api";
 
+/* Found during the 2026-10-20 "502 with no further detail" investigation:
+ * both of these used to throw away the response body on a non-2xx status,
+ * so the UI only ever showed a bare status code (e.g. "POST /backtests
+ * failed: 502") even though the API's HTTPException almost always carries
+ * a real, useful `detail` string explaining exactly what went wrong. This
+ * helper reads that body (JSON `detail`/`error`, falling back to raw
+ * text) and folds it into the thrown Error's message so every caller gets
+ * it for free. */
+async function _errorDetail(res) {
+  try {
+    const text = await res.text();
+    try {
+      const j = JSON.parse(text);
+      return j.detail || j.error || text;
+    } catch {
+      return text;
+    }
+  } catch {
+    return null;
+  }
+}
+
 async function apiGet(path, params) {
   const url = new URL(API_BASE + path, window.location.origin);
   if (params) {
@@ -22,7 +44,10 @@ async function apiGet(path, params) {
     });
   }
   const res = await fetch(url.toString());
-  if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    const detail = await _errorDetail(res);
+    throw new Error(`GET ${path} failed: ${res.status}${detail ? ` — ${detail}` : ""}`);
+  }
   return res.json();
 }
 
@@ -32,7 +57,10 @@ async function apiPost(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
-  if (!res.ok) throw new Error(`POST ${path} failed: ${res.status}`);
+  if (!res.ok) {
+    const detail = await _errorDetail(res);
+    throw new Error(`POST ${path} failed: ${res.status}${detail ? ` — ${detail}` : ""}`);
+  }
   return res.json();
 }
 

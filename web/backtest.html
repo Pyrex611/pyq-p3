@@ -64,7 +64,12 @@
           <tbody></tbody>
         </table>
         <div class="empty-state" id="empty-opt" style="display:none;">
-          No optimizer runs logged yet — these are recorded automatically by p4_orchestra.py's daily 00:03 job.
+          No optimizer runs logged yet — <code class="mono">daily_optimizer()</code> is triggered once a
+          day by the GitHub Actions cron tick (whichever ~5-minute tick first reaches a new UTC day;
+          not a fixed 00:03 anymore under the current hosting — see SPEC.md Section 3), and only a
+          <em>completed</em> run is recorded here. If the Live Monitor page's Engine Heartbeat shows the
+          cron job ticking but this stays empty past a full day, check the GitHub Actions run history for
+          errors inside <code class="mono">daily_optimizer()</code> itself.
         </div>
       </div>
     </div>

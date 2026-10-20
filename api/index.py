@@ -52,8 +52,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+import traceback
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -81,6 +84,30 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+# Found during the 2026-10-20 "502 on /api/backtests with no detail"
+# investigation: an uncaught exception that reaches ASGI's own default
+# error handling returns an EMPTY body (not a JSON {"detail": ...}),
+# which is what made that 502 undiagnosable from the frontend AND from a
+# plain GET of the endpoint — there was nothing to read. This repo's own
+# `HTTPException(...)` raises (e.g. create_backtest()'s 502/503) already
+# carry a real `detail` string and are unaffected by this handler (FastAPI
+# routes HTTPException to its own handler first); this one only catches
+# whatever still escapes uncaught, and turns it into the same shape
+# (`{"detail": "..."}`) instead of a silent crash. Safe to expose here:
+# this API never holds exchange credentials (Section 4 of SPEC.md), so a
+# stack trace from it can't leak a secret the way one from the engine
+# could.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"{type(exc).__name__}: {exc}",
+            "trace": traceback.format_exc(),
+        },
+    )
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────
