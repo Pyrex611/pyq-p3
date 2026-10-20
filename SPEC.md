@@ -20,7 +20,7 @@ stale in the same change that caused the drift, and say so in `PLAN.md`.
 | Validated backtest | `walkforward.py` | Simulated strategy validation against historical CSVs, no capital | No |
 | State store | `pyquant_state.py` | SQLite (local) / Postgres (`DATABASE_URL` set) dual backend: run guards, PositionGuard state, signals, runs | No |
 | Resilience | `pyquant_resilience.py` | Retry/backoff + duplicate-order guards for Binance Algo Order calls | No (wraps calls made by the engine) |
-| API | `api/index.py` (FastAPI, deployed to Vercel) | Read layer over the state store + one off-switch write | **No, by design — see Section 4** |
+| API | `api/index.py` (FastAPI, deployed to Vercel) | Read layer over the state store + one off-switch write; `GET /api/heartbeat` (added 2026-10-20) surfaces `cron_runner.py`'s per-tick heartbeat and `pyq_p4.py`'s per-symbol signal diagnostics so the UI can distinguish "quiet but alive" from "not running" | **No, by design — see Section 4** |
 | Frontend | `web/*.html` + `web/assets/` | Dashboard, Live Monitor, Signals, Backtest, Settings | No |
 | Backtest-on-demand | `kaggle_backtest/run_backtest.py` + `kernel-metadata.json` | Runs `walkforward.py` on Kaggle, triggered by the API | No (only `DATABASE_URL`, via a Kaggle Secret) |
 
@@ -70,7 +70,7 @@ without re-reading `CLAUDE.md` Section 7's standing rule on this first.
 
 | Table/key | Backend | Written by | Read by | Purpose |
 | --- | --- | --- | --- | --- |
-| `pyquant_kv` | SQLite/Postgres | Engine | Engine, API | Generic key-value (UKF filter state, tracker/flag globals, PositionGuard's monitored orders) |
+| `pyquant_kv` | SQLite/Postgres | Engine | Engine, API | Generic key-value (UKF filter state, tracker/flag globals, PositionGuard's monitored orders, `pyq_p4_cron_heartbeat`, `pyq_p4_signal_diagnostics` — see Section 1's API row) |
 | `pyquant_run_guard` | SQLite/Postgres | Engine (`try_claim_run()`) | Engine | Per-task-per-bucket claim, prevents double-running a task within its own period |
 | `pyquant_signals` | SQLite/Postgres | Engine (`log_signal()`, `update_signal_outcome()`) | API (`/api/signals`) | Every signal generated (real or simulated), with outcome tracking |
 | `pyquant_runs` | SQLite/Postgres | Engine (`record_run()`), API (`request_backtest()`, `update_run_status()`), Kaggle kernel | API (`/api/runs`) | Backtest/optimizer run history, with a `queued → running → completed/failed` lifecycle (columns: `status`, `kaggle_ref`, `error`) |

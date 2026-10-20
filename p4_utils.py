@@ -541,6 +541,10 @@ class SignalGenerator:
         self.stake     = 0.9985
         self.pct_diff  = None
         self.trend     = None
+        # Diagnostics only (never affects which signals fire) — see
+        # generate_signal()'s docstring note and DOCS.md's
+        # "signal-visibility" entry.
+        self.last_diagnostic = {}
 
     @staticmethod
     def load_params() -> dict:
@@ -611,8 +615,23 @@ class SignalGenerator:
 
     def generate_signal(self, price, pred, high_pred, low_pred, symbol, leverage, bal,
                         atr=0.0, atr_mult=None):
+        """NOTE (diagnostics): regardless of whether a signal fires, this
+        method always populates self.last_diagnostic with the intermediate
+        numbers that decided the outcome (trend, pct_diff/vol vs. their
+        thresholds, the entry-direction "strict" gate and how far price was
+        from clearing it). This is read by pyq_p4.py's hourly_task() and
+        persisted to the state store so the UI can show *why* no signal
+        fired (and how close it came) instead of showing nothing at all —
+        see DOCS.md's "signal-visibility" entry. It never changes which
+        signals fire; it only records what was already computed."""
         price, pred = float(price), float(pred)
         high_pred, low_pred = float(high_pred), float(low_pred)
+
+        self.last_diagnostic = {
+            "symbol": symbol, "price": price, "pred": pred,
+            "high_pred": high_pred, "low_pred": low_pred,
+            "trend": None, "stage_reached": "flat", "signal_fired": False,
+        }
 
         self.signal = None; self.trend = None
         if pred > price:
@@ -624,22 +643,38 @@ class SignalGenerator:
             pct_diff = abs(1 - price / pred)
             vol = abs(1 - pred / low_pred) if low_pred > 0 else 0
         else:
+            self.last_diagnostic["stage_reached"] = "flat_pred_eq_price"
             return None
 
+        self.last_diagnostic["trend"] = trend
         self.pct_diff = float(pct_diff)
         params = self.load_params()
         try:
             sp = self._get_symbol_params(symbol, params)
         except ValueError:
+            self.last_diagnostic["stage_reached"] = "unknown_symbol"
             return None
 
         self.sig_vol = (pct_diff <= sp["pct_diff_and_vol_strict"]) or (vol >= sp["pct_diff_and_vol_strict"])
+        self.last_diagnostic.update({
+            "stage_reached": "vol_gate", "pct_diff": float(pct_diff), "vol": float(vol),
+            "vol_gate_threshold": sp["pct_diff_and_vol_strict"], "vol_gate_passed": bool(self.sig_vol),
+            "strict_threshold": sp["strict"],
+        })
         if not self.sig_vol:
             return None
 
         r = sp["rounds"]
         if trend == "up":
             buy_price = low_pred
+            strict_diff = abs(1 - pred / buy_price) if buy_price > 0 else None
+            self.last_diagnostic.update({
+                "stage_reached": "strict_gate", "buy_price": buy_price, "strict_diff": strict_diff,
+                "strict_gate_passed": bool(
+                    buy_price > 0 and pred > buy_price and strict_diff is not None
+                    and strict_diff >= sp["strict"]
+                ),
+            })
             if buy_price <= 0 or not (pred > buy_price and abs(1 - pred / buy_price) >= sp["strict"]):
                 return None
             entry = round(price if price < buy_price else buy_price, r)
@@ -663,10 +698,20 @@ class SignalGenerator:
             self.sig_gened = True
             self.signal = sig
             self.signals.append(sig)
+            self.last_diagnostic["stage_reached"] = "signal_fired"
+            self.last_diagnostic["signal_fired"] = True
             return sig
 
         elif trend == "down":
             sell_price = high_pred
+            strict_diff = abs(1 - sell_price / pred) if (sell_price > 0 and pred != 0) else None
+            self.last_diagnostic.update({
+                "stage_reached": "strict_gate", "sell_price": sell_price, "strict_diff": strict_diff,
+                "strict_gate_passed": bool(
+                    sell_price > 0 and sell_price > pred and strict_diff is not None
+                    and strict_diff >= sp["strict"]
+                ),
+            })
             if sell_price <= 0 or not (sell_price > pred and abs(1 - sell_price / pred) >= sp["strict"]):
                 return None
             entry = round(price if price > sell_price else sell_price, r)
@@ -687,6 +732,8 @@ class SignalGenerator:
             self.sig_gened = True
             self.signal = sig
             self.signals.append(sig)
+            self.last_diagnostic["stage_reached"] = "signal_fired"
+            self.last_diagnostic["signal_fired"] = True
             return sig
 
         return None

@@ -28,6 +28,36 @@
   </nav>
   <main>
     <div id="banner-slot"></div>
+    <div class="card" id="heartbeat-card" style="margin-bottom:16px;">
+      <h3>Engine Heartbeat</h3>
+      <div class="stat-label" id="heartbeat-text">Checking…</div>
+    </div>
+    <div class="card" style="margin-bottom:16px;">
+      <h3>Signal Diagnostics (last hourly tick, each symbol)</h3>
+      <table id="tbl-diag">
+        <thead>
+          <tr>
+            <th>Symbol</th><th>Trend</th><th>Price</th><th>Predicted</th>
+            <th>% Move</th><th>Vol Gate</th><th>Entry Gate</th><th>Fired?</th><th>As of</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty-state" id="empty-diag" style="display:none;">
+        No diagnostic recorded yet — either the engine hasn't ticked since
+        this panel was added, or hourly_task() hasn't run yet. Check the
+        Engine Heartbeat above and the GitHub Actions run history.
+      </div>
+      <div class="hint" style="margin-top:8px;font-size:12px;color:var(--text-faint);">
+        "Vol Gate" and "Entry Gate" show the raw comparison the strategy
+        makes every hour, whether or not it clears — a quiet stretch with
+        both gates consistently missing by a small margin is the strategy
+        correctly waiting for a bigger move, not a stuck/disconnected
+        engine. Mechanics are identical to the validated walkforward.py
+        backtest (see SPEC.md/DOCS.md) — nothing here is a reduced or
+        temporary version of the real signal logic.
+      </div>
+    </div>
     <div class="card">
       <h3>Currently Open Positions</h3>
       <table id="tbl-live">
@@ -48,6 +78,61 @@
 </div>
 <script src="./assets/app.js"></script>
 <script>
+function fmtPct(v) {
+  if (v === null || v === undefined) return "—";
+  return (Number(v) * 100).toFixed(3) + "%";
+}
+
+async function loadHeartbeat() {
+  const hbText = document.getElementById("heartbeat-text");
+  const diagBody = document.querySelector("#tbl-diag tbody");
+  try {
+    const h = await apiGet("/heartbeat");
+    const age = h.cron_age_seconds;
+    if (age === null || age === undefined) {
+      hbText.innerHTML = `<span style="color:var(--text-faint);">No cron tick recorded yet — either the engine hasn't run since this was added, or it isn't running. Check the GitHub Actions run history.</span>`;
+    } else {
+      const mins = Math.floor(age / 60);
+      hbText.innerHTML = age < 360
+        ? `<span style="color:#3ddc84;">● Live</span> — last tick ${mins < 1 ? 'under a minute' : mins + ' min'} ago`
+        : age < 900
+          ? `<span style="color:#f5a623;">● Stale</span> — last tick ${mins} min ago (expected every ~5 min)`
+          : `<span style="color:#e5484d;">● Not reporting</span> — last tick ${mins} min ago. Check the GitHub Actions run history.`;
+    }
+
+    const diag = h.signal_diagnostics || {};
+    const symbols = Object.keys(diag);
+    if (symbols.length === 0) {
+      document.getElementById("empty-diag").style.display = "block";
+    } else {
+      diagBody.innerHTML = symbols.map(sym => {
+        const dg = diag[sym];
+        const volGate = dg.vol_gate_passed === undefined ? "—"
+          : (dg.vol_gate_passed ? `<span style="color:#3ddc84;">pass</span>` : `<span style="color:#f5a623;">miss</span>`)
+            + ` (${fmtPct(dg.pct_diff)} / ${fmtPct(dg.vol)} vs ${fmtPct(dg.vol_gate_threshold)})`;
+        const entryGate = dg.strict_gate_passed === undefined ? "—"
+          : (dg.strict_gate_passed ? `<span style="color:#3ddc84;">pass</span>` : `<span style="color:#f5a623;">miss</span>`)
+            + ` (${fmtPct(dg.strict_diff)} vs ${fmtPct(dg.strict_threshold)})`;
+        return `
+        <tr>
+          <td class="mono">${sym}</td>
+          <td>${dg.trend ?? "flat"}</td>
+          <td class="mono">${fmtPrice(dg.price)}</td>
+          <td class="mono">${fmtPrice(dg.pred)}</td>
+          <td class="mono">${dg.pct_diff !== undefined ? fmtPct(dg.pct_diff) : "—"}</td>
+          <td>${volGate}</td>
+          <td>${entryGate}</td>
+          <td>${dg.signal_fired ? "YES" : (dg.stage_reached === "exception" ? `error: ${dg.error ?? ''}` : "no")}</td>
+          <td>${fmtTime(dg.ts)}</td>
+        </tr>`;
+      }).join("");
+    }
+  } catch (e) {
+    hbText.innerHTML = `<span style="color:#e5484d;">Could not reach the API (${e.message}).</span>`;
+  }
+}
+loadHeartbeat();
+
 async function loadLive() {
   const bannerSlot = document.getElementById("banner-slot");
   try {

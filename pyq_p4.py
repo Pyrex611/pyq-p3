@@ -277,6 +277,37 @@ def _persist_ukf_state():
 
 _restore_ukf_state()
 
+# ── Signal-visibility diagnostics ─────────────────────────────────────────────
+# Found during the 2026-10-19/20 "no signal logged in hours, UI shows no
+# evidence of the engine being connected" audit: the signal math itself
+# matches walkforward.py exactly (Phase 0 unification), so a quiet stretch
+# with zero fired signals is expected strategy behavior, NOT a bug — but
+# there was previously no way to tell that apart from the engine simply not
+# running, because nothing was persisted on an hour where no signal fired.
+# This key stores, per symbol, the full chain of numbers that decided the
+# last hourly_task() tick's outcome (trend, pct_diff/vol vs. their
+# thresholds, the entry "strict" gate and how close price came to clearing
+# it) regardless of whether a signal actually fired. It never changes which
+# signals fire — see SignalGenerator.generate_signal()'s docstring note in
+# p4_utils.py. Exposed via GET /api/heartbeat (api/index.py) and shown on
+# the Live Monitor page (web/live-monitor.html).
+_SIGNAL_DIAG_KEY = "pyq_p4_signal_diagnostics"
+
+
+def _persist_signal_diagnostic(symbol: str, diag: dict) -> None:
+    """Best-effort merge of this symbol's latest signal-generation
+    diagnostic into the shared state store, keyed by symbol. A failure here
+    never affects trading logic — it only means the UI's diagnostic panel
+    is stale until the next successful tick."""
+    try:
+        existing = state_store.get_json(_SIGNAL_DIAG_KEY) or {}
+        entry = dict(diag)
+        entry["ts"] = datetime.now(timezone.utc).isoformat()
+        existing[symbol] = entry
+        state_store.set_json(_SIGNAL_DIAG_KEY, existing)
+    except Exception as e:
+        logger.warning(f"Signal diagnostic persist failed (non-fatal): {e}")
+
 # ── Signal Generator & PositionGuard ──────────────────────────────────────────
 signal_generator = SignalGenerator()
 
@@ -1181,6 +1212,16 @@ def hourly_task():
     logger.info("Starting Hourly Signal Services")
     try:
         for symbol in symbols_list:
+            # Reset per iteration — found during the 2026-10-19/20
+            # signal-visibility audit: this was previously left unset
+            # across loop iterations, so if generate_signal() raised (or
+            # was skipped via `continue` above) for one symbol right after
+            # succeeding for the other, the stale `my_signal` object from
+            # the first symbol could leak into the second symbol's
+            # `if my_signal:` check below and get misattributed to the
+            # wrong symbol's trade. Latent bug, not yet observed live, but
+            # fixed proactively while this code path was already open.
+            my_signal = None
             trade_symbol = "BTCUSDT" if symbol in ("BTC/USD", "BTCUSDT") else "ETHUSDT"
             ukf_data = ukf_mapping.get(symbol)
 
@@ -1240,10 +1281,13 @@ def hourly_task():
                         price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance,
                         atr=atr_val, atr_mult=atr_mult
                     )
+                    _persist_signal_diagnostic(symbol, signal_generator.last_diagnostic)
                 except Exception as e:
                     print(f"Signal generation error for {symbol}: {e}")
+                    _persist_signal_diagnostic(symbol, {"stage_reached": "exception", "error": str(e)})
             else:
                 print(f"Warning: no UKF data for {symbol}")
+                _persist_signal_diagnostic(symbol, {"stage_reached": "no_ukf_data"})
 
             if my_signal:
                 logger.info(f"{symbol} signal: {my_signal}")

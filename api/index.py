@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -169,6 +170,39 @@ def get_signals(
 def get_open_signals():
     """Shorthand for the Live Monitor screen's "currently open" table."""
     return {"signals": state_store.list_signals(status="open", limit=50)}
+
+
+# ── Heartbeat / engine-liveness diagnostics (Live Monitor screen) ───────
+#
+# Signal-visibility audit (2026-10-19/20): before this endpoint existed,
+# the only proof the UI had that the engine was connected at all was
+# /api/config's boolean "is this env var set" check — on an hours-long
+# stretch with zero fired signals (expected strategy behavior; see
+# PLAN.md/DOCS.md), that's indistinguishable from the cron job not running
+# at all. This endpoint surfaces two things cron_runner.py/pyq_p4.py now
+# persist on every tick regardless of outcome: (a) a plain "a tick
+# happened at time T" heartbeat, and (b) per-symbol signal-generation
+# diagnostics — trend, pct_diff/vol vs. their thresholds, and the
+# entry-direction "strict" gate with how close price came to clearing it.
+# Neither of these changes which signals fire; they only make the existing
+# decision visible.
+@app.get("/api/heartbeat")
+def get_heartbeat():
+    cron = state_store.get_json("pyq_p4_cron_heartbeat")
+    diagnostics = state_store.get_json("pyq_p4_signal_diagnostics")
+    now = datetime.now(timezone.utc)
+    age_seconds = None
+    if cron and cron.get("ts"):
+        try:
+            last_ts = datetime.fromisoformat(cron["ts"])
+            age_seconds = (now - last_ts).total_seconds()
+        except Exception:
+            age_seconds = None
+    return {
+        "cron": cron,
+        "cron_age_seconds": age_seconds,
+        "signal_diagnostics": diagnostics or {},
+    }
 
 
 # ── Runs (Backtest screen) ───────────────────────────────────────────────
@@ -300,6 +334,17 @@ def get_dashboard():
         for s in state_store.list_signals(limit=200)
         if s["status"] not in ("open",)
     )
+    # Signal-visibility audit (2026-10-19/20): include a thin heartbeat
+    # summary here too (full detail is GET /api/heartbeat) so the main
+    # Dashboard screen itself shows engine-liveness on first paint, not
+    # just the Live Monitor screen.
+    cron = state_store.get_json("pyq_p4_cron_heartbeat")
+    cron_age_seconds = None
+    if cron and cron.get("ts"):
+        try:
+            cron_age_seconds = (datetime.now(timezone.utc) - datetime.fromisoformat(cron["ts"])).total_seconds()
+        except Exception:
+            cron_age_seconds = None
     return {
         "trading_enabled": state_store.is_trading_enabled(),
         "mode": os.environ.get("PYQUANT_MODE", "live").strip().lower(),
@@ -307,6 +352,8 @@ def get_dashboard():
         "recent_closed": recent_closed,
         "last_run": runs[0] if runs else None,
         "realized_pnl_recent": realized_pnl_30,
+        "cron_last_tick_at": cron.get("ts") if cron else None,
+        "cron_age_seconds": cron_age_seconds,
     }
 
 

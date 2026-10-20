@@ -39,10 +39,33 @@ from __future__ import annotations
 
 import sys
 import traceback
+from datetime import datetime, timezone
 
 import pyq_p4
 from pyq_p4 import hourly_task, fifteen_minute_task, five_minute_task, one_minute_task
 import p4_orchestra  # safe to import now — its scheduler/loop is behind __main__
+import pyquant_state as state_store
+
+# Signal-visibility audit (2026-10-19/20): the Dashboard/Live Monitor had no
+# way to show the engine is actually alive between fired signals — the only
+# evidence was a boolean "API keys present" check (api/index.py's
+# /api/config). This key records a plain "a cron tick happened at time T"
+# heartbeat, every single invocation (every ~5 minutes), independent of
+# whether any task below actually had work to do. Exposed via GET
+# /api/heartbeat and shown on web/live-monitor.html.
+_CRON_HEARTBEAT_KEY = "pyq_p4_cron_heartbeat"
+
+
+def _persist_heartbeat(tasks_run: list[str], failures: list[str]) -> None:
+    """Best-effort — a failure here never affects the tick's exit code."""
+    try:
+        state_store.set_json(_CRON_HEARTBEAT_KEY, {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "tasks_run": tasks_run,
+            "failures": failures,
+        })
+    except Exception as e:
+        print(f"[cron_runner] Heartbeat persist failed (non-fatal): {e}")
 
 
 def run_one_cron_tick():
@@ -66,6 +89,8 @@ def run_one_cron_tick():
             # run shows as failed rather than silently green.
             print(f"[cron_runner] {name}() raised: {e}\n{traceback.format_exc()}")
             failures.append(name)
+
+    _persist_heartbeat([name for name, _ in tasks], failures)
 
     if failures:
         print(f"[cron_runner] Completed with failures in: {failures}")

@@ -29,6 +29,11 @@
   <main>
     <div id="banner-slot"></div>
 
+    <div class="card" id="heartbeat-card" style="margin-bottom:16px;">
+      <h3>Engine Heartbeat</h3>
+      <div class="stat-label" id="heartbeat-text">Checking…</div>
+    </div>
+
     <div class="grid cols-4" style="margin-bottom:16px;">
       <div class="card">
         <h3>Open Positions</h3>
@@ -79,6 +84,20 @@ async function loadDashboard() {
   const bannerSlot = document.getElementById("banner-slot");
   try {
     const d = await apiGet("/dashboard");
+
+    const hbText = document.getElementById("heartbeat-text");
+    const age = d.cron_age_seconds;
+    if (age === null || age === undefined) {
+      hbText.innerHTML = `<span style="color:var(--text-faint);">No cron tick recorded yet — either the engine hasn't run since this field was added, or it isn't running. Check the GitHub Actions run history.</span>`;
+    } else {
+      const mins = Math.floor(age / 60);
+      const label = age < 360
+        ? `<span style="color:#3ddc84;">● Live</span> — last tick ${mins < 1 ? 'under a minute' : mins + ' min'} ago`
+        : age < 900
+          ? `<span style="color:#f5a623;">● Stale</span> — last tick ${mins} min ago (expected every ~5 min)`
+          : `<span style="color:#e5484d;">● Not reporting</span> — last tick ${mins} min ago. Check the GitHub Actions run history.`;
+      hbText.innerHTML = label;
+    }
 
     document.getElementById("stat-open").textContent = d.open_positions.length;
     document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);

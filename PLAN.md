@@ -1,8 +1,11 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-19 (live-run audit: Supabase IPv6 config bug
-+ Kaggle dependency config bug found and fixed; CLAUDE.md/DOCS.md/
-SPEC.md condensed for token economy).
+**Last updated:** 2026-10-20 (signal-visibility audit: confirmed the
+Supabase fix is live — state now persists across GitHub Actions ticks
+with no DB errors; diagnosed "no signal logged in hours, UI shows
+nothing" as the UI having no proof-of-engine-life rather than a signal
+bug; added a heartbeat + per-symbol signal-diagnostic panel; fixed a
+latent cross-symbol signal-leak bug found along the way).
 
 This is the living, checklist-level tracker — update it in the same
 turn as any change that finishes an item, starts a new one, or makes a
@@ -42,14 +45,43 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
-- [ ] **Switch `DATABASE_URL` to Supabase's Transaction pooler string**
-  (both the GitHub Actions secret and Vercel's env var) — the Direct
-  connection string is IPv6-only and GitHub Actions has no IPv6 egress;
-  confirmed live via a real run's "Network is unreachable" error on
-  every state-store call. **Config-only, no code/push needed** — see
-  `SUPABASE_SETUP.md`'s IPv6 incident note. Urgent: while broken,
-  run-guards fail open, so `daily_optimizer()` (meant to run once a day)
-  has been running on every 5-minute tick.
+- [x] **Switch `DATABASE_URL` to Supabase's Transaction pooler string** —
+  confirmed fixed via the 2026-10-19 22:55 UTC live cron log: no
+  "Network is unreachable" errors, UKF state restored 18/18 models, and
+  `daily_optimizer()` correctly skipped ("already ran today") instead of
+  firing every 5 minutes. DB persistence across GitHub Actions ticks is
+  now genuinely confirmed working, not just applied.
+- [ ] **"No signal logged in hours, UI shows nothing but API-key
+  presence" — diagnosed, partly addressed 2026-10-20.** Root cause is
+  NOT a signal-generation bug: `generate_signal()`'s math is byte-for-
+  byte the same thresholds as the validated `walkforward.py` (confirmed
+  by re-reading both side by side), so a quiet stretch with zero fired
+  signals is expected strategy behavior at current BTC/ETH volatility,
+  not a stuck engine. The real gap was that the UI had **no way to tell
+  "quiet but alive" apart from "not running at all"** — nothing was
+  persisted on an hour where no signal fired. Fixed: `cron_runner.py`
+  now writes a plain tick-heartbeat every ~5 min regardless of outcome;
+  `pyq_p4.py`'s `hourly_task()` now persists a full per-symbol signal
+  diagnostic (trend, pct_diff/vol vs. the volatility gate, the entry
+  "strict" gate and how close price came to clearing it) every hour
+  regardless of outcome; both are exposed via a new `GET /api/heartbeat`
+  and shown on `web/live-monitor.html` (and a thin summary on the
+  Dashboard). **Code-complete, not yet pushed** — needs a live tick to
+  confirm the panel actually populates. Also found and fixed, in the
+  same pass: `pyq_p4.py`'s `hourly_task()` never reset `my_signal` to
+  `None` at the top of each per-symbol loop iteration, so a stale signal
+  object from one symbol could in principle leak into the other
+  symbol's `if my_signal:` check after an exception — latent, not yet
+  observed live, fixed proactively.
+- [ ] **If, after the heartbeat panel confirms the engine is genuinely
+  ticking and still no signal fires for a long stretch (owner's call on
+  "long"), consider a temporary, clearly-labeled relaxation of
+  `strict`/`stricts` via `optimal_params.json`/DB-stored params** — NOT
+  a code change to `generate_signal()` itself (that would silently
+  diverge live behavior from the validated walkforward math — see the
+  standing rule in Decisions below). This is deliberately left as a
+  judgment call for the owner, not pre-emptively done, now that the
+  diagnostic panel gives real numbers to decide from instead of guessing.
 - [x] **Fix the Kaggle-backtest 502** — `kaggle` was listed only in
   `api/requirements.txt`, which Vercel's framework-preset deploy doesn't
   read; added to `pyproject.toml`. Code-complete, not yet pushed.
@@ -102,6 +134,19 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-10-20** — Signal-visibility audit (triggered by owner report:
+  "no signal logged in hours, UI shows nothing but API-key confirmation",
+  cron log attached). Confirmed the pooler fix is genuinely live (no DB
+  errors, state restored 18/18 UKF models, `daily_optimizer()` correctly
+  self-guarded). Confirmed `generate_signal()`'s thresholds are identical
+  to `walkforward.py`'s — not a reduced/diverged live version. Added:
+  `cron_runner.py` tick-heartbeat (every invocation), `pyq_p4.py`
+  per-symbol signal diagnostics (every `hourly_task()` tick, fired or
+  not), `GET /api/heartbeat`, a heartbeat summary on `/api/dashboard`,
+  and a heartbeat + diagnostics panel on `web/live-monitor.html` (+ a
+  small heartbeat card on `web/index.html`). Also fixed a latent bug
+  found in the same pass: `hourly_task()` never reset `my_signal` to
+  `None` per loop iteration. Code-complete, not yet pushed.
 - **2026-10-19** — Found (via live cron + Vercel logs) and fixed two
   config bugs, neither requiring code changes to behave correctly once
   applied: Supabase `DATABASE_URL` was the IPv6-only Direct connection
@@ -131,6 +176,18 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Decisions
 
+- **2026-10-20** — When "no signal is firing" is reported, default to
+  treating it as a visibility problem to diagnose (is the engine
+  ticking? how close are the real numbers to threshold?) before treating
+  it as a strategy problem to fix by loosening thresholds — loosening
+  `strict`/`stricts` live would silently diverge from the validated
+  `walkforward.py` reference, which the standing promotion-path rule
+  (`INTENT.md` Section 5 / `SPEC.md` Section 2) exists specifically to
+  prevent. The owner explicitly authorized reverting signal mechanics
+  temporarily if needed to prove the pipeline; that authorization is
+  intentionally not exercised yet, now that the diagnostic panel
+  (`GET /api/heartbeat`) can show whether it's actually needed, with
+  real numbers, instead of guessing blind.
 - **2026-10-19** — Use Supabase's Transaction pooler connection string
   (port 6543, IPv4) for `DATABASE_URL` everywhere — GitHub Actions and
   Vercel are both now short-lived-invocation shapes (neither is the
