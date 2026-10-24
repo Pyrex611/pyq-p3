@@ -133,7 +133,14 @@ class BacktestRequest(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    """Unlike every data endpoint below, this one reports a real DB
+    connectivity failure instead of masking it — see
+    pyquant_state.db_ping()'s docstring for why that distinction matters
+    (added 2026-10-20 after a suspected Vercel-vs-GitHub-Actions
+    DATABASE_URL mismatch looked identical to "no data yet" everywhere
+    else). Check this first whenever the UI looks disconnected."""
+    db = state_store.db_ping()
+    return {"ok": db.get("ok", False), "db": db}
 
 
 # ── Status / mode (Dashboard + ApiKeys screens) ─────────────────────────
@@ -320,6 +327,29 @@ def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, data
 
     os.environ.setdefault("KAGGLE_USERNAME", username)
     os.environ.setdefault("KAGGLE_KEY", key)
+
+    # Found 2026-10-20 via a live 502's error detail (surfaced only after
+    # that turn's apiGet/apiPost fix — see PLAN.md): "[Errno 30] Read-only
+    # file system: '/home/sbx_user1051'". That path is $HOME inside
+    # Vercel's Python sandbox, and it's read-only — only /tmp is writable.
+    # Even with KAGGLE_USERNAME/KAGGLE_KEY set as env vars, the kaggle
+    # package's KaggleApi still resolves (and on some code paths tries to
+    # create) a config directory that defaults to `~/.kaggle`, i.e.
+    # os.path.expanduser("~")/.kaggle — which is that read-only $HOME.
+    # Fix: point KAGGLE_CONFIG_DIR at a directory under /tmp (the one
+    # writable path in this sandbox) and pre-create it with a kaggle.json
+    # written from the same credentials, so every code path the library
+    # might take — env-var lookup or config-file lookup — resolves
+    # successfully regardless of which one this installed version
+    # actually uses internally.
+    _kaggle_config_dir = "/tmp/.kaggle"
+    os.makedirs(_kaggle_config_dir, exist_ok=True)
+    os.environ["KAGGLE_CONFIG_DIR"] = _kaggle_config_dir
+    _kaggle_json_path = os.path.join(_kaggle_config_dir, "kaggle.json")
+    with open(_kaggle_json_path, "w") as f:
+        json.dump({"username": username, "key": key}, f)
+    os.chmod(_kaggle_json_path, 0o600)  # the kaggle CLI/library warns (non-fatally) if this is left world-readable
+
     from kaggle.api.kaggle_api_extended import KaggleApi  # local import: optional dep, see KAGGLE.md
 
     template_dir = _REPO_ROOT / "kaggle_backtest"

@@ -53,6 +53,33 @@ def _using_postgres() -> bool:
     return bool(_DB_URL)
 
 
+def db_ping() -> dict:
+    """Unlike every other function in this module, this one does NOT
+    swallow its exception — every read/write helper here (get_json(),
+    list_runs(), is_trading_enabled(), etc.) is deliberately best-effort
+    and returns a safe-looking default on ANY failure, by standing design
+    (CLAUDE.md Section 7's "state-store writes from the engine are
+    best-effort" rule, which the read side inherited too). That's correct
+    for the trading engine (a logging hiccup must never block a trading
+    decision) but it means a genuinely broken DATABASE_URL on the API
+    side looks IDENTICAL to "legitimately no data yet" from every other
+    endpoint — confirmed during the 2026-10-20 signal-visibility/
+    backtest-502 investigation (`is_trading_enabled()` defaults to `True`
+    on any failure; `list_runs()`/`get_json()` default to `[]`/`None`).
+    This function exists specifically to answer "is the DB actually
+    reachable, and if not, why" without that masking — exposed via
+    `GET /api/health` (api/index.py)."""
+    if not _using_postgres():
+        return {"ok": True, "backend": "sqlite", "note": "DATABASE_URL is not set — using local SQLite."}
+    try:
+        with _pg_conn().cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        return {"ok": True, "backend": "postgres"}
+    except Exception as e:
+        return {"ok": False, "backend": "postgres", "error": f"{type(e).__name__}: {e}"}
+
+
 def _pg_conn():
     global _pg_pool
     if _pg_pool is None:
