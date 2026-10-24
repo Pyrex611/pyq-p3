@@ -1,14 +1,24 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-24 (the error-detail fix worked: the real
-Kaggle-push error was `[Errno 30] Read-only file system:
-'/home/sbx_user1051'` — Vercel's sandboxed $HOME, which `kaggle`'s
-library touches even with env-var credentials set. Fixed by pointing
-`KAGGLE_CONFIG_DIR` at `/tmp`. Also added `pyquant_state.db_ping()` +
-a real `GET /api/health` so a broken `DATABASE_URL` can no longer hide
-behind every other endpoint's safe-default masking — see the
-2026-10-20 entry below for why that masking made the heartbeat/runs
-emptiness undiagnosable until now).
+**Last updated:** 2026-10-24, second pass same day. Confirmed good news
+first: the 2026-10-24 13:30 UTC GitHub Actions run actually fired a real
+BTC signal end to end (`"BTC/USD signal: {...}"` →
+`"[SIGNAL-ONLY] BTCUSDT SELL Limit @ 80739.0 — simulated entry"`) — the
+engine genuinely works. `GET /api/health` (added earlier today) also
+confirms Vercel's own Postgres connection is healthy right now. Yet
+`GET /api/heartbeat` still shows nothing, even though `cron_runner.py`'s
+heartbeat write has been live for days and that same run completed with
+"Tick complete, no uncaught errors." Two independently-healthy Postgres
+connections that never see each other's writes is the signature of the
+GitHub Actions `DATABASE_URL` secret and Vercel's `DATABASE_URL` env var
+pointing at two **different** databases — added
+`scripts/check_db_identity.py` to prove this definitively (writes a
+marker through one connection string, reads it back through the other)
+without running any part of the actual trading engine locally. Also
+fixed a second, unrelated bug found in the same batch of live attempts:
+`KAGGLE_DATASET_SLUG` had been set to the full dataset page URL instead
+of the bare `owner/slug` Kaggle's API expects — `create_backtest()` now
+defensively strips a pasted URL down to the bare slug.
 
 This is the living, checklist-level tracker — update it in the same
 turn as any change that finishes an item, starts a new one, or makes a
@@ -48,34 +58,56 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
-- [x] **Backtest POST 502 — root cause found 2026-10-24, via the
-  error-detail fix actually working as intended:** real error was
-  `[Errno 30] Read-only file system: '/home/sbx_user1051'` —
-  Vercel's sandboxed $HOME, which the `kaggle` package's `KaggleApi`
-  still touches (resolving/creating its config dir) even with
+- [x] **Backtest POST 502, round 1 — Read-only $HOME.** Real error was
+  `[Errno 30] Read-only file system: '/home/sbx_user1051'` — Vercel's
+  sandboxed $HOME, which the `kaggle` package's `KaggleApi` still
+  touches (resolving/creating its config dir) even with
   `KAGGLE_USERNAME`/`KAGGLE_KEY` set as env vars. Fixed in
   `_push_kaggle_kernel()`: point `KAGGLE_CONFIG_DIR` at `/tmp/.kaggle`
-  and pre-write a `kaggle.json` there from the same credentials, so
-  every resolution path the library might take lands on a writable
-  directory. **Code-complete, not yet pushed** — needs a live retry to
-  confirm (the push itself, i.e. the actual Kaggle network call, has
-  never yet been reached — this is the first blocker *before* that
-  call, not a guarantee it succeeds once past it).
-- [ ] **Still-open: nothing yet proves Vercel's own `DATABASE_URL`
-  matches the GitHub Actions secret.** Evidence as of 2026-10-20: a
-  direct `GET /api/runs` (no filter) on the live deployment returned
-  `{"runs":[]}` — completely empty — while the owner reported "no
-  heartbeat visible either," which is consistent with (but not
-  provably caused by) a Vercel-side DB mismatch, since `pyquant_state.py`'s
-  `get_json()`/`list_runs()`/`is_trading_enabled()` all silently
-  swallow a DB error and return a safe-looking default by standing
-  design. Fixed 2026-10-24: added `pyquant_state.db_ping()` (does NOT
-  swallow its exception) wired into a real `GET /api/health`, so this
-  no longer requires comparing two secrets by eye — hitting that one
-  endpoint after this deploys will say definitively whether Vercel's
-  Postgres connection works and, if not, the exact `psycopg2` error.
-  **Next step: hit `GET /api/health` once this is live and report
-  back what it says** — that single call now settles this.
+  and pre-write a `kaggle.json` there. **Confirmed fixed by the next
+  live attempt** — it got past this point and hit a different error
+  (below), proving this specific blocker is cleared.
+- [x] **Backtest POST 502, round 2 — bad dataset slug.** Next live
+  attempt (2026-10-24) got past the $HOME fix and failed with Kaggle's
+  own `"Invalid dataset specification"` — `KAGGLE_DATASET_SLUG` had
+  been set to the full dataset page URL
+  (`https://www.kaggle.com/datasets/cliffordgambo/pyquant-historical-data`)
+  instead of the bare `owner/slug` form the API expects. Fixed two
+  ways: (a) config — set `KAGGLE_DATASET_SLUG` in Vercel to just
+  `cliffordgambo/pyquant-historical-data`; (b) code —
+  `create_backtest()` now strips a pasted URL down to the bare slug
+  defensively, so this specific mistake can't recur even if the config
+  is wrong again. **Code-complete, not yet pushed** — still needs a
+  live retry past this point to see if the Kaggle kernel push actually
+  succeeds (never yet reached).
+- [ ] **Confirmed separately: a `POST /api/backtests` attempt also hit a
+  plain 500 "state store write failed"** on an EARLIER try the same
+  session, before the slug error — i.e. `request_backtest()`'s own
+  Postgres write failed outright that one time. `GET /api/health`
+  checked moments later showed Vercel's Postgres connection healthy
+  (`{"ok":true,"db":{"ok":true,"backend":"postgres"}}`), so this reads
+  as an intermittent failure (cold start / Supabase connection-pooler
+  hiccup), not a standing misconfiguration — nothing further to fix
+  unless it recurs. Noted, not actioned.
+- [ ] **The real open question now: `GET /api/heartbeat` is still
+  completely empty (`{"cron":null,"cron_age_seconds":null,
+  "signal_diagnostics":{}}`) despite a GitHub Actions run that same
+  day (2026-10-24 13:30 UTC) genuinely firing a real BTC signal
+  end-to-end** (`"BTC/USD signal: {...}"` → `"[SIGNAL-ONLY] BTCUSDT
+  SELL Limit @ 80739.0"`) **and completing with "Tick complete, no
+  uncaught errors."** `GET /api/health` confirms Vercel's own Postgres
+  connection is independently healthy at the same time. Two
+  independently-healthy connections that never see each other's writes
+  is the signature of GitHub Actions' `DATABASE_URL` secret and
+  Vercel's `DATABASE_URL` env var pointing at two **different**
+  databases (not "the DB is broken" — each side's own connection
+  genuinely works; they may just not be the *same* database). Added
+  `scripts/check_db_identity.py` to settle this definitively, without
+  running any part of the trading engine locally: it writes a marker
+  through one connection string and tries to read it back through the
+  other — same database if seen, different if not, no ambiguity either
+  way. **Next step: owner runs that script locally with both real
+  connection strings pasted in, and reports which result it prints.**
 
 - [x] **Switch `DATABASE_URL` to Supabase's Transaction pooler string** —
   confirmed fixed via the 2026-10-19 22:55 UTC live cron log: no

@@ -82,7 +82,7 @@ walkforwards — skip to whichever of these you haven't already done.
 |---|---|
 | `KAGGLE_USERNAME` | The `username` field from your `kaggle.json` |
 | `KAGGLE_KEY` | The `key` field from your `kaggle.json` |
-| `KAGGLE_DATASET_SLUG` | `yourkaggleusername/pyquant-historical-data` (create this dataset in Part E below first, or come back and set this after) |
+| `KAGGLE_DATASET_SLUG` | `yourkaggleusername/pyquant-historical-data` — the **bare** `owner/slug` form only, NOT the full dataset page URL (`https://www.kaggle.com/datasets/owner/slug`). Pasting the URL by mistake is exactly the error a live run hit on 2026-10-24: Kaggle's API rejected it with "Invalid dataset specification." `api/index.py`'s `create_backtest()` now defensively strips a pasted URL down to the bare slug, but set it correctly here anyway. (create this dataset in Part E below first, or come back and set this after) |
 
 3. Redeploy the Vercel project (**Deployments** tab → the three-dot menu
    on the latest deployment → **Redeploy**) so the new env vars take

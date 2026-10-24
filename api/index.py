@@ -274,6 +274,20 @@ def create_backtest(body: BacktestRequest):
     kaggle_username = os.environ.get("KAGGLE_USERNAME", "").strip()
     kaggle_key = os.environ.get("KAGGLE_KEY", "").strip()
     dataset_slug = os.environ.get("KAGGLE_DATASET_SLUG", "").strip()
+    # Found 2026-10-24: a real backtest attempt failed with Kaggle's own
+    # "Invalid dataset specification" — KAGGLE_DATASET_SLUG had been set to
+    # the full dataset page URL (https://www.kaggle.com/datasets/<owner>/
+    # <slug>) rather than the bare "<owner>/<slug>" the API expects
+    # (KAGGLE.md's own example already showed the bare form, but nothing
+    # stopped the URL form from being pasted in by mistake). Rather than
+    # just document it more loudly, strip a pasted URL down to the bare
+    # slug here so this specific mistake can't recur.
+    for _prefix in ("https://www.kaggle.com/datasets/", "http://www.kaggle.com/datasets/",
+                     "www.kaggle.com/datasets/", "kaggle.com/datasets/"):
+        if dataset_slug.lower().startswith(_prefix):
+            dataset_slug = dataset_slug[len(_prefix):]
+            break
+    dataset_slug = dataset_slug.strip("/")
     if not (kaggle_username and kaggle_key and dataset_slug):
         raise HTTPException(
             status_code=503,
