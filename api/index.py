@@ -245,8 +245,21 @@ def get_heartbeat():
 def get_runs(
     run_type: Optional[str] = Query(None, description='"walkforward" or "daily_optimizer"'),
     limit: int = Query(50, ge=1, le=200),
+    include_failed: bool = Query(
+        False,
+        description="2026-10-25: failed backtest/optimizer runs are hidden from the "
+                     "Backtest screen by default (the user's explicit request after a "
+                     "Kaggle-push failure left a 'failed' row sitting in the runs list "
+                     "next to real results) — pass true to see them, e.g. for debugging.",
+    ),
 ):
-    return {"runs": state_store.list_runs(run_type=run_type, limit=limit)}
+    # Over-fetch before filtering so a page of `limit` real runs isn't
+    # silently shrunk by however many failed ones happened to be mixed
+    # in among the most recent rows.
+    runs = state_store.list_runs(run_type=run_type, limit=limit if include_failed else limit * 2)
+    if not include_failed:
+        runs = [r for r in runs if r.get("status") != "failed"][:limit]
+    return {"runs": runs}
 
 
 @app.get("/api/runs/{run_id}")
@@ -400,11 +413,21 @@ def get_dashboard():
         if s["status"] not in ("open",)
     ][:10]
     runs = state_store.list_runs(limit=1)
-    realized_pnl_30 = sum(
-        (s.get("realized_pnl") or 0.0)
-        for s in state_store.list_signals(limit=200)
-        if s["status"] not in ("open",)
-    )
+    # 2026-10-25 (PnL-by-percentage): a summed dollar PnL is meaningless
+    # under SIGNAL_ONLY_MODE (no real wallet balance — see PLAN.md's
+    # 2026-10-25 entry on the TP/SL close-tracking bug this is paired
+    # with), so the headline figure is now the AVERAGE leveraged
+    # percentage return across recently-closed signals that have one
+    # (realized_pnl_pct; older rows closed before this field existed
+    # don't, and are excluded from the average rather than counted as
+    # 0%). realized_pnl (USD) is kept as a secondary figure for paper/live
+    # rows where a real balance delta is meaningful.
+    closed_recent = [
+        s for s in state_store.list_signals(limit=200) if s["status"] not in ("open",)
+    ]
+    pct_values = [s["realized_pnl_pct"] for s in closed_recent if s.get("realized_pnl_pct") is not None]
+    avg_pnl_pct = (sum(pct_values) / len(pct_values)) if pct_values else None
+    realized_pnl_30 = sum((s.get("realized_pnl") or 0.0) for s in closed_recent)
     # Signal-visibility audit (2026-10-19/20): include a thin heartbeat
     # summary here too (full detail is GET /api/heartbeat) so the main
     # Dashboard screen itself shows engine-liveness on first paint, not
@@ -423,6 +446,7 @@ def get_dashboard():
         "recent_closed": recent_closed,
         "last_run": runs[0] if runs else None,
         "realized_pnl_recent": realized_pnl_30,
+        "avg_pnl_pct_recent": avg_pnl_pct,
         "cron_last_tick_at": cron.get("ts") if cron else None,
         "cron_age_seconds": cron_age_seconds,
     }

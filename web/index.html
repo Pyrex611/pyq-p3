@@ -41,9 +41,9 @@
         <div class="stat-label">currently monitored</div>
       </div>
       <div class="card">
-        <h3>Realized PnL (recent)</h3>
+        <h3>Avg. Return (recent)</h3>
         <div class="stat-value" id="stat-pnl">—</div>
-        <div class="stat-label">last 200 logged signals</div>
+        <div class="stat-label" id="stat-pnl-label">last 200 logged signals</div>
       </div>
       <div class="card">
         <h3>Trading</h3>
@@ -100,8 +100,19 @@ async function loadDashboard() {
     }
 
     document.getElementById("stat-open").textContent = d.open_positions.length;
-    document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);
-    document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.realized_pnl_recent);
+    // 2026-10-25 (PnL-by-percentage): average leveraged % return is the
+    // headline figure now (meaningful with no real wallet balance under
+    // SIGNAL_ONLY_MODE); falls back to the old summed-USD figure only if
+    // no closed signal has a percentage yet (all pre-date this change).
+    if (d.avg_pnl_pct_recent !== null && d.avg_pnl_pct_recent !== undefined) {
+      document.getElementById("stat-pnl").textContent = fmtPct(d.avg_pnl_pct_recent);
+      document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.avg_pnl_pct_recent);
+      document.getElementById("stat-pnl-label").textContent = "avg. leveraged return, closed signals";
+    } else {
+      document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);
+      document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.realized_pnl_recent);
+      document.getElementById("stat-pnl-label").textContent = "last 200 logged signals (USD — no % data yet)";
+    }
     document.getElementById("stat-trading").textContent = d.trading_enabled ? "ON" : "OFF";
     document.getElementById("stat-mode").textContent = d.mode.toUpperCase() + " mode";
     if (d.last_run) {
@@ -136,7 +147,10 @@ async function loadDashboard() {
           <td class="mono">${s.symbol}</td>
           <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
           <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
-          <td class="${pnlClass(s.realized_pnl)}">${fmtMoney(s.realized_pnl)}</td>
+          <td class="${pnlClass(s.realized_pnl_pct ?? s.realized_pnl)}">${
+            s.realized_pnl_pct !== null && s.realized_pnl_pct !== undefined
+              ? fmtPct(s.realized_pnl_pct) : fmtMoney(s.realized_pnl)
+          }</td>
           <td>${fmtTime(s.closed_at)}</td>
         </tr>`).join("");
     }

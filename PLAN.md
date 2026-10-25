@@ -1,6 +1,100 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-25. Two more findings: (1) the Kaggle 409
+**Last updated:** 2026-10-25, third pass same day. Root cause of the
+whole multi-day heartbeat/DB-identity mystery **confirmed by the
+owner**: a Vercel-native **Neon** Postgres integration, attached early
+in the project's life (before Supabase was chosen) and never removed,
+was silently injecting its own `DATABASE_URL` into the Vercel
+deployment — overriding the manually-set Supabase value with the same
+name. Vercel's "healthy" Postgres connection was therefore reaching
+Neon the whole time, while GitHub Actions wrote to Supabase — two
+genuinely different, independently-healthy databases, exactly as
+suspected, just not for a GitHub-Actions-secret reason. **Fixed by the
+owner deleting the Neon integration in Vercel's dashboard.** Confirmed:
+the Dashboard now shows real data. The `GET /api/health`/`db_ping()`/
+cron-log identity-reporting work from the previous pass is what made
+this diagnosable at all (comparing the two sides' `current_database()`)
+— keeping it in place permanently as a standing diagnostic, not a
+one-off. Lesson generalized into `VERCEL_DEPLOY.md` below: **any**
+Vercel-native storage integration (Neon, Postgres, KV, Blob) can inject
+env vars that silently outrank a manually-set one of the same name —
+check Vercel's **Storage** tab for unexpected integrations whenever an
+env var "isn't taking effect" and redeploying doesn't help.
+
+Four more items from the same 2026-10-25 report, now addressed:
+1. **TP/SL close-tracking bug, root cause found.** The simulated
+   ("Legacy BTC/ETH manual") tracker that was supposed to detect TP/SL
+   hits under `SIGNAL_ONLY_MODE` only works via plain Python globals
+   (`btc_tracker`/`btc_ordered_signal`/etc.) — which reset to their
+   defaults on every fresh `cron_runner.py` process. A signal generated
+   in one hourly tick could only ever be closed by that SAME process's
+   one-time price check; the next tick starts over with no memory of
+   it. This explains both halves of the report: ~22 signals that could
+   never close, and the 2 that did showing a nonsensical `+$3.00` PnL
+   on an `SL HIT` (the old math was `current_bal - wallet_balance`,
+   and `wallet_balance` is never actually fetched in `SIGNAL_ONLY_MODE`
+   since Binance is geo-blocked, so it silently collapsed to
+   `current_bal - 0`, a placeholder figure, independent of TP or SL).
+   **Fixed**: added `_check_signal_only_closes()` to `pyq_p4.py` — a
+   new, stateless check driven entirely by `pyquant_signals` (not
+   in-memory globals), run every tick for every still-open `simulated`
+   signal, scanning every 1-minute bar since the signal opened (not
+   just the current tick's single bar — see item 4 below for why that
+   matters) via a new `_fetch_bar_extremes_since()` helper. PnL is now
+   `pyquant_signal_math.outcome_pct()` — a real leveraged price-return
+   percentage, not a balance diff. Old rows closed before this fix keep
+   their stale `+$3.00` `realized_pnl`; not backfilled (out of scope,
+   and not trustworthy data to silently rewrite).
+2. **PnL-by-percentage, implemented.** New nullable `realized_pnl_pct`
+   column on `pyquant_signals` (Postgres `ADD COLUMN IF NOT EXISTS`,
+   SQLite's try/except `ALTER` pattern), populated by
+   `_check_signal_only_closes()` going forward. `GET /api/dashboard`'s
+   headline PnL stat is now the AVERAGE leveraged % return across
+   recently-closed signals that have one, falling back to the old
+   summed-USD figure only when none do yet. `web/index.html` and
+   `web/signals.html` prefer `realized_pnl_pct` (as `fmtPct()`) over
+   `realized_pnl` wherever both might be present.
+3. **Hide failed backtests, implemented.** `GET /api/runs` now takes
+   `include_failed` (default `false`) and excludes `status == "failed"`
+   rows unless explicitly asked — `web/backtest.html` already calls
+   `/runs` with no extra params, so it gets the filtered view for free,
+   no frontend change needed.
+4. **GitHub Actions cron cadence, root cause found — this is the "every
+   5-6 hours" report.** `gh run list` against the live workflow shows
+   every recent `schedule`-triggered run completing successfully, but
+   2-5 hours apart, not 5 minutes — `orchestra.yml`'s `cron: "*/5 * * *
+   *"` is configured correctly; GitHub's own scheduler is simply not
+   firing anywhere near that often (a known, documented GitHub Actions
+   limitation under load, not something fixable from inside the
+   workflow file). This is the direct cause of the "hasn't seen a tick
+   in 104 minutes" report and a real contributor to item 1 above (long
+   gaps between the only price-check each tick gets). **Fix documented**
+   in `GITHUB_ACTIONS_SETUP.md` Part G: drive the existing
+   `workflow_dispatch` trigger from a real external 5-minute cron
+   service (e.g. cron-job.org) calling GitHub's REST dispatch endpoint
+   with a repo-scoped PAT, instead of relying on GitHub's own unreliable
+   `schedule:` event. **Needs the owner to actually set this up** (PAT +
+   cron-job.org account are both manual, outside what Claude can do from
+   here) — not yet done.
+
+Kaggle 409 Conflict on `SaveKernel` is now **confirmed still occurring**
+after the Part D doc rewrite — the owner corrected an earlier "504"
+report back to the original 409. Since `kernel-metadata.json` was
+already (and still is) `"kernel_type": "script"`, this almost certainly
+means the mismatched kernel from before the doc fix was never actually
+deleted on Kaggle's side yet (a 409 Conflict on `SaveKernel` is a
+Kaggle-side fact about the kernel that already exists at that slug — no
+further code change can fix it). **Action needed: go to
+`https://www.kaggle.com/code/<username>/pyquant-backtest-runner`,
+delete whatever kernel currently exists there (notebook or script),
+and trigger one fresh backtest** — that first push creates a new,
+correctly-typed script kernel from scratch (see `KAGGLE.md` Part D's
+"Current setup" section, already in place). If it still 409s after an
+actually-confirmed deletion, that would point to something new (e.g. a
+caching delay on Kaggle's side) worth re-investigating.
+
+**Previous update, 2026-10-25, second pass same day.** Two more
+findings: (1) the Kaggle 409
 Conflict's real cause was a self-inflicted kernel-type mismatch —
 `KAGGLE.md`'s own setup instructions had the owner manually create a
 **notebook**-type kernel, while `kernel-metadata.json` pushes
@@ -111,7 +205,8 @@ here before moving on, even if you also wrote it up elsewhere.
   as an intermittent failure (cold start / Supabase connection-pooler
   hiccup), not a standing misconfiguration — nothing further to fix
   unless it recurs. Noted, not actioned.
-- [x] **Kaggle 409 Conflict on SaveKernel — root cause found 2026-10-25:**
+- [ ] **Kaggle 409 Conflict on SaveKernel — root cause found 2026-10-25,
+  STILL OCCURRING as of the same day's later report.**
   kernel-type mismatch. `KAGGLE.md` Part D told the owner to click **New
   Notebook** (creates a notebook-type kernel); `kernel-metadata.json`
   pushes `"kernel_type": "script"`. Kaggle fixes a kernel's type at
@@ -122,9 +217,15 @@ here before moving on, even if you also wrote it up elsewhere.
   fail/never report back, since no `DATABASE_URL` secret is attached to
   a kernel that doesn't exist yet to attach it to); the owner deletes
   the old mismatched kernel once, then Part F's secret attachment
-  happens on the freshly-created one. **Code/doc-complete, not yet
-  pushed** — needs the owner to delete the old kernel and run the
-  create-then-attach-secret sequence once before the next real test.
+  happens on the freshly-created one. **Code/doc-complete and pushed to
+  this delivery, but the 409 persisted on the next live attempt** — the
+  owner's Kaggle dashboard still shows a Notebook at that slug, meaning
+  the old mismatched kernel has not actually been deleted yet (this is
+  a Kaggle-side fact, not something any further code change touches).
+  **Next step is purely manual**: delete the kernel at
+  `kaggle.com/code/<username>/pyquant-backtest-runner`, then trigger one
+  fresh backtest from the UI to let the first push recreate it correctly
+  typed.
 - [ ] **Still open: `GET /api/heartbeat` was empty even after the owner
   pasted matching `DATABASE_URL` values into both Vercel and GitHub.**
   `GET /api/dashboard` DOES show real data written moments earlier by
@@ -215,6 +316,33 @@ here before moving on, even if you also wrote it up elsewhere.
   vs. any datacenter VPS, per the Binance geo-block finding (see
   Decisions, 2026-10-18). Not urgent while `SIGNAL_ONLY_MODE=true`, but
   blocks ever turning it off.
+- [x] **DB-identity mystery, finally resolved 2026-10-25** — a
+  Vercel-native Neon integration was silently overriding the manually-
+  set Supabase `DATABASE_URL`. Owner deleted the Neon integration;
+  dashboard now shows real data. See the top-of-file entry for the full
+  writeup; `VERCEL_DEPLOY.md` updated with a general warning about
+  Vercel storage integrations.
+- [x] **TP/SL simulated-close tracking bug, fixed** —
+  `_check_signal_only_closes()` (new, in `pyq_p4.py`) replaces reliance
+  on in-memory globals with a DB-driven check against every open
+  `simulated` signal, every tick, scanning the full bar range since
+  each signal opened. **Code-complete, not yet pushed** — needs a live
+  tick (or several, given the cron-cadence finding below) to confirm
+  signals actually start closing with sane PnL.
+- [x] **PnL-by-percentage, implemented** — new `realized_pnl_pct`
+  column, populated going forward; Dashboard/Signals pages prefer it
+  over the USD figure. **Code-complete, not yet pushed.**
+- [x] **Hide failed backtests from the runs list, implemented** —
+  `GET /api/runs` excludes `status == "failed"` by default
+  (`include_failed=true` to see them). **Code-complete, not yet
+  pushed.**
+- [ ] **GitHub Actions real cron cadence is ~2-5 hours, not 5 minutes**
+  — confirmed via `gh run list` (see top-of-file entry). Fix documented
+  in `GITHUB_ACTIONS_SETUP.md` Part G (external 5-minute pinger via
+  `workflow_dispatch` + a repo-scoped PAT, since GitHub's own
+  `schedule:` trigger can't be made more reliable from inside the
+  workflow). **Purely a manual setup step for the owner** — no code
+  change possible here.
 
 ## Backlog (Phase 4+, not yet started, no commitment to order)
 

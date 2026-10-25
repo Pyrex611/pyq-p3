@@ -71,6 +71,15 @@ function fmtMoney(v) {
   return `${sign}$${n.toFixed(2)}`;
 }
 
+function fmtPct(v) {
+  // 2026-10-25 (PnL-by-percentage): v is a fraction (0.0183 = "+1.83%"),
+  // already leveraged — see pyquant_signal_math.outcome_pct().
+  if (v === null || v === undefined) return "—";
+  const n = Number(v) * 100;
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(2)}%`;
+}
+
 function fmtPrice(v) {
   if (v === null || v === undefined) return "—";
   return Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 });

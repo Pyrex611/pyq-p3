@@ -75,6 +75,27 @@ def compute_profit(side: str, entry: float, exit_price: float, qty: float) -> fl
     return (exit_price - entry) * qty if side.capitalize() == "Buy" else (entry - exit_price) * qty
 
 
+def outcome_pct(side: str, entry_price: float, exit_price: float,
+                 leverage: float = LEVERAGE_DEFAULT) -> float:
+    """Signed, LEVERAGED percentage return on the capital allocated to a
+    trade — e.g. 0.0183 means "+1.83%" of the margin actually at risk, not
+    of the full wallet balance.
+
+    Added 2026-10-25: SIGNAL_ONLY_MODE has no real wallet balance to diff
+    a close against (Binance is geo-blocked / never called), so a
+    dollar-based realized_pnl is either unavailable or, if computed
+    against a stale/placeholder balance figure, meaningless — see
+    pyq_p4.py's `_check_signal_only_closes()` docstring for the Oct 25
+    "+$3.00 on every SL hit" incident this replaces. A plain price-return
+    percentage needs no balance at all, and multiplying by leverage keeps
+    it comparable to how a real leveraged account's return would look."""
+    if entry_price <= 0:
+        return 0.0
+    raw = (exit_price - entry_price) / entry_price if side.capitalize() == "Buy" \
+        else (entry_price - exit_price) / entry_price
+    return raw * leverage
+
+
 def margin_at_risk(position_size: float, entry_price: float, leverage: float = LEVERAGE_DEFAULT) -> float:
     """The capital actually allocated to a position: (qty * entry) / leverage."""
     if leverage <= 0:

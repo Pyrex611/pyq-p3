@@ -84,7 +84,11 @@ async function loadSignals() {
         <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
         <td class="mono">${fmtPrice(s.entry_price)}</td>
         <td class="mono">${fmtPrice(s.outcome_price)}</td>
-        <td class="${pnlClass(s.realized_pnl)}">${s.realized_pnl !== null ? fmtMoney(s.realized_pnl) : "—"}</td>
+        <td class="${pnlClass(s.realized_pnl_pct ?? s.realized_pnl)}">${
+          s.realized_pnl_pct !== null && s.realized_pnl_pct !== undefined
+            ? fmtPct(s.realized_pnl_pct)
+            : (s.realized_pnl !== null && s.realized_pnl !== undefined ? fmtMoney(s.realized_pnl) : "—")
+        }</td>
         <td>${s.mode}</td>
         <td>${fmtTime(s.opened_at)}</td>
         <td>${fmtTime(s.closed_at)}</td>

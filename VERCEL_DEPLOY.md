@@ -143,6 +143,28 @@ vercel env add FRONTEND_ORIGIN
 vercel env add PYQUANT_MODE
 ```
 
+### ⚠️ 2026-10-25 incident: a Vercel storage integration can silently
+### override a manually-set env var of the same name
+
+If `DATABASE_URL` "isn't taking effect" — `GET /api/health` shows a
+healthy Postgres connection, but it's never the same data GitHub
+Actions is writing — **check for an attached storage integration
+before anything else.** This project had a Neon Postgres integration
+attached early on (from before Supabase was chosen) and never removed;
+Vercel's own integration silently injected its own `DATABASE_URL`,
+which took precedence over the manually-set Supabase value with the
+same name, even after re-pasting and redeploying. Two days of DB-
+identity debugging (see `PLAN.md`'s 2026-10-24/25 entries) turned out
+to be this, not a GitHub Secret / Vercel env var mismatch at all.
+
+**To check:** Vercel dashboard → the project → **Storage** tab. Any
+integration listed there (Neon, Vercel Postgres, KV, Blob, etc.) that
+you didn't deliberately choose to use is a candidate for this —
+disconnect/remove it, then redeploy. `GET /api/health`'s `db` object
+(this project's `db_ping()`) reports `current_database()`/
+`inet_server_addr()` — compare that against Supabase's own dashboard to
+confirm which database Vercel is actually reaching before and after.
+
 ### C2. Option 2 — Dashboard (click-through alternative, no CLI)
 
 1. Open https://vercel.com/dashboard in your browser and log in.

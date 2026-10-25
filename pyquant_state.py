@@ -182,6 +182,11 @@ def _bootstrap_postgres(conn) -> None:
         cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed'")
         cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS kaggle_ref TEXT")
         cur.execute("ALTER TABLE pyquant_runs ADD COLUMN IF NOT EXISTS error TEXT")
+        # 2026-10-25 (PnL-by-percentage): see the matching SQLite ALTER
+        # below for why this is additive/nullable rather than a
+        # replacement for realized_pnl (a dollar figure) — existing rows
+        # keep their old realized_pnl value, new closes get both.
+        cur.execute("ALTER TABLE pyquant_signals ADD COLUMN IF NOT EXISTS realized_pnl_pct DOUBLE PRECISION")
 
 
 @contextmanager
@@ -220,6 +225,7 @@ def _sqlite_conn():
             "ALTER TABLE pyquant_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'",
             "ALTER TABLE pyquant_runs ADD COLUMN kaggle_ref TEXT",
             "ALTER TABLE pyquant_runs ADD COLUMN error TEXT",
+            "ALTER TABLE pyquant_signals ADD COLUMN realized_pnl_pct REAL",
         ):
             try:
                 conn.execute(_ddl)
@@ -392,23 +398,31 @@ def update_signal_outcome(
     status: str,
     outcome_price: Optional[float] = None,
     realized_pnl: Optional[float] = None,
+    realized_pnl_pct: Optional[float] = None,
 ) -> None:
-    """Marks a signal closed (status e.g. "closed_tp"/"closed_sl"/"closed_manual")."""
+    """Marks a signal closed (status e.g. "closed_tp"/"closed_sl"/"closed_manual").
+
+    realized_pnl_pct (2026-10-25, PnL-by-percentage): a leveraged
+    price-return fraction (pyquant_signal_math.outcome_pct()) — kept
+    alongside the original dollar-based realized_pnl rather than
+    replacing it, since realized_pnl is still meaningful in paper/live
+    mode (a real wallet-balance delta) and some callers only have one of
+    the two figures available."""
     now = datetime.now(timezone.utc).isoformat()
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:
                 cur.execute(
                     "UPDATE pyquant_signals SET status=%s, outcome_price=%s, "
-                    "realized_pnl=%s, closed_at=now() WHERE id=%s",
-                    (status, outcome_price, realized_pnl, signal_id),
+                    "realized_pnl=%s, realized_pnl_pct=%s, closed_at=now() WHERE id=%s",
+                    (status, outcome_price, realized_pnl, realized_pnl_pct, signal_id),
                 )
             return
         with _lock, _sqlite_conn() as conn:
             conn.execute(
                 "UPDATE pyquant_signals SET status=?, outcome_price=?, "
-                "realized_pnl=?, closed_at=? WHERE id=?",
-                (status, outcome_price, realized_pnl, now, signal_id),
+                "realized_pnl=?, realized_pnl_pct=?, closed_at=? WHERE id=?",
+                (status, outcome_price, realized_pnl, realized_pnl_pct, now, signal_id),
             )
     except Exception:
         pass  # logging is best-effort; never let it break the trading path
@@ -426,7 +440,7 @@ def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, lim
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     cols = ["id", "symbol", "side", "entry_price", "sl_price", "tp_price", "qty",
             "entry_capital", "expected_max_loss", "mode", "status", "outcome_price",
-            "realized_pnl", "opened_at", "closed_at"]
+            "realized_pnl", "realized_pnl_pct", "opened_at", "closed_at"]
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:

@@ -220,3 +220,99 @@ repo with no other clones/collaborators relying on the old history.)
   but small paid balance there would be worth investigating (it would
   mean something is still being billed, which shouldn't happen on a
   public repo).
+
+## Part G — Known limitation: real tick cadence is ~2-5 hours, not 5
+## minutes (confirmed 2026-10-25)
+
+**This is a platform limitation, not a bug in this repo's code.** Part
+F above undersold it as "occasional skipped or delayed ticks" — the
+real, confirmed behavior is much worse than occasional:
+
+```
+$ gh run list --workflow=orchestra.yml --limit 30 -R Pyrex611/pyq-p3
+2026-10-25T12:05:06Z  (schedule)
+2026-10-25T06:47:51Z  (schedule)   ← 5h17m gap
+2026-10-25T01:36:55Z  (schedule)   ← 5h11m gap
+2026-10-24T23:38:16Z  (schedule)   ← 1h59m gap
+2026-10-24T21:33:40Z  (schedule)   ← 2h5m gap
+2026-10-24T19:05:45Z  (schedule)   ← 2h28m gap
+2026-10-24T16:51:34Z  (schedule)   ← 2h14m gap
+2026-10-24T13:29:45Z  (schedule)   ← 3h22m gap
+2026-10-24T09:28:36Z  (schedule)   ← 4h1m gap
+2026-10-24T05:08:05Z  (schedule)   ← 4h20m gap
+2026-10-24T00:51:01Z  (schedule)   ← 4h17m gap
+```
+Every single one of these runs completed successfully (`conclusion:
+success`) — `orchestra.yml`'s `cron: "*/5 * * * *"` is configured
+correctly and the code inside each tick works fine. GitHub is simply
+not firing the `schedule` event anywhere near every 5 minutes. This
+matches a widely-reported GitHub Actions limitation: GitHub explicitly
+documents short-interval `schedule` crons as "best-effort" and
+heavily throttles them under load — in practice this means something
+closer to hourly-ish, not the configured 5 minutes, and there is no
+account setting or workflow change that fixes this from inside
+GitHub Actions itself. (`concurrency.cancel-in-progress: false` in
+this workflow is unrelated to this — it only prevents two *successful*
+triggers from overlapping; it isn't why triggers are being skipped.)
+
+**Why this matters here specifically:** every piece of this project's
+"5-minute" reasoning (`one_minute_task()`'s effective cadence, the
+Live Monitor heartbeat freshness thresholds, how soon a TP/SL hit gets
+detected under `SIGNAL_ONLY_MODE` — see `_check_signal_only_closes()`'s
+2026-10-25 docstring in `pyq_p4.py`) assumed a few-minutes-at-most gap
+between ticks. A 2-5 hour real gap is the direct cause of the Live
+Monitor's "hasn't seen a tick in 104 minutes" report and a major
+contributor to the TP/SL tracking bug (both from the 2026-10-25
+session) — not because the code is wrong, but because the schedule
+it's built around doesn't run anywhere near as often as designed.
+
+### The fix: drive it from an external, real 5-minute scheduler instead
+
+GitHub's own `schedule:` trigger is the unreliable part — so don't rely
+on it. `workflow_dispatch: {}` is already in `orchestra.yml`, which
+means the workflow can be triggered **on demand, via GitHub's REST
+API**, by anything that can make an HTTPS request on an actual,
+reliable timer. A free external cron service filling that role removes
+GitHub's scheduler from the critical path entirely while reusing
+everything else (the workflow, the secrets, `cron_runner.py`) unchanged.
+
+1. **Create a fine-grained personal access token** (scoped narrowly —
+   this repo only, one permission):
+   - Go to `https://github.com/settings/personal-access-tokens/new`.
+   - **Token name:** `pyq-p3-orchestra-dispatch`.
+   - **Expiration:** pick the longest option offered (you'll need to
+     regenerate and update the cron service when it expires).
+   - **Repository access:** "Only select repositories" → choose
+     `Pyrex611/pyq-p3`.
+   - **Permissions** → **Repository permissions** → **Actions** → set
+     to **Read and write** (this is the only permission needed; it's
+     what lets the token trigger `workflow_dispatch`).
+   - Click **Generate token** and copy it immediately (GitHub only
+     shows it once).
+2. **Create a free account at `https://cron-job.org`** (or any
+   reliable external cron/uptime service that lets you set a custom
+   HTTP method, headers, and a JSON body — EasyCron and cron-job.org
+   both qualify; cron-job.org's free tier supports 1-minute intervals).
+3. **Create a new cron job** in that service with these settings:
+   - **URL:**
+     `https://api.github.com/repos/Pyrex611/pyq-p3/actions/workflows/orchestra.yml/dispatches`
+   - **Method:** `POST`
+   - **Schedule:** every 5 minutes.
+   - **Request headers:**
+     - `Authorization: Bearer <the PAT from step 1>`
+     - `Accept: application/vnd.github+json`
+     - `Content-Type: application/json`
+   - **Request body:** `{"ref": "main"}`
+4. **Test it manually first** (most of these services have a "Run now"/
+   "Test" button) and confirm in the repo's **Actions** tab that a new
+   run of **PyQuant Orchestra (cron)** appears with event type
+   `workflow_dispatch` right after.
+5. Once confirmed, leave both the `schedule:` trigger (harmless — it
+   can keep trying in the background, it just won't be the thing you're
+   relying on) and the new external job in place. Actual cadence is now
+   governed by cron-job.org's timer, not GitHub's.
+
+This keeps the "only holder of credentials" trust boundary (CLAUDE.md
+Section 2) completely intact — the external service never sees
+`DATABASE_URL`/Binance/Alpaca secrets, only a repo-scoped token that
+can do nothing but ask GitHub "please run this workflow now."
