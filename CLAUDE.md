@@ -121,15 +121,22 @@ section only orients a new session to where things stand structurally.
   (`BINANCE_GEOBLOCK.md` — round 1 fixed client construction, round 2
   fixed `PositionGuard`'s hedge-mode detection after a live run found
   round 1 incomplete).
-- **Standing blocker:** Claude's GitHub App has no push access to
-  `Pyrex611/pyq-p3` (403 on every `git push`; reads work fine, it's a
-  public repo). Every code delivery ships as a zip of only new/modified
-  files (never a whole-repo re-zip — standing rule, Section 7) and is
-  applied/pushed by the owner manually. Fix: install
-  `https://github.com/apps/claude/installations/select_target` or
-  reconnect at
-  `https://claude.ai/customize/connectors?auth_start=github&auth_start_force=1`.
-  Doesn't block Vercel deploys (`vercel --prod` is independent of git).
+- **Former blocker, now resolved (confirmed 2026-10-25):** Claude's
+  GitHub App previously had no push access to `Pyrex611/pyq-p3` (403 on
+  every `git push`). A push attempted 2026-10-25 succeeded directly
+  (commit `8ec5648`, confirmed via `git ls-remote`) — the access had
+  been restored (or the earlier 403s were actually non-fast-forward
+  rejections from a stale local clone, masked by a confusing combined
+  error message; either way, push now works). Going forward, Claude
+  commits and pushes directly instead of delivering a zip for manual
+  apply — **but always `git fetch && git rebase origin/<branch>`
+  first**, since the owner may apply changes by hand between sessions
+  (exactly what happened here: `origin/main` had moved 3 commits ahead
+  of this session's starting point) — a push without rebasing first
+  risks a non-fast-forward rejection or, worse, a force-push silently
+  discarding the owner's own manual changes. If a future push ever 403s
+  again, fall back to the zip-delivery process below and re-check this
+  note before assuming it's still broken.
 - **Not yet done:** walkforward comparison validating the GitHub
   Actions UKF/tracker restart-safety; paper mode has never actually run
   end-to-end; real order placement needs a non-geo-blocked host
