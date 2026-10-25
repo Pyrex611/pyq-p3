@@ -57,12 +57,26 @@ _CRON_HEARTBEAT_KEY = "pyq_p4_cron_heartbeat"
 
 
 def _persist_heartbeat(tasks_run: list[str], failures: list[str]) -> None:
-    """Best-effort — a failure here never affects the tick's exit code."""
+    """Best-effort — a failure here never affects the tick's exit code.
+
+    2026-10-25: also prints and persists this process's own DB identity
+    (pyquant_state.db_ping(), which reports current_database()/
+    inet_server_addr()/inet_server_port() — ground truth about which
+    physical database this connection actually reached) alongside the
+    heartbeat timestamp. GET /api/health (api/index.py) reports the SAME
+    fields from Vercel's own connection. Comparing the two settles
+    "is GitHub Actions' DATABASE_URL the same database as Vercel's" by
+    just reading two JSON responses, with no local script needed — this
+    was added after exactly that question stayed unresolved across two
+    live debugging rounds (see PLAN.md's 2026-10-24/25 entries)."""
+    identity = state_store.db_ping()
+    print(f"[cron_runner] DB identity this tick: {identity}")
     try:
         state_store.set_json(_CRON_HEARTBEAT_KEY, {
             "ts": datetime.now(timezone.utc).isoformat(),
             "tasks_run": tasks_run,
             "failures": failures,
+            "db_identity": identity,
         })
     except Exception as e:
         print(f"[cron_runner] Heartbeat persist failed (non-fatal): {e}")

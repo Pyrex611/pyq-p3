@@ -1,6 +1,28 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-24, second pass same day. Confirmed good news
+**Last updated:** 2026-10-25. Two more findings: (1) the Kaggle 409
+Conflict's real cause was a self-inflicted kernel-type mismatch —
+`KAGGLE.md`'s own setup instructions had the owner manually create a
+**notebook**-type kernel, while `kernel-metadata.json` pushes
+`"kernel_type": "script"`; Kaggle's kernel type is fixed at creation, so
+every automated push conflicted with the manually-created kernel. Fixed
+by rewriting Part D to not manually create anything — a script kernel
+is created correctly by the first automated push itself. (2) After the
+owner pasted the same `DATABASE_URL` into both Vercel and GitHub and
+still saw no heartbeat, decided the standalone identity script
+(`scripts/check_db_identity.py`) was too much friction to rely on as
+the primary tool — moved the same ground-truth check (`current_database()`/
+`inet_server_addr()`/`inet_server_port()`) directly into the product:
+`db_ping()` now returns it, `GET /api/health` surfaces it from Vercel's
+side, and `cron_runner.py` now prints AND persists it from the engine's
+side on every tick — so comparing "is this the same database" is just
+reading two JSON responses / one Actions log line, no local script
+required (the script stays as a heavier fallback for when the engine
+side has never written anything at all). See the Active section below
+for what to check next, and the Decisions log for why Supabase Storage/
+S3 was ruled out as a fix for this.
+
+**Previous update, 2026-10-24, second pass same day.** Confirmed good news
 first: the 2026-10-24 13:30 UTC GitHub Actions run actually fired a real
 BTC signal end to end (`"BTC/USD signal: {...}"` →
 `"[SIGNAL-ONLY] BTCUSDT SELL Limit @ 80739.0 — simulated entry"`) — the
@@ -89,25 +111,49 @@ here before moving on, even if you also wrote it up elsewhere.
   as an intermittent failure (cold start / Supabase connection-pooler
   hiccup), not a standing misconfiguration — nothing further to fix
   unless it recurs. Noted, not actioned.
-- [ ] **The real open question now: `GET /api/heartbeat` is still
-  completely empty (`{"cron":null,"cron_age_seconds":null,
-  "signal_diagnostics":{}}`) despite a GitHub Actions run that same
-  day (2026-10-24 13:30 UTC) genuinely firing a real BTC signal
-  end-to-end** (`"BTC/USD signal: {...}"` → `"[SIGNAL-ONLY] BTCUSDT
-  SELL Limit @ 80739.0"`) **and completing with "Tick complete, no
-  uncaught errors."** `GET /api/health` confirms Vercel's own Postgres
-  connection is independently healthy at the same time. Two
-  independently-healthy connections that never see each other's writes
-  is the signature of GitHub Actions' `DATABASE_URL` secret and
-  Vercel's `DATABASE_URL` env var pointing at two **different**
-  databases (not "the DB is broken" — each side's own connection
-  genuinely works; they may just not be the *same* database). Added
-  `scripts/check_db_identity.py` to settle this definitively, without
-  running any part of the trading engine locally: it writes a marker
-  through one connection string and tries to read it back through the
-  other — same database if seen, different if not, no ambiguity either
-  way. **Next step: owner runs that script locally with both real
-  connection strings pasted in, and reports which result it prints.**
+- [x] **Kaggle 409 Conflict on SaveKernel — root cause found 2026-10-25:**
+  kernel-type mismatch. `KAGGLE.md` Part D told the owner to click **New
+  Notebook** (creates a notebook-type kernel); `kernel-metadata.json`
+  pushes `"kernel_type": "script"`. Kaggle fixes a kernel's type at
+  creation and never changes it on a later push, so every automated
+  push conflicted with the manually-created notebook. Fixed: rewrote
+  Part D so nothing is created manually — the first automated push
+  creates a correctly-typed script kernel itself (and is expected to
+  fail/never report back, since no `DATABASE_URL` secret is attached to
+  a kernel that doesn't exist yet to attach it to); the owner deletes
+  the old mismatched kernel once, then Part F's secret attachment
+  happens on the freshly-created one. **Code/doc-complete, not yet
+  pushed** — needs the owner to delete the old kernel and run the
+  create-then-attach-secret sequence once before the next real test.
+- [ ] **Still open: `GET /api/heartbeat` was empty even after the owner
+  pasted matching `DATABASE_URL` values into both Vercel and GitHub.**
+  `GET /api/dashboard` DOES show real data written moments earlier by
+  Vercel itself (run #13, the Kaggle-409 failure, with its real error
+  text) — proving Vercel's own write-then-read round-trip works fine.
+  Only the GitHub-Actions-written heartbeat key stays invisible. Still
+  consistent with a DB-identity mismatch, but "pasted the same string in
+  both places" not fixing it means either (a) Vercel wasn't redeployed
+  after saving the new value (Vercel does NOT apply an env var change to
+  already-built deployments without an explicit redeploy — easy to miss,
+  called out in `KAGGLE.md` Part C step 3 but easy to skip on a routine
+  value *update* rather than first-time *add*), (b) no GitHub Actions
+  run has actually completed since the secret was updated, or (c) a
+  genuine copy-paste mismatch (trailing whitespace/newline, a
+  special character in the password encoded differently). Rather than
+  ask the owner to run `scripts/check_db_identity.py` again (friction:
+  needs `psycopg2-binary`, two real strings pasted on a command line),
+  moved the same proof into the product itself: `db_ping()` now also
+  returns `current_database()`/`inet_server_addr()`/`inet_server_port()`
+  — exposed in `GET /api/health` (Vercel's identity) and now ALSO
+  printed to the GitHub Actions log AND persisted into the heartbeat
+  payload itself by `cron_runner.py` (the engine's identity), every
+  tick. **Next step: push this, manually trigger the GitHub Actions
+  workflow once (Actions tab → this workflow → "Run workflow"), then
+  compare GET /api/health's `db` object against either the Action's own
+  log line (`"[cron_runner] DB identity this tick: ..."`) or, once a
+  tick succeeds, `GET /api/heartbeat`'s `cron.db_identity` field — if
+  `database`/`server_addr` differ, that's the mismatch, named and fixed
+  directly rather than inferred.**
 
 - [x] **Switch `DATABASE_URL` to Supabase's Transaction pooler string** —
   confirmed fixed via the 2026-10-19 22:55 UTC live cron log: no
@@ -240,6 +286,22 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Decisions
 
+- **2026-10-25** — Considered and rejected switching the shared state
+  store to Supabase Storage (an S3-compatible object-storage bucket)
+  when the DATABASE_URL-mismatch investigation made the owner ask
+  whether "a Supabase S3 bucket" would be a surer fix. It would not be:
+  object storage has no atomic read-modify-write primitive, which
+  `try_claim_run()` (run guards), `log_signal()`/`update_signal_outcome()`,
+  and `request_backtest()`/`update_run_status()` all depend on for
+  correctness under concurrent/overlapping invocations — building that
+  safely on top of S3-style storage means re-implementing what Postgres
+  already gives for free (`INSERT ... ON CONFLICT`, row-level atomicity),
+  for no benefit, while losing SQL filtering/ordering that `list_signals()`/
+  `list_runs()` already rely on. The actual problem is operational (two
+  independently-valid `DATABASE_URL` values that may not point at the
+  same database, or a missed Vercel redeploy) — a config/deploy-process
+  issue, not an architecture one. Postgres stays; see the Active section
+  above for the real fix in progress (in-product DB-identity reporting).
 - **2026-10-20** — When "no signal is firing" is reported, default to
   treating it as a visibility problem to diagnose (is the engine
   ticking? how close are the real numbers to threshold?) before treating

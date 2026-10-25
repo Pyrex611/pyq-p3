@@ -89,31 +89,48 @@ walkforwards — skip to whichever of these you haven't already done.
    effect — Vercel doesn't pick up new environment variables on already-
    running deployments.
 
-## Part D — Create the Kaggle kernel (one-time, in Kaggle's web editor)
+## Part D — Create the Kaggle kernel
 
-This step exists so the `DATABASE_URL` secret (Part F) can be attached
-once, by hand, and then stay attached every time the API pushes a new
-version of this same kernel automatically from then on — Kaggle
-attaches a secret to a kernel, not to one version of it, which is why
-every future run reuses this exact kernel rather than creating a new one.
+### ⚠️ 2026-10-25 incident: kernel type mismatch → 409 Conflict
 
-1. Go to `https://www.kaggle.com/code`, click **New Notebook**.
-2. In the new notebook's editor, click the **File** menu (top left) →
-   **Rename notebook**, and rename it to exactly: `pyquant-backtest-runner`
-   (this must match the slug `api/index.py` pushes to — if you use a
-   different name, edit `KAGGLE_USERNAME_PLACEHOLDER` → your username
-   and the slug inside `kaggle_backtest/kernel-metadata.json` in the repo
-   to match whatever you actually named it, then re-deliver that file).
-3. You don't need to write any code in it right now — the API will
-   overwrite its content with `kaggle_backtest/run_backtest.py` on the
-   first real run. Click **Save Version** once (top right) just to make
-   the notebook actually exist under that slug — a **Quick Save** is
-   fine.
-4. Note your notebook's URL — it should be
-   `https://www.kaggle.com/code/yourkaggleusername/pyquant-backtest-runner`.
-   If Kaggle appended a number (e.g. `-runner2`) because the slug was
-   taken or auto-adjusted, use that exact slug in Part F's secret
-   attachment step and in `kernel-metadata.json`'s `"id"` field instead.
+A live run hit `502 — Could not start the Kaggle run: 409 Client Error:
+Conflict for url: .../SaveKernel`. Root cause: this doc used to tell you
+to click **New Notebook** in step 1 below, which creates a
+**notebook**-type kernel — but `kaggle_backtest/kernel-metadata.json`
+pushes with `"kernel_type": "script"` (correct, since `run_backtest.py`
+is a plain `.py` file, not a `.ipynb`). Kaggle's kernel type is set at
+creation and can't be changed by a later push, so every automated push
+to that already-existing notebook conflicted. The two sides (the doc's
+manual step and the code's push) simply disagreed with each other.
+
+**Fix — if you already created a kernel at this slug per the old
+instructions, do this once:**
+1. Go to `https://www.kaggle.com/code/yourkaggleusername/pyquant-backtest-runner`.
+2. Open its **"..."** menu (or **File** → **Delete**, depending on
+   Kaggle's current UI) and delete it.
+3. Don't manually recreate it — step 1 below now explains why.
+
+### Current setup (no manual kernel creation needed)
+
+Unlike a notebook, a **script**-type kernel does not need to exist
+before the API's first push — `kernel_type: "script"` in
+`kernel-metadata.json` is enough for Kaggle to create it fresh, correctly
+typed, the first time `POST /api/backtests` pushes to that slug. So:
+
+1. Make sure Parts B/C/E below are done (Kaggle account token, Vercel
+   env vars, the historical-data dataset) — then just trigger one
+   backtest from the UI (Part G). That first push creates the kernel.
+2. **This first run is expected to fail** (or never report back) — no
+   `DATABASE_URL` secret is attached to it yet, so `run_backtest.py`
+   can't call back `update_run_status()`. That's fine; its only job here
+   is to make the kernel exist, correctly typed, at the right slug.
+3. Once it exists, go straight to Part F to attach the secret, then
+   trigger a second backtest — that one should complete and report back
+   normally.
+4. Confirm the slug matches: `https://www.kaggle.com/code/yourkaggleusername/pyquant-backtest-runner`.
+   If Kaggle auto-adjusted it (e.g. appended `-runner2` because the slug
+   was taken), use that exact slug in Part F and in
+   `kernel-metadata.json`'s `"id"` field instead, then re-deliver that file.
 
 ## Part E — Create the historical-data Kaggle Dataset
 

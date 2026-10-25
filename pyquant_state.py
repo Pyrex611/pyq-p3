@@ -73,9 +73,29 @@ def db_ping() -> dict:
         return {"ok": True, "backend": "sqlite", "note": "DATABASE_URL is not set — using local SQLite."}
     try:
         with _pg_conn().cursor() as cur:
-            cur.execute("SELECT 1")
-            cur.fetchone()
-        return {"ok": True, "backend": "postgres"}
+            # 2026-10-25: "ok": true alone wasn't enough to settle whether
+            # the engine (GitHub Actions) and the API (Vercel) are
+            # actually talking to the SAME database — both sides can
+            # report a perfectly healthy, independently-working Postgres
+            # connection while quietly pointing at two different ones.
+            # current_database()/inet_server_addr()/inet_server_port()
+            # are ground truth about which physical database was reached,
+            # independent of what the connection string's text claims.
+            # cron_runner.py calls this same function and writes these
+            # same fields into its heartbeat payload (pyq_p4_cron_heartbeat)
+            # — comparing GET /api/health's identity against GET
+            # /api/heartbeat's "engine_db" field answers "same DB?" without
+            # running anything locally (scripts/check_db_identity.py is
+            # the heavier, fully independent cross-check for when this
+            # in-product comparison itself is inconclusive, e.g. because
+            # the engine side has never successfully written a heartbeat
+            # at all).
+            cur.execute("SELECT current_database(), inet_server_addr(), inet_server_port()")
+            dbname, addr, port = cur.fetchone()
+        return {
+            "ok": True, "backend": "postgres",
+            "database": dbname, "server_addr": str(addr) if addr is not None else None, "server_port": port,
+        }
     except Exception as e:
         return {"ok": False, "backend": "postgres", "error": f"{type(e).__name__}: {e}"}
 
