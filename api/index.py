@@ -270,22 +270,35 @@ def get_run(run_id: int):
     return run
 
 
-# ── Backtests (Kaggle integration — Backtest screen's "Run" button) ─────
+# ── Backtests (Backtest screen's "Run" button) ──────────────────────────
 #
 # See KAGGLE.md for full setup/rationale. Short version: Vercel has
 # neither the compute time nor a durable filesystem for walkforward.py's
 # UKF-training + 150-trial Optuna search, so this endpoint doesn't run it
 # itself — it writes an immediate "queued" pyquant_runs row (so the UI has
-# something to show right away) and triggers a Kaggle kernel run with
-# this run's id + params baked in. The kernel (kaggle_backtest/
-# run_backtest.py) updates that same row to "running" then "completed"/
-# "failed" as it progresses — the UI just keeps polling GET
-# /api/runs/{id}, exactly like any other run.
+# something to show right away) and triggers the run elsewhere, which
+# updates that same row to "running" then "completed"/"failed" as it
+# progresses — the UI just keeps polling GET /api/runs/{id}, exactly like
+# any other run.
+#
+# 2026-10-25: switched the trigger from a Kaggle kernel push
+# (_push_kaggle_kernel(), kept below, unused, as a documented fallback —
+# see KAGGLE.md's "GitHub Actions alternative" section for why) to a
+# GitHub Actions workflow_dispatch (_trigger_github_backtest()). Root
+# cause of the switch: even after fixing the kernel-type 409 Conflict, a
+# subsequent real backtest attempt failed again with Kaggle's own UI
+# showing no error log at all — nothing programmatic to inspect from
+# this session, and nothing for the owner to act on either. GitHub
+# Actions' log viewer has already proven reliable for this exact
+# dependency stack (orchestra.yml's cron tick installs the same
+# requirements.txt successfully every ~5 minutes), so moving backtest
+# EXECUTION there — while still pulling historical data from the
+# existing Kaggle DATASET via a plain `kaggle datasets download` call,
+# which has none of the kernel sandbox's opacity — keeps everything that
+# was already working and only replaces the part that wasn't.
 
 @app.post("/api/backtests")
 def create_backtest(body: BacktestRequest):
-    kaggle_username = os.environ.get("KAGGLE_USERNAME", "").strip()
-    kaggle_key = os.environ.get("KAGGLE_KEY", "").strip()
     dataset_slug = os.environ.get("KAGGLE_DATASET_SLUG", "").strip()
     # Found 2026-10-24: a real backtest attempt failed with Kaggle's own
     # "Invalid dataset specification" — KAGGLE_DATASET_SLUG had been set to
@@ -301,13 +314,16 @@ def create_backtest(body: BacktestRequest):
             dataset_slug = dataset_slug[len(_prefix):]
             break
     dataset_slug = dataset_slug.strip("/")
-    if not (kaggle_username and kaggle_key and dataset_slug):
+
+    github_token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+    if not (github_token and dataset_slug):
         raise HTTPException(
             status_code=503,
             detail=(
-                "Kaggle isn't configured on this deployment (missing "
-                "KAGGLE_USERNAME / KAGGLE_KEY / KAGGLE_DATASET_SLUG env vars) "
-                "— see KAGGLE.md Part C."
+                "Backtest triggering isn't configured on this deployment "
+                "(missing GITHUB_DISPATCH_TOKEN and/or KAGGLE_DATASET_SLUG "
+                "env vars) — see KAGGLE.md's \"GitHub Actions alternative\" "
+                "section."
             ),
         )
 
@@ -317,17 +333,64 @@ def create_backtest(body: BacktestRequest):
         raise HTTPException(status_code=500, detail="Could not create the queued run (state store write failed)")
 
     try:
-        _push_kaggle_kernel(run_id, params, kaggle_username, kaggle_key, dataset_slug)
+        _trigger_github_backtest(run_id, params, dataset_slug, github_token)
     except Exception as e:
         # The queued row stays "queued" forever if we don't mark it —
         # fail it immediately so the UI shows a real error instead of a
         # run that silently never progresses.
-        state_store.update_run_status(run_id, "failed", error=f"Kaggle push failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Could not start the Kaggle run: {e}")
+        state_store.update_run_status(run_id, "failed", error=f"GitHub Actions dispatch failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not start the backtest workflow: {e}")
 
     return {"run_id": run_id, "status": "queued"}
 
 
+def _trigger_github_backtest(run_id: int, params: dict, dataset_slug: str, github_token: str) -> None:
+    """Fires .github/workflows/backtest.yml's workflow_dispatch trigger via
+    GitHub's REST API — see this section's header comment above for why
+    this replaced a direct Kaggle kernel push. `github_token` is a
+    fine-grained PAT scoped to this repo with Actions: read/write (the
+    SAME kind of token GITHUB_ACTIONS_SETUP.md Part G already has the
+    owner create for the cron-reliability pinger — reuse that one, or
+    make a second one the same way).
+
+    Raises on any non-204 response — the caller above turns that into a
+    failed run + a 502, rather than leaving the run stuck on "queued"."""
+    import requests
+
+    workflow_dispatch_inputs = {
+        "run_id": str(run_id),
+        "dataset_slug": dataset_slug,
+    }
+    if params.get("walk_forward_days") is not None:
+        workflow_dispatch_inputs["walk_forward_days"] = str(params["walk_forward_days"])
+    if params.get("bayesian_trials") is not None:
+        workflow_dispatch_inputs["bayesian_trials"] = str(params["bayesian_trials"])
+    if params.get("leverage") is not None:
+        workflow_dispatch_inputs["leverage"] = str(params["leverage"])
+    if params.get("use_bayesian") is not None:
+        workflow_dispatch_inputs["use_bayesian"] = bool(params["use_bayesian"])
+    if params.get("use_atr_sl") is not None:
+        workflow_dispatch_inputs["use_atr_sl"] = bool(params["use_atr_sl"])
+
+    resp = requests.post(
+        "https://api.github.com/repos/Pyrex611/pyq-p3/actions/workflows/backtest.yml/dispatches",
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+        json={"ref": "main", "inputs": workflow_dispatch_inputs},
+        timeout=15,
+    )
+    if resp.status_code != 204:
+        raise RuntimeError(f"GitHub API returned {resp.status_code}: {resp.text[:500]}")
+
+
+# 2026-10-25: no longer called by create_backtest() above (see that
+# section's header comment) — kept, unmodified, as a documented fallback
+# in case the Kaggle-kernel path is ever worth debugging further or the
+# GitHub Actions path runs into its own blocker. Not dead code to delete;
+# just currently unused.
 def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, dataset_slug: str) -> None:
     """Copies the kaggle_backtest/ template into a temp dir with this
     run's params.json baked in, points kernel-metadata.json at the

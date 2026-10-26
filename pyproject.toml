@@ -29,6 +29,15 @@ dependencies = [
     # no native deps, cheap to include even though only exercised when
     # KAGGLE_USERNAME/KAGGLE_KEY are set.
     "kaggle>=1.6.0",
+    # 2026-10-25: POST /api/backtests now triggers GitHub's workflow_dispatch
+    # REST API (.github/workflows/backtest.yml) instead of pushing a Kaggle
+    # kernel directly — see api/index.py's _trigger_github_backtest() and
+    # KAGGLE.md's "GitHub Actions alternative" section for why (Kaggle's own
+    # kernel-execution UI gave no error detail on a genuine failure, making
+    # it undebuggable from here). Listed here, not only in requirements.txt,
+    # per this file's own standing rule above (and the 2026-10-19 `kaggle`
+    # incident this exact rule exists because of).
+    "requests>=2.31.0",
 ]
 
 # This is what makes Vercel's Python framework preset find the app: without

@@ -1,0 +1,108 @@
+name: PyQuant Backtest (triggered by UI)
+
+# 2026-10-25: alternative execution path for the Backtest screen's "Run"
+# button, alongside (not yet replacing) the Kaggle-kernel path in
+# kaggle_backtest/. Added after the Kaggle kernel-type 409 Conflict was
+# fixed but a SUBSEQUENT run still failed with Kaggle's UI showing no
+# error log at all — Kaggle's own kernel-execution environment has
+# turned out to be opaque to debug from here (no way to inspect its logs
+# programmatically from this session). This workflow reuses the exact
+# same requirements.txt this repo's own orchestra.yml already installs
+# successfully on every single cron tick (proven reliable, unlike the
+# Kaggle kernel sandbox) and GitHub Actions' own already-proven-reliable
+# log viewer, while still using the existing Kaggle DATASET (not kernel)
+# as the historical-data source via a plain `kaggle datasets download`
+# call — Kaggle Datasets' download API is a simple, well-documented file
+# transfer with none of the kernel-execution opacity that's been the
+# actual problem. See KAGGLE.md's "GitHub Actions alternative" section
+# and PLAN.md's 2026-10-25 entry for the full writeup.
+#
+# Triggered the same way as a manual test run (Actions tab -> this
+# workflow -> "Run workflow"), or programmatically by api/index.py's
+# POST /api/backtests via GitHub's REST dispatch API (same mechanism,
+# same repo-scoped PAT, as GITHUB_ACTIONS_SETUP.md Part G's cron pinger).
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "pyquant_runs row id this run reports back into"
+        required: true
+        type: string
+      dataset_slug:
+        description: "Kaggle dataset slug (owner/slug) holding btc_back366.csv/eth_back366.csv"
+        required: true
+        type: string
+      walk_forward_days:
+        description: "Override walkforward.WALK_FORWARD_DAYS (blank = use the file's default)"
+        required: false
+        type: string
+        default: ""
+      bayesian_trials:
+        description: "Override walkforward.BAYESIAN_TRIALS (blank = use the file's default)"
+        required: false
+        type: string
+        default: ""
+      leverage:
+        description: "Override walkforward.LEVERAGE (blank = use the file's default)"
+        required: false
+        type: string
+        default: ""
+      use_bayesian:
+        description: "Override walkforward.USE_BAYESIAN"
+        required: false
+        type: boolean
+        default: true
+      use_atr_sl:
+        description: "Override walkforward.USE_ATR_SL"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  # One backtest at a time, matching the Kaggle path's own documented
+  # limitation (KAGGLE.md) — a second dispatch while one is running
+  # queues behind it rather than running concurrently against the same
+  # pyquant_runs row semantics.
+  group: pyquant-backtest
+  cancel-in-progress: false
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Kaggle CLI (dataset download only — no kernel involved)
+        run: pip install -q kaggle
+
+      - name: Download historical-data Kaggle Dataset
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          kaggle datasets download -d "${{ inputs.dataset_slug }}" -p /tmp/pyq_dataset --unzip
+          cp /tmp/pyq_dataset/btc_back366.csv ./btc_back366.csv
+          cp /tmp/pyq_dataset/eth_back366.csv ./eth_back366.csv
+
+      - name: Run backtest
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RUN_ID: ${{ inputs.run_id }}
+          WALK_FORWARD_DAYS: ${{ inputs.walk_forward_days }}
+          BAYESIAN_TRIALS: ${{ inputs.bayesian_trials }}
+          LEVERAGE: ${{ inputs.leverage }}
+          USE_BAYESIAN: ${{ inputs.use_bayesian }}
+          USE_ATR_SL: ${{ inputs.use_atr_sl }}
+        run: python3 kaggle_backtest/run_backtest_gha.py

@@ -1,6 +1,41 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-25, third pass same day. Root cause of the
+**Last updated:** 2026-10-26. Kaggle 409 was fixed (confirmed: the
+owner deleted the old kernel and the next push created a correctly-
+typed script kernel), but the backtest **still failed** — and Kaggle's
+own UI showed "Failed" with no error log or detail at all, nothing to
+act on, not even a traceback. Undebuggable from this session (no
+programmatic way to inspect a Kaggle kernel's execution log here).
+Rather than keep guessing at an opaque sandbox, moved backtest
+**execution** to GitHub Actions instead: new `.github/workflows/
+backtest.yml` (`workflow_dispatch`, triggered by `api/index.py`'s new
+`_trigger_github_backtest()` via GitHub's REST dispatch API — same PAT
+mechanism as `GITHUB_ACTIONS_SETUP.md` Part G's cron pinger) runs a new
+`kaggle_backtest/run_backtest_gha.py`, which is `run_backtest.py`'s same
+`walkforward.py`-calling logic minus the Kaggle-kernel-specific bits
+(no clone — `actions/checkout` already has the repo; no
+`kaggle_secrets` — `DATABASE_URL` arrives as a plain GitHub Secret; no
+`params.json` — inputs arrive as env vars). Historical data still comes
+from the existing Kaggle **Dataset** (Part E of `KAGGLE.md`, unchanged)
+via a plain `kaggle datasets download` call in the workflow — that's
+a simple file transfer with none of the kernel-execution opacity that
+caused this switch, so there was no reason to move the data source too.
+Chose this over further Kaggle-kernel debugging because the exact same
+`requirements.txt` already installs and runs successfully on GitHub
+Actions every ~5 minutes (`orchestra.yml`) — reusing a proven-reliable
+log viewer and dependency install, not a new unknown. `_push_kaggle_kernel()`
+is kept in `api/index.py`, unmodified, as a documented fallback (not
+deleted) in case this new path hits its own blocker. Added `requests`
+to `pyproject.toml`'s `dependencies` (used by the new dispatch call) —
+per the standing rule in `CLAUDE.md` Section 7, the exact mistake that
+caused the 2026-10-19 `kaggle`-dependency incident. See `KAGGLE.md`
+Part J for the new setup steps (two new GitHub secrets —
+`KAGGLE_USERNAME`/`KAGGLE_KEY`, reusing the existing Vercel values — and
+one new Vercel env var, `GITHUB_DISPATCH_TOKEN`, reusing the same PAT
+as the cron pinger) — **not yet set up or tested live**, since both are
+manual steps outside what this session can do.
+
+**Previous update, 2026-10-25, third pass same day.** Root cause of the
 whole multi-day heartbeat/DB-identity mystery **confirmed by the
 owner**: a Vercel-native **Neon** Postgres integration, attached early
 in the project's life (before Supabase was chosen) and never removed,
@@ -226,6 +261,29 @@ here before moving on, even if you also wrote it up elsewhere.
   `kaggle.com/code/<username>/pyquant-backtest-runner`, then trigger one
   fresh backtest from the UI to let the first push recreate it correctly
   typed.
+  **2026-10-26 update: done, and it worked** — the owner deleted the old
+  kernel and confirmed the next push created a correctly-typed script
+  kernel. **But the backtest still failed**, with Kaggle's own UI
+  showing no error log at all — see the top-of-file 2026-10-26 entry for
+  the full writeup and the GitHub Actions alternative this led to. This
+  item is superseded by the two new items directly below; not pursuing
+  further Kaggle-kernel debugging unless the GitHub Actions path also
+  hits a wall.
+- [x] **GitHub Actions backtest-execution alternative, built 2026-10-26**
+  — `.github/workflows/backtest.yml` + `kaggle_backtest/
+  run_backtest_gha.py` + `api/index.py`'s `_trigger_github_backtest()`.
+  See top-of-file entry for the full design. **Code-complete, pushed —
+  NOT yet set up or tested live**: needs `KAGGLE_USERNAME`/`KAGGLE_KEY`
+  added as GitHub repo secrets and `GITHUB_DISPATCH_TOKEN` added as a
+  Vercel env var (both documented step-by-step in `KAGGLE.md` Part J),
+  then a real "Run Backtest" click to confirm end to end.
+- [ ] **Decide whether to keep both backtest paths long-term, or retire
+  the Kaggle-kernel one.** Deliberately not deleting `_push_kaggle_kernel()`/
+  `run_backtest.py`/`kernel-metadata.json` yet — they're correct code
+  for a path that worked right up until an unexplained Kaggle-side
+  failure, and keeping them costs nothing but a little dead weight.
+  Revisit once the GitHub Actions path has a few confirmed successful
+  runs under it.
 - [ ] **Still open: `GET /api/heartbeat` was empty even after the owner
   pasted matching `DATABASE_URL` values into both Vercel and GitHub.**
   `GET /api/dashboard` DOES show real data written moments earlier by

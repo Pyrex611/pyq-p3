@@ -33,16 +33,21 @@ walkforward runs from the UI. The daily optimizer (`daily_optimizer()`,
 once per day, still does one real UKF retrain + a 150-trial search) is
 a secondary candidate worth watching — see Part F.
 
-**What this integration is:** the UI's "Run Backtest" button calls
+**What this integration is (2026-10-25: EXECUTION moved to GitHub
+Actions — see Part H):** the UI's "Run Backtest" button calls
 `POST /api/backtests` on the Vercel API, which writes an immediate
-`queued` row (so the UI has something to show right away) and triggers a
-Kaggle kernel run via Kaggle's API — no polling loop needed, since the
-Kaggle API call itself is the trigger. The kernel (`kaggle_backtest/
-run_backtest.py`) clones this public repo, runs `walkforward.py` with
-your chosen parameter overrides, and writes its result straight back to
+`queued` row (so the UI has something to show right away) and triggers
+the actual backtest run elsewhere. Historical data still comes from a
+Kaggle **Dataset** either way (Part E below) — only WHERE the Python
+code actually executes changed, from a Kaggle kernel to a GitHub Actions
+job (Part H). Whichever path runs it writes its result straight back to
 the same shared Supabase Postgres database the rest of the platform
 already uses — the UI just keeps polling `GET /api/runs/{id}`, exactly
-like any other run.
+like any other run. **Do Part J, not just Parts B–G** — Parts B/C/E are
+still needed (Kaggle account + dataset), but Part D/F's Kaggle-KERNEL
+creation/secret-attachment steps are now only a fallback, not the active
+path; skip straight to Part J after Part E unless you're deliberately
+trying the Kaggle-kernel path again.
 
 **What it is NOT:** a way to run backtests on a schedule, or to run two
 at once. Only one backtest kernel exists (see Part D for why it's a
@@ -89,9 +94,24 @@ walkforwards — skip to whichever of these you haven't already done.
    effect — Vercel doesn't pick up new environment variables on already-
    running deployments.
 
-## Part D — Create the Kaggle kernel
+## Part D — Create the Kaggle kernel (fallback path — see Part J)
 
-### ⚠️ 2026-10-25 incident: kernel type mismatch → 409 Conflict
+### ⚠️ 2026-10-25 incident: kernel type mismatch → 409 Conflict, THEN a
+### second, undiagnosable failure after that fix — this is why Part J exists
+
+After fixing the 409 below, a subsequent real run failed AGAIN —
+Kaggle's own UI just showed "Failed" with no error log, no traceback,
+nothing to act on. Nothing on this end could inspect it further (no
+programmatic access to a Kaggle kernel's execution log from this
+session). Rather than keep guessing at an opaque execution environment,
+**Part J moves backtest EXECUTION to GitHub Actions instead** — same
+historical data (this Kaggle dataset, downloaded directly, no kernel
+involved), but running inside a job whose logs have already proven
+reliable for this exact dependency stack. This Part D is kept as a
+documented fallback, not deleted, in case the Kaggle-kernel path is
+ever worth revisiting.
+
+### ⚠️ 2026-10-25 incident (earlier the same day): kernel type mismatch → 409 Conflict
 
 A live run hit `502 — Could not start the Kaggle run: 409 Client Error:
 Conflict for url: .../SaveKernel`. Root cause: this doc used to tell you
@@ -172,7 +192,7 @@ own Kaggle/Colab backtest runs.
 This only needs doing once — it survives every future version the API
 pushes to this same kernel slug.
 
-## Part G — Test it
+## Part G — Test it (fallback Kaggle-kernel path — see Part J for the active path)
 
 1. Open the deployed UI's Backtest page
    (`https://pyq-p3.vercel.app/backtest.html`).
@@ -256,6 +276,74 @@ roughly cheapest-to-build to most capable:
    Secret, `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` — a real scope increase
    for a kernel that currently only needs `DATABASE_URL`) and adding
    Alpaca API latency to every backtest run instead of just once a day.
+
+## Part J — GitHub Actions alternative (2026-10-25, now the active path)
+
+Why this exists: see Part D's 2026-10-25 incident note. A backtest that
+still failed after the kernel-type fix, with Kaggle's own UI showing no
+error detail at all, made the Kaggle-kernel path undebuggable from this
+session — so execution moved to GitHub Actions instead, reusing the
+exact `requirements.txt` this repo's `orchestra.yml` cron workflow
+already installs successfully on every tick (proven reliable) and
+GitHub's own log viewer (also already proven reliable). Historical data
+still comes from the Kaggle Dataset set up in Part E — only a plain
+`kaggle datasets download` call, not a kernel, so none of the opacity
+that caused this switch applies to it.
+
+New files: `.github/workflows/backtest.yml` (the workflow) and
+`kaggle_backtest/run_backtest_gha.py` (the script it runs — a GitHub
+Actions counterpart to `run_backtest.py`, see that file's own docstring
+for the exact differences). `api/index.py`'s `POST /api/backtests` now
+calls `_trigger_github_backtest()` instead of `_push_kaggle_kernel()`.
+
+### J1 — Add GitHub repository secrets (reuses your existing Kaggle credentials)
+
+Same place as `GITHUB_ACTIONS_SETUP.md` Part B (repo **Settings** →
+**Secrets and variables** → **Actions** → **New repository secret**):
+
+| Name | Value |
+|---|---|
+| `KAGGLE_USERNAME` | The same value as your Vercel `KAGGLE_USERNAME` env var (Part C above) |
+| `KAGGLE_KEY` | The same value as your Vercel `KAGGLE_KEY` env var |
+
+(`DATABASE_URL` is already a repo secret from `GITHUB_ACTIONS_SETUP.md`
+Part B — `backtest.yml` reuses it, nothing new needed there.)
+
+### J2 — Add a Vercel environment variable: `GITHUB_DISPATCH_TOKEN`
+
+This is the same **kind** of token as `GITHUB_ACTIONS_SETUP.md` Part
+G's cron-reliability pinger (a fine-grained PAT, this repo only,
+**Actions: Read and write** permission) — if you already created that
+one, reuse its value here rather than making a second token:
+
+1. Vercel project → **Settings** → **Environment Variables**.
+2. **Key:** `GITHUB_DISPATCH_TOKEN`. **Value:** the PAT from
+   `GITHUB_ACTIONS_SETUP.md` Part G step 1 (or a new one made the same
+   way, if you'd rather keep them separate).
+3. Select all three environments, **Save**, then **Redeploy** (Vercel
+   doesn't apply a new env var to an already-built deployment —
+   `VERCEL_DEPLOY.md`'s standing note).
+
+### J3 — Test it
+
+1. Open the deployed UI's Backtest page and click **Run Backtest**
+   exactly as in Part G above — the button and the UI's polling behavior
+   are unchanged; only what happens behind `POST /api/backtests` is
+   different now.
+2. To watch it directly: repo's **Actions** tab → **PyQuant Backtest
+   (triggered by UI)** → the newest run → **backtest** job → step logs.
+   Every step (`Download historical-data Kaggle Dataset`, `Run
+   backtest`) shows its own full output, and `run_backtest_gha.py`
+   prints a step-by-step `[run_backtest_gha] ...` trace specifically so
+   a failure anywhere is visible here — unlike the Kaggle-kernel path's
+   blank failure.
+3. **If `POST /api/backtests` itself returns "Backtest triggering isn't
+   configured on this deployment"**: `GITHUB_DISPATCH_TOKEN` or
+   `KAGGLE_DATASET_SLUG` is missing on Vercel — check J2 and Part C.
+4. **If the GitHub Actions run itself shows a red ✕**: open its log
+   (step 2 above) — every failure mode prints a real message, including
+   ones that would have been silent on Kaggle (a missing env var, the
+   dataset download failing, a `walkforward.py` exception).
 
 **Leaning recommendation if/when this gets built:** option 1, run from
 `daily_optimizer()` rather than the API — it reuses data already being
