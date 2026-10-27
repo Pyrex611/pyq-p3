@@ -39,7 +39,17 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 2026-10-27: was 10. Raised because the daily parameter search
+    # (p4_orchestra.py's _run_daily_param_search(), up to 150 Optuna
+    # trials over a year of hourly data for two symbols) can run past 10
+    # minutes, and GitHub Actions kills the whole job on timeout — no
+    # Python exception, nothing for try/except to catch. The UKF
+    # re-anchor is now called FIRST and independently guarded (see that
+    # file's 2026-10-27 comment) specifically so a param-search timeout
+    # can no longer block it, but giving the search itself more headroom
+    # to actually finish — rather than being silently killed and
+    # recorded nowhere — is still worth doing on its own.
+    timeout-minutes: 25
     steps:
       - name: Check out repo
         uses: actions/checkout@v4

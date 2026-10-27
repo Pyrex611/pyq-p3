@@ -259,10 +259,27 @@ def get_heartbeat():
             age_seconds = (now - last_ts).total_seconds()
         except Exception:
             age_seconds = None
+
+    # 2026-10-27: surfaces p4_orchestra.py's daily UKF re-anchor result
+    # (pyquant_ukf_retrain_heartbeat, written by _run_daily_ukf_retrain())
+    # so "is the UKF actually being retrained" is answerable from the UI
+    # instead of a GitHub Actions log dig — see PLAN.md's same-dated entry
+    # for the "no new signal for 3 days" root cause this was added for
+    # (a slow param-search timing out the job before the re-anchor ran).
+    ukf_retrain = state_store.get_json("pyquant_ukf_retrain_heartbeat")
+    ukf_retrain_age_seconds = None
+    if ukf_retrain and ukf_retrain.get("ts"):
+        try:
+            ukf_retrain_age_seconds = (now - datetime.fromisoformat(ukf_retrain["ts"])).total_seconds()
+        except Exception:
+            ukf_retrain_age_seconds = None
+
     return {
         "cron": cron,
         "cron_age_seconds": age_seconds,
         "signal_diagnostics": diagnostics or {},
+        "ukf_retrain": ukf_retrain,
+        "ukf_retrain_age_seconds": ukf_retrain_age_seconds,
     }
 
 

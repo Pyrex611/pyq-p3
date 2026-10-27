@@ -20,6 +20,7 @@ file) and a stateless cron tick (`cron_runner.py`) now both exist.
 import json
 import time
 import traceback
+from datetime import datetime, timezone
 import schedule
 
 import pyq_p4
@@ -36,6 +37,59 @@ def daily_optimizer():
     # (GitHub Actions' */5 * * * * schedule, see cron_runner.py) calling
     # this unconditionally on every matching tick needs this guard so it
     # still only actually runs once per day.
+    #
+    # 2026-10-27 — found via a live "no new signal for 3 days" report:
+    # the guard used to wrap BOTH the UKF re-anchor (fast: two Alpaca bar
+    # fetches + a UKF fit) AND the Bayesian/grid parameter search (slow:
+    # up to 150 Optuna trials over a year of hourly data for two
+    # symbols), as one all-or-nothing try/except, with the UKF re-anchor
+    # called LAST. `orchestra.yml`'s job has a 10-minute timeout; if the
+    # search alone ran past it, GitHub Actions kills the whole process —
+    # not a Python exception this code ever sees — AFTER the day's claim
+    # was already taken (try_claim_run() claims up front, before any of
+    # the slow work) and BEFORE retrain_daily_ukfs() ever ran. Every tick
+    # for the rest of that day then hit the "already ran… skipping" guard
+    # above, and the live 1H UKFs went un-re-anchored — exactly the kind
+    # of slow drift that stops the strategy from firing signals, with
+    # nothing in any log or the UI pointing at why (GitHub Actions' own
+    # "job was cancelled" note is easy to miss and wasn't being recorded
+    # anywhere this platform reads).
+    #
+    # Fix: two independent guards/try-excepts instead of one, and the
+    # cheap, must-happen UKF re-anchor goes FIRST so a parameter-search
+    # timeout can no longer starve it — matching the one thing that
+    # actually has to happen daily for live signal generation to track
+    # walkforward.py's own simulated retrain cadence. A heartbeat is also
+    # written either way so GET /api/heartbeat (Live Monitor page) can
+    # show real pass/fail status instead of requiring a GitHub Actions
+    # log dig every time this is in doubt.
+    _run_daily_ukf_retrain()
+    _run_daily_param_search()
+
+
+def _run_daily_ukf_retrain():
+    if not state_store.try_claim_run("ukf_retrain", state_store.current_day_bucket()):
+        print("[Orchestra] ukf_retrain already ran (or is running) today. Skipping.")
+        return
+    print("[Orchestra] Re-anchoring 1H UKFs…")
+    try:
+        pyq_p4.retrain_daily_ukfs()
+        state_store.set_json("pyquant_ukf_retrain_heartbeat", {
+            "ts": datetime.now(timezone.utc).isoformat(), "status": "ok",
+        })
+        print("[Orchestra] UKF re-anchor complete.")
+    except Exception as e:
+        err = f"{e}\n{traceback.format_exc()}"
+        print(f"[Orchestra] ukf_retrain error: {err}")
+        try:
+            state_store.set_json("pyquant_ukf_retrain_heartbeat", {
+                "ts": datetime.now(timezone.utc).isoformat(), "status": "failed", "error": str(e),
+            })
+        except Exception as e2:
+            print(f"[Orchestra] ALSO failed to record the ukf_retrain failure itself: {e2}")
+
+
+def _run_daily_param_search():
     if not state_store.try_claim_run("daily_optimizer", state_store.current_day_bucket()):
         print("[Orchestra] daily_optimizer already ran (or is running) today. Skipping.")
         return
@@ -72,12 +126,21 @@ def daily_optimizer():
         except Exception as e:
             print(f"[Orchestra] run logging failed (non-fatal): {e}")
 
-        # 4. Re-anchor live 1H UKF models on the new trailing 30-day window (matches walkforward.py)
-        pyq_p4.retrain_daily_ukfs()
-
     except Exception as e:
-        print(f"[Orchestra] daily_optimizer error: {e}")
-        print(traceback.format_exc())
+        err = f"{e}\n{traceback.format_exc()}"
+        print(f"[Orchestra] daily_optimizer error: {err}")
+        # 2026-10-27: record this as a real, visible failed run (not just
+        # a print easy to miss in GitHub Actions' log) — same pattern as
+        # the UI-submitted-backtest flow (request_backtest + failed
+        # update_run_status). include_failed=true on GET /api/runs shows
+        # it; a param-search failure no longer silently repeats for 24h
+        # with nothing to point at why.
+        try:
+            rid = state_store.request_backtest(run_type="daily_optimizer", params={}, symbol="BTC+ETH")
+            if rid is not None:
+                state_store.update_run_status(rid, "failed", error=str(e))
+        except Exception as e2:
+            print(f"[Orchestra] ALSO failed to record the daily_optimizer failure itself: {e2}")
 
 
 # Guarded behind __main__ (added during the GitHub Actions cron migration)

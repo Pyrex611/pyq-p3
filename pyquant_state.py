@@ -661,9 +661,22 @@ _SIGNALS_BASELINE_KEY = "pyquant_signals_baseline"
 
 def get_signals_baseline() -> Optional[str]:
     """Returns the ISO timestamp signals/stats should be considered
-    "fresh" from, or None if no baseline has ever been set (meaning:
-    count everything, the original behavior)."""
+    "fresh" from, or None if the baseline has been explicitly cleared
+    (Settings page's "Clear" button — means: count everything).
+
+    2026-10-27 self-heal: if the `pyquant_kv` row has NEVER been written
+    at all (the common case — most deployments never click "Start Fresh
+    From Now"), this auto-initializes it to now() the first time it's
+    read, instead of defaulting to "count everything". Found because a
+    pre-2026-10-25 $6 USD-PnL leftover signal kept showing up in the
+    Dashboard's "recent" figures even after later live fixes — the owner
+    had to opt in by hand, which they reasonably didn't realize was
+    needed. An EXPLICIT clear (which stores `{"reset_at": None}`, a
+    present-but-null row — distinct from an absent row) still means
+    "count everything" and is never overridden here."""
     val = get_json(_SIGNALS_BASELINE_KEY)
+    if val is None:
+        return set_signals_baseline()
     return val.get("reset_at") if isinstance(val, dict) else None
 
 

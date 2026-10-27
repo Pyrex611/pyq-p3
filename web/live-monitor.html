@@ -32,6 +32,7 @@
     <div class="card" id="heartbeat-card" style="margin-bottom:16px;">
       <h3>Engine Heartbeat</h3>
       <div class="stat-label" id="heartbeat-text">Checking…</div>
+      <div class="stat-label" id="ukf-retrain-text" style="margin-top:8px;">Checking…</div>
     </div>
     <div class="card" style="margin-bottom:16px;">
       <h3>Signal Diagnostics (last hourly tick, each symbol)</h3>
@@ -99,6 +100,27 @@ async function loadHeartbeat() {
         : age < 900
           ? `<span style="color:#f5a623;">● Stale</span> — last tick ${mins} min ago (expected every ~5 min)`
           : `<span style="color:#e5484d;">● Not reporting</span> — last tick ${mins} min ago. Check the GitHub Actions run history.`;
+    }
+
+    // 2026-10-27: separate from the 5-min cron heartbeat above — this is
+    // specifically "did the once-daily 1H UKF re-anchor actually happen
+    // today", added after a live incident where a slow parameter search
+    // timed out the job before the re-anchor ran, silently stalling
+    // signal generation for days with nothing in the UI pointing at why.
+    const ukfEl = document.getElementById("ukf-retrain-text");
+    const ukf = h.ukf_retrain;
+    const ukfAge = h.ukf_retrain_age_seconds;
+    if (!ukf || ukfAge === null || ukfAge === undefined) {
+      ukfEl.innerHTML = `<span style="color:var(--text-faint);">UKF re-anchor: no record yet — either this hasn't shipped to this deployment yet, or it hasn't ticked since.</span>`;
+    } else {
+      const hrs = (ukfAge / 3600).toFixed(1);
+      if (ukf.status === "failed") {
+        ukfEl.innerHTML = `<span style="color:#e5484d;">● UKF re-anchor FAILED</span> ${hrs}h ago: ${ukf.error || "unknown error"}`;
+      } else if (ukfAge > 36 * 3600) {
+        ukfEl.innerHTML = `<span style="color:#e5484d;">● UKF re-anchor overdue</span> — last success ${hrs}h ago (expected daily). Check GitHub Actions run history.`;
+      } else {
+        ukfEl.innerHTML = `<span style="color:#3ddc84;">● UKF re-anchored</span> ${hrs}h ago`;
+      }
     }
 
     const diag = h.signal_diagnostics || {};

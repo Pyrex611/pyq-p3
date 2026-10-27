@@ -1,6 +1,77 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-27. Backtest "reform" pass, per the owner's
+**Last updated:** 2026-10-27, second pass same day. Live-incident root
+cause found: **no new signal generated for ~3 days.** Owner's report
+plus a GitHub Actions log from the top of an hour confirmed the daily
+UKF re-anchor was the suspect (`"Persisted UKF state found — using
+cheap shells (no Alpaca fetch/retrain this tick)"` on every tick, plus
+`"[Orchestra] daily_optimizer already ran (or is running) today.
+Skipping."`). Root cause: `p4_orchestra.py`'s `daily_optimizer()` wrapped
+BOTH the fast 1H-UKF re-anchor (`pyq_p4.retrain_daily_ukfs()`, called
+LAST) and the slow Bayesian/grid parameter search (up to 150 Optuna
+trials over a year of hourly data × 2 symbols) in one try/except behind
+ONE run-guard claimed up front. `orchestra.yml`'s job has a (then-)
+10-minute timeout; if the search alone ran past it, GitHub Actions kills
+the whole process outright — not a Python exception, nothing any
+try/except here ever saw — AFTER the day's guard was already claimed
+and BEFORE the re-anchor ran. Every tick for the rest of that day then
+hit "already ran… skipping", and the live 1H UKFs went un-re-anchored —
+exactly the slow-drift failure mode that stops signal generation, with
+nothing in the UI pointing at why. **Fixed:**
+1. `daily_optimizer()` split into two independently-guarded,
+   independently-try/excepted steps (`_run_daily_ukf_retrain()`,
+   `_run_daily_param_search()`), re-anchor FIRST — a param-search
+   timeout can no longer starve it.
+2. Both write a result (success or failure) somewhere this platform
+   actually reads: the re-anchor writes a new
+   `pyquant_ukf_retrain_heartbeat` KV row, surfaced on `GET
+   /api/heartbeat`'s new `ukf_retrain`/`ukf_retrain_age_seconds` fields
+   and the Live Monitor page's Engine Heartbeat card (so "is the UKF
+   being retrained" is now a glance, not a log dig); the param search
+   writes a real `failed` `pyquant_runs` row via `request_backtest()` +
+   `update_run_status()` on exception, instead of a print easy to miss.
+3. `orchestra.yml`'s job `timeout-minutes` raised 10 → 25, giving the
+   search itself more room to actually finish (tradeoff: a slow day can
+   now occupy the `pyquant-orchestra` concurrency group — and so delay
+   the 5-minute tick cadence — for up to 25 minutes instead of 10; judged
+   worth it since the re-anchor no longer depends on the search
+   finishing at all).
+4. Separately: the Dashboard's lingering pre-fix "$6" figure (reported
+   still showing even after the previous push) was the signals-baseline
+   feature requiring an opt-in click the owner reasonably didn't know to
+   make. `pyquant_state.get_signals_baseline()` now self-heals to now()
+   the FIRST time it's ever read if no baseline row exists at all yet —
+   an explicit "Clear" (Settings page) still means "count everything"
+   and is never overridden by this. No manual step needed going forward.
+
+**Confirmed already correct, no change needed:** `web/backtest.html`'s
+"Sync to Kaggle" button (shipped in the previous pass) already just
+pushes the kernel and links to it for the owner to open and click "Save
+& Run All" themselves — it never calls any Kaggle run/execute API, so
+"don't try to trigger the backtest remotely" was already how it worked.
+
+**Not yet done / next priorities**, per the owner's explicit ask to
+prioritize signal-generation/UKF correctness first, then a fuller
+platform review:
+- **Live-test this fix**: needs a real GitHub Actions run of
+  `daily_optimizer` to confirm the re-anchor now lands even if the
+  search is slow, and the new Live Monitor heartbeat line renders. Not
+  verifiable from this session (no live DB/Actions access).
+- **Broader platform review** (asked for, not yet done in full): a
+  pass over `pyq_p4.py`/`p4_utils.py`/`walkforward.py` specifically
+  checking live-vs-backtest parity beyond the 1H UKF (e.g. whether
+  15T/5T UKFs — never re-anchored by `retrain_daily_ukfs()` either,
+  by design, only incrementally `.predict()`/`.update()`'d — drift
+  differently live than in `walkforward.py`'s fresh-per-window
+  training; whether `SignalGenerator.load_params()` ever actually picks
+  up a day's new `optimal_params` write in practice).
+- **Data pipeline cleanup** (asked for): a pass confirming every
+  incoming tick's data is captured/stored/displayed with nothing
+  silently dropped — deferred pending the above being confirmed fixed
+  first, per the owner's stated priority order.
+
+**Previous update, 2026-10-27, first pass same day.** Backtest "reform"
+pass, per the owner's
 2026-10-26 request to rework backtest persistence/comparison "without
 breaking what already works." Five pieces, all code-complete:
 
