@@ -206,6 +206,33 @@ def get_open_signals():
     return {"signals": state_store.list_signals(status="open", limit=50)}
 
 
+# ── Signals baseline ("fresh start") — 2026-10-26 ────────────────────────
+#
+# A soft, non-destructive marker: GET /api/dashboard (and GET /api/compare
+# below) exclude anything opened before this timestamp from their
+# figures, but nothing is deleted — the Signals page (GET /api/signals)
+# always shows full history regardless. Added after the TP/SL
+# close-tracking fix (PLAN.md 2026-10-25) closed a backlog of old
+# signals whose PnL numbers predate that fix, and the owner asked for
+# the system to "start fresh" going forward without losing that history.
+
+@app.get("/api/signals/baseline")
+def get_signals_baseline():
+    return {"reset_at": state_store.get_signals_baseline()}
+
+
+@app.post("/api/signals/baseline/reset")
+def reset_signals_baseline():
+    ts = state_store.set_signals_baseline()
+    return {"reset_at": ts}
+
+
+@app.post("/api/signals/baseline/clear")
+def clear_signals_baseline():
+    state_store.clear_signals_baseline()
+    return {"reset_at": None}
+
+
 # ── Heartbeat / engine-liveness diagnostics (Live Monitor screen) ───────
 #
 # Signal-visibility audit (2026-10-19/20): before this endpoint existed,
@@ -344,6 +371,60 @@ def create_backtest(body: BacktestRequest):
     return {"run_id": run_id, "status": "queued"}
 
 
+@app.post("/api/backtests/sync-to-kaggle")
+def sync_backtest_to_kaggle(body: BacktestRequest):
+    """The manual-trigger half of the Kaggle path (KAGGLE.md Part K): pushes
+    a new version of the same Kaggle kernel with this run's values baked
+    into run_backtest.py's RUN PARAMETERS block, then returns the kernel's
+    URL so the owner can open it in Kaggle's own editor and click "Save &
+    Run All" themselves — full, visible console output, no GitHub Actions
+    involved. Separate from POST /api/backtests (the GitHub-Actions path,
+    now the default "Run Backtest" button) — this is the "Sync to Kaggle"
+    button instead, for when a hands-on re-run with full visibility is
+    wanted, or GitHub Actions' own path is blocked for some reason."""
+    username = os.environ.get("KAGGLE_USERNAME", "").strip()
+    key = os.environ.get("KAGGLE_KEY", "").strip()
+    dataset_slug = os.environ.get("KAGGLE_DATASET_SLUG", "").strip()
+    for _prefix in ("https://www.kaggle.com/datasets/", "http://www.kaggle.com/datasets/",
+                     "www.kaggle.com/datasets/", "kaggle.com/datasets/"):
+        if dataset_slug.lower().startswith(_prefix):
+            dataset_slug = dataset_slug[len(_prefix):]
+            break
+    dataset_slug = dataset_slug.strip("/")
+
+    if not (username and key and dataset_slug):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Kaggle sync isn't configured on this deployment (missing "
+                "KAGGLE_USERNAME/KAGGLE_KEY/KAGGLE_DATASET_SLUG env vars) "
+                "— see KAGGLE.md Part D/E."
+            ),
+        )
+
+    params = body.model_dump(exclude_none=True)
+    run_id = state_store.request_backtest(run_type="walkforward", params=params, symbol="BTC+ETH")
+    if run_id is None:
+        raise HTTPException(status_code=500, detail="Could not create the queued run (state store write failed)")
+
+    try:
+        _push_kaggle_kernel(run_id, params, username, key, dataset_slug)
+    except Exception as e:
+        state_store.update_run_status(run_id, "failed", error=f"Kaggle kernel push failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not push to Kaggle: {e}")
+
+    # Stays "queued" — unlike the GitHub Actions path, nothing here starts
+    # the run itself. A human (or Kaggle's own auto-run-on-push setting,
+    # if the owner has turned that on) is what actually runs it next.
+    kernel_slug = f"{username}/pyquant-backtest-runner"
+    return {
+        "run_id": run_id,
+        "status": "queued",
+        "kaggle_kernel_url": f"https://www.kaggle.com/code/{kernel_slug}",
+        "note": "Pushed. Open the kernel in Kaggle's editor and click \"Save & Run All\" to start it.",
+    }
+
+
 def _trigger_github_backtest(run_id: int, params: dict, dataset_slug: str, github_token: str) -> None:
     """Fires .github/workflows/backtest.yml's workflow_dispatch trigger via
     GitHub's REST API — see this section's header comment above for why
@@ -386,32 +467,48 @@ def _trigger_github_backtest(run_id: int, params: dict, dataset_slug: str, githu
         raise RuntimeError(f"GitHub API returned {resp.status_code}: {resp.text[:500]}")
 
 
-# 2026-10-25: no longer called by create_backtest() above (see that
-# section's header comment) — kept, unmodified, as a documented fallback
-# in case the Kaggle-kernel path is ever worth debugging further or the
-# GitHub Actions path runs into its own blocker. Not dead code to delete;
-# just currently unused.
+# 2026-10-26: this is the "manual-trigger" path's push half — the owner's
+# ask was "paste it in Kaggle manually... OR have it automatically put the
+# code there like it does currently" (PLAN.md/KAGGLE.md Part K). It stopped
+# being create_backtest()'s own trigger on 2026-10-25 (GitHub Actions is the
+# default execution path now — see that function's header comment above),
+# but it's very much alive again as what POST /api/backtests/sync-to-kaggle
+# (below) calls: push fresh values into the SAME kernel slug, then the
+# owner opens Kaggle's own editor and clicks "Save & Run All" for full,
+# visible console output — or lets Kaggle's own auto-run-on-push behavior
+# start it. Rewritten 2026-10-26 to match kaggle_backtest/run_backtest.py's
+# new design: that script no longer reads a separate params.json (which
+# was invisible unless you went looking for it, and not hand-editable
+# before a manual re-run) — it reads inline module-level constants instead,
+# between the `# ── RUN PARAMETERS ──` / `# ── END RUN PARAMETERS ──`
+# marker comments. This function now does the equivalent of hand-editing
+# those lines: read the template, string-replace that exact block with one
+# baking in this run's real values, then push the result. If those marker
+# strings are ever renamed in run_backtest.py, update _RUN_PARAMS_START/
+# _RUN_PARAMS_END below in the same change — they must match verbatim.
 def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, dataset_slug: str) -> None:
-    """Copies the kaggle_backtest/ template into a temp dir with this
-    run's params.json baked in, points kernel-metadata.json at the
-    configured dataset, and pushes a NEW VERSION of the SAME kernel slug
-    every time (not a new slug per run) — deliberately, so the DATABASE_URL
-    Kaggle Secret attached once, by hand, in the Kaggle web editor (see
-    KAGGLE.md Part D) stays attached across every push. Kaggle attaches a
-    secret to a kernel, not to one specific version of it, so pushing new
-    code/params to the same existing kernel id keeps that attachment —
-    pushing under a fresh slug per run would NOT (a brand-new kernel has
-    no secrets attached until someone opens it in the editor and toggles
-    one on, which defeats the point of triggering runs with no human in
-    the loop). The practical corollary: only one backtest can usefully be
-    in flight at a time — a second push while one is still running starts
-    a new version of the same kernel, and KAGGLE.md documents this as a
-    known, accepted limitation rather than something this code tries to
-    queue or serialize itself.
+    """Copies the kaggle_backtest/ template into a temp dir with this run's
+    parameters baked directly into its RUN PARAMETERS block (see header
+    comment above), points kernel-metadata.json at the configured dataset,
+    and pushes a NEW VERSION of the SAME kernel slug every time (not a new
+    slug per run) — deliberately, so the DATABASE_URL Kaggle Secret
+    attached once, by hand, in the Kaggle web editor (see KAGGLE.md Part D)
+    stays attached across every push. Kaggle attaches a secret to a
+    kernel, not to one specific version of it, so pushing new code to the
+    same existing kernel id keeps that attachment — pushing under a fresh
+    slug per run would NOT (a brand-new kernel has no secrets attached
+    until someone opens it in the editor and toggles one on, which defeats
+    the point of triggering runs with no human in the loop). The practical
+    corollary: only one backtest can usefully be in flight at a time — a
+    second push while one is still running starts a new version of the
+    same kernel, and KAGGLE.md documents this as a known, accepted
+    limitation rather than something this code tries to queue or
+    serialize itself.
 
-    Raises on any failure — the caller above turns that into a failed run
+    Raises on any failure — the caller below turns that into a failed run
     + a 502, rather than leaving the run stuck."""
     import json
+    import re
     import shutil
     import tempfile
 
@@ -444,7 +541,11 @@ def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, data
 
     template_dir = _REPO_ROOT / "kaggle_backtest"
     with tempfile.TemporaryDirectory() as tmp:
-        shutil.copy(template_dir / "run_backtest.py", os.path.join(tmp, "run_backtest.py"))
+        with open(template_dir / "run_backtest.py") as f:
+            script = f.read()
+        script = _render_run_params_block(script, run_id, params, dataset_slug)
+        with open(os.path.join(tmp, "run_backtest.py"), "w") as f:
+            f.write(script)
 
         with open(template_dir / "kernel-metadata.json") as f:
             meta = json.load(f)
@@ -453,15 +554,61 @@ def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, data
         with open(os.path.join(tmp, "kernel-metadata.json"), "w") as f:
             json.dump(meta, f)
 
-        run_params = dict(params)
-        run_params["run_id"] = run_id
-        run_params["dataset_slug"] = dataset_slug
-        with open(os.path.join(tmp, "params.json"), "w") as f:
-            json.dump(run_params, f)
-
         api = KaggleApi()
         api.authenticate()
         api.kernels_push(tmp)
+
+
+_RUN_PARAMS_START = "# ── RUN PARAMETERS "
+_RUN_PARAMS_END = "# ── END RUN PARAMETERS "
+
+
+def _render_run_params_block(script: str, run_id: int, params: dict, dataset_slug: str) -> str:
+    """String-replaces run_backtest.py's RUN PARAMETERS block (the lines
+    between the `# ── RUN PARAMETERS ──` / `# ── END RUN PARAMETERS ──`
+    marker comments) with one baking in this run's real values — the
+    automated-push equivalent of hand-editing those same constants in
+    Kaggle's own editor. Raises ValueError if the markers aren't found
+    (fail loudly rather than silently pushing the template's placeholder
+    defaults — exactly the bug this rewrite exists to prevent)."""
+    import re
+
+    start_idx = script.find(_RUN_PARAMS_START)
+    end_idx = script.find(_RUN_PARAMS_END)
+    if start_idx == -1 or end_idx == -1 or end_idx < start_idx:
+        raise ValueError(
+            "run_backtest.py's RUN PARAMETERS markers were not found — "
+            "template may have been edited; _render_run_params_block() "
+            "needs updating to match (see api/index.py's comment above "
+            "_push_kaggle_kernel())."
+        )
+    # end_idx currently points at the start of the END marker's own line;
+    # walk it back to the end of the PREVIOUS line so that line (the last
+    # real parameter assignment) is kept, and walk start_idx forward past
+    # its own marker line so that one is replaced along with the body.
+    block_start = script.find("\n", start_idx) + 1
+    block_end = end_idx
+
+    def _lit(key: str):
+        v = params.get(key)
+        if v is None:
+            return "None"
+        if isinstance(v, bool):
+            return "True" if v else "False"
+        if isinstance(v, (int, float)):
+            return repr(v)
+        return repr(str(v))
+
+    new_block = (
+        f"RUN_ID = {run_id!r}\n"
+        f"WALK_FORWARD_DAYS = {_lit('walk_forward_days')}\n"
+        f"BAYESIAN_TRIALS = {_lit('bayesian_trials')}\n"
+        f"LEVERAGE = {_lit('leverage')}\n"
+        f"USE_BAYESIAN = {_lit('use_bayesian')}\n"
+        f"USE_ATR_SL = {_lit('use_atr_sl')}\n"
+        f"DATASET_SLUG = {dataset_slug!r}\n"
+    )
+    return script[:block_start] + new_block + script[block_end:]
 
 
 # ── Dashboard summary ────────────────────────────────────────────────────
@@ -470,10 +617,25 @@ def _push_kaggle_kernel(run_id: int, params: dict, username: str, key: str, data
 def get_dashboard():
     """One combined payload for the Main/Dashboard screen so the frontend
     doesn't have to make four round trips on first paint."""
-    open_signals = state_store.list_signals(status="open", limit=50)
+    # 2026-10-26 ("fresh start"): if a signals baseline has been set
+    # (POST /api/signals/reset-baseline), everything opened before it is
+    # excluded from every figure below — it still exists (Signals page,
+    # GET /api/compare), this is a display filter, not a delete. See
+    # pyquant_state.py's get_signals_baseline() docstring for why.
+    baseline = state_store.get_signals_baseline()
+
+    def _after_baseline(s: dict) -> bool:
+        if not baseline or not s.get("opened_at"):
+            return True
+        try:
+            return datetime.fromisoformat(s["opened_at"]) >= datetime.fromisoformat(baseline)
+        except Exception:
+            return True
+
+    open_signals = [s for s in state_store.list_signals(status="open", limit=50) if _after_baseline(s)]
     recent_closed = [
         s for s in state_store.list_signals(limit=50)
-        if s["status"] not in ("open",)
+        if s["status"] not in ("open",) and _after_baseline(s)
     ][:10]
     runs = state_store.list_runs(limit=1)
     # 2026-10-25 (PnL-by-percentage): a summed dollar PnL is meaningless
@@ -485,12 +647,12 @@ def get_dashboard():
     # don't, and are excluded from the average rather than counted as
     # 0%). realized_pnl (USD) is kept as a secondary figure for paper/live
     # rows where a real balance delta is meaningful.
-    closed_recent = [
-        s for s in state_store.list_signals(limit=200) if s["status"] not in ("open",)
+    perf = state_store.compute_live_performance(since=baseline, limit=200)
+    closed_recent_all = [
+        s for s in state_store.list_signals(limit=200)
+        if s["status"] not in ("open",) and _after_baseline(s)
     ]
-    pct_values = [s["realized_pnl_pct"] for s in closed_recent if s.get("realized_pnl_pct") is not None]
-    avg_pnl_pct = (sum(pct_values) / len(pct_values)) if pct_values else None
-    realized_pnl_30 = sum((s.get("realized_pnl") or 0.0) for s in closed_recent)
+    realized_pnl_30 = sum((s.get("realized_pnl") or 0.0) for s in closed_recent_all)
     # Signal-visibility audit (2026-10-19/20): include a thin heartbeat
     # summary here too (full detail is GET /api/heartbeat) so the main
     # Dashboard screen itself shows engine-liveness on first paint, not
@@ -509,9 +671,40 @@ def get_dashboard():
         "recent_closed": recent_closed,
         "last_run": runs[0] if runs else None,
         "realized_pnl_recent": realized_pnl_30,
-        "avg_pnl_pct_recent": avg_pnl_pct,
+        "avg_pnl_pct_recent": perf["avg_pnl_pct"],
+        "win_rate_pct_recent": perf["win_rate_pct"],
+        "signals_baseline_at": baseline,
         "cron_last_tick_at": cron.get("ts") if cron else None,
         "cron_age_seconds": cron_age_seconds,
+    }
+
+
+# ── Backtest-vs-Live comparison (new Compare screen) — 2026-10-26 ───────
+#
+# v1, aggregate-level only: the latest completed walkforward run's own
+# metrics (win rate %, total return %, trade count — whatever
+# walkforward.py's build_metrics_table() produced, as formatted strings)
+# placed next to a live/simulated performance summary computed the exact
+# same way GET /api/dashboard does (state_store.compute_live_performance()),
+# respecting the signals baseline above. This deliberately does NOT do
+# trade-by-trade reconciliation (matching a specific live signal to a
+# specific walkforward trade) — see PLAN.md's 2026-10-26 "brainstorm"
+# section for why that's a bigger, separate piece of work (walkforward.py
+# currently only returns trade_count, not the trade log itself, to
+# pyquant_runs — persisting that is the prerequisite).
+
+@app.get("/api/compare")
+def get_compare():
+    baseline = state_store.get_signals_baseline()
+    live = state_store.compute_live_performance(since=baseline, limit=500)
+
+    wf_runs = state_store.list_runs(run_type="walkforward", limit=1)
+    latest_wf = wf_runs[0] if wf_runs and wf_runs[0].get("status") == "completed" else None
+
+    return {
+        "signals_baseline_at": baseline,
+        "live": live,
+        "latest_walkforward_run": latest_wf,
     }
 
 

@@ -353,3 +353,62 @@ one more Kaggle secret in the same place `SIGNAL_ONLY_MODE`/
 work" rule intact. Not yet designed in code-level detail or built —
 tracked as a backlog candidate in `PLAN.md` if the owner wants to pick
 it up.
+
+## Part K — Manual-trigger workflow (2026-10-26)
+
+Why this exists alongside Part J: the owner asked for a path where the
+walkforward script's values can be edited and the run started "from the
+Kaggle UI" directly, with full visible console output — a different,
+more observable execution context than either the opaque Kaggle-kernel
+auto-run (Part D/G, still a documented fallback) or GitHub Actions
+(Part J, the default "Run Backtest" button's path). This is that path.
+
+### K1 — What changed
+
+- `kaggle_backtest/run_backtest.py` was rewritten: it no longer reads a
+  separate `params.json` file. Parameters are now plain Python constants
+  directly in the script, between the `# ── RUN PARAMETERS ──` /
+  `# ── END RUN PARAMETERS ──` comment markers — the one place Kaggle's
+  own editor always shows you and lets you edit before a re-run.
+- `api/index.py`'s `_push_kaggle_kernel()` was rewritten to match: instead
+  of writing `params.json`, it now string-replaces that same RUN
+  PARAMETERS block with the real values for the run being pushed
+  (`_render_run_params_block()`), then pushes the result as a new
+  version of the same kernel (`<username>/pyquant-backtest-runner`).
+- A new endpoint, `POST /api/backtests/sync-to-kaggle`, calls this —
+  separate from `POST /api/backtests` (the GitHub Actions path). It
+  creates a `queued` run row and pushes, but does **not** start the run
+  itself (unlike the GitHub Actions path) — the Backtest page's new
+  "Sync to Kaggle" button shows a direct link to the kernel afterward so
+  you can open it and click **Save & Run All**.
+
+### K2 — Using it
+
+1. Backtest page → fill in the same fields as "Run Backtest" (days,
+   trials, leverage, Bayesian/ATR toggles) → click **Sync to Kaggle**
+   instead.
+2. The status line shows "Run #N pushed" with a link — click it to open
+   the kernel on Kaggle.
+3. In Kaggle's own editor, click **Save & Run All** at top right. You'll
+   see Kaggle's live console output directly — no polling, no guessing.
+   (Kaggle may also auto-run it without this step if the owner has
+   turned on "Always run immediately on push" in the kernel's Settings;
+   either way, the result lands in the same `pyquant_runs` row and the
+   PyQuant UI's polling/Backtest table pick it up exactly like any other
+   run.)
+4. Requires `KAGGLE_USERNAME`/`KAGGLE_KEY`/`KAGGLE_DATASET_SLUG` set on
+   Vercel (Part C) — same credentials Part D's fallback kernel-push path
+   already needed, nothing new to configure.
+5. You can also just open the kernel in Kaggle directly and hand-edit
+   the RUN PARAMETERS block yourself, with no PyQuant UI round-trip at
+   all — that's the whole point of moving these out of `params.json`.
+   Hand edits survive until the next push from either button.
+
+### K3 — Run-detail modal (Backtest page)
+
+Unrelated to Kaggle specifically, but shipped the same session: clicking
+any row in either Backtest-page table (Walkforward Runs, Daily Optimizer
+Runs) now opens a modal with that run's full `metrics`/`params` payload,
+plus its error message if it failed and its Kaggle reference if it has
+one — replacing the old always-visible raw-JSON card at the bottom of
+the page.

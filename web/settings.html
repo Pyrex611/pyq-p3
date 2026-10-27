@@ -24,6 +24,7 @@
     <a href="live-monitor.html">Live Monitor</a>
     <a href="signals.html">Signals</a>
     <a href="backtest.html">Backtest</a>
+    <a href="compare.html">Compare</a>
     <a href="settings.html">API Keys &amp; Settings</a>
   </nav>
   <main>
@@ -41,6 +42,20 @@
         <h3>Notifications &amp; Persistence</h3>
         <div id="cfg-other"></div>
       </div>
+    </div>
+    <div class="card" style="margin-top:16px;">
+      <h3>Signals Baseline ("Fresh Start")</h3>
+      <p class="hint" style="margin-top:-4px;">
+        The Dashboard's figures (open positions, recently closed, avg.
+        return) only count signals opened on or after this timestamp.
+        Nothing is deleted — the Signals and Compare pages always show
+        full history regardless. Use this after a change to the
+        tracking/PnL logic makes older numbers not comparable to new
+        ones (e.g. the 2026-10-25 TP/SL-tracking fix).
+      </p>
+      <div id="baseline-status" class="mono" style="font-size:13px; margin-bottom:10px;">Checking…</div>
+      <button id="btn-reset-baseline" type="button" class="btn primary">Start Fresh From Now</button>
+      <button id="btn-clear-baseline" type="button" class="btn" style="margin-left:8px;">Clear (count everything again)</button>
     </div>
   </main>
   <footer class="hint">To rotate a key, update it in the Vercel dashboard (or the orchestra VPS's .env for the trading engine itself) and redeploy/restart — this page is read-only.</footer>
@@ -86,6 +101,40 @@ async function loadConfig() {
   }
 }
 loadConfig();
+
+// ── Signals baseline ("fresh start") — 2026-10-26 ────────────────────────
+async function loadBaseline() {
+  const el = document.getElementById("baseline-status");
+  try {
+    const d = await apiGet("/signals/baseline");
+    el.textContent = d.reset_at
+      ? `Counting signals opened on/after ${fmtTime(d.reset_at)}.`
+      : "No baseline set — counting all signals (original behavior).";
+  } catch (e) {
+    el.textContent = `Could not load (${e.message}).`;
+  }
+}
+
+document.getElementById("btn-reset-baseline").addEventListener("click", async () => {
+  if (!confirm("Dashboard figures will only count signals opened from this moment on. Continue?")) return;
+  try {
+    await apiPost("/signals/baseline/reset", {});
+    await loadBaseline();
+  } catch (e) {
+    alert("Could not reset the baseline: " + e.message);
+  }
+});
+
+document.getElementById("btn-clear-baseline").addEventListener("click", async () => {
+  try {
+    await apiPost("/signals/baseline/clear", {});
+    await loadBaseline();
+  } catch (e) {
+    alert("Could not clear the baseline: " + e.message);
+  }
+});
+
+loadBaseline();
 </script>
 </body>
 </html>

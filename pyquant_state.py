@@ -643,6 +643,77 @@ def set_trading_enabled(enabled: bool) -> None:
     set_json(_TRADING_ENABLED_KEY, {"enabled": bool(enabled)})
 
 
+# ── Signals baseline ("fresh start") ─────────────────────────────────────
+#
+# 2026-10-26: the owner asked for a way to have the Dashboard/aggregate
+# stats "start fresh" after the TP/SL close-tracking fix (PLAN.md's
+# 2026-10-25 entry) closed a backlog of old signals whose PnL numbers
+# predate that fix — without deleting any history, since it's still
+# needed for the Backtest-vs-Live comparison page (compute_live_performance()
+# below) and the Signals page's full record. This is a soft marker, not
+# a data reset: everything before `reset_at` simply stops counting toward
+# "recent"/aggregate figures; it's still there if you query for it
+# directly (e.g. the Signals page's full history, or a future "all time"
+# toggle).
+
+_SIGNALS_BASELINE_KEY = "pyquant_signals_baseline"
+
+
+def get_signals_baseline() -> Optional[str]:
+    """Returns the ISO timestamp signals/stats should be considered
+    "fresh" from, or None if no baseline has ever been set (meaning:
+    count everything, the original behavior)."""
+    val = get_json(_SIGNALS_BASELINE_KEY)
+    return val.get("reset_at") if isinstance(val, dict) else None
+
+
+def set_signals_baseline(reset_at: Optional[str] = None) -> str:
+    """Sets (or re-sets) the baseline to `reset_at`, or now() if omitted.
+    Returns the timestamp actually stored."""
+    ts = reset_at or datetime.now(timezone.utc).isoformat()
+    set_json(_SIGNALS_BASELINE_KEY, {"reset_at": ts})
+    return ts
+
+
+def clear_signals_baseline() -> None:
+    """Reverts to "count everything" (no baseline)."""
+    set_json(_SIGNALS_BASELINE_KEY, {"reset_at": None})
+
+
+def compute_live_performance(since: Optional[str] = None, limit: int = 500) -> dict:
+    """Aggregate win-rate / avg leveraged-%-return / trade-count summary
+    over closed signals, optionally restricted to those opened at or
+    after `since` (an ISO timestamp — pass get_signals_baseline()'s
+    value to respect the "fresh start" marker). Shared by GET
+    /api/dashboard (recent figures) and GET /api/compare (the
+    Backtest-vs-Live comparison page, PLAN.md's 2026-10-26 entry) so the
+    two screens can't quietly compute this two different ways."""
+    rows = list_signals(limit=limit)
+    closed = [r for r in rows if r.get("status") not in (None, "open")]
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since)
+            closed = [
+                r for r in closed
+                if r.get("opened_at") and datetime.fromisoformat(r["opened_at"]) >= since_dt
+            ]
+        except Exception:
+            pass  # a malformed baseline timestamp degrades to "count everything", not a crash
+
+    pct_vals = [r["realized_pnl_pct"] for r in closed if r.get("realized_pnl_pct") is not None]
+    wins = [r for r in closed if r.get("status") == "closed_tp"]
+    losses = [r for r in closed if r.get("status") == "closed_sl"]
+    return {
+        "since": since,
+        "trade_count": len(closed),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "win_rate_pct": (len(wins) / len(closed) * 100.0) if closed else None,
+        "avg_pnl_pct": (sum(pct_vals) / len(pct_vals)) if pct_vals else None,
+        "pct_sample_size": len(pct_vals),
+    }
+
+
 def get_run(run_id: int) -> Optional[dict]:
     """Returns a single run by id, or None if not found/on error."""
     cols = ", ".join(_RUN_COLUMNS)

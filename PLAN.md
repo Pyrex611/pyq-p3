@@ -1,6 +1,56 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-26. Kaggle 409 was fixed (confirmed: the
+**Last updated:** 2026-10-27. Backtest "reform" pass, per the owner's
+2026-10-26 request to rework backtest persistence/comparison "without
+breaking what already works." Five pieces, all code-complete:
+
+1. **Signals baseline ("fresh start").** New `pyquant_kv` marker
+   (`pyquant_signals_baseline`, `pyquant_state.get/set/clear_signals_baseline()`)
+   lets the Dashboard's aggregate figures (open positions, recently
+   closed, avg. return) start counting from "now" without deleting any
+   history — the Signals and new Compare page always show everything
+   regardless. Settings page got a new "Signals Baseline" card with
+   "Start Fresh From Now"/"Clear" buttons; `GET/POST /api/signals/baseline*`
+   endpoints. Exists specifically so a tracking/PnL-logic change (like
+   the 2026-10-25 TP/SL fix) doesn't make old and new numbers mix
+   together misleadingly.
+2. **PnL display, confirmed correct in production.** The "dashboard
+   still shows USD PnL" report turned out to be a stale/pre-deploy
+   screenshot, not a bug — `GET /api/dashboard` already returns real
+   `avg_pnl_pct_recent`, and the backlog of previously-stuck signals
+   closed correctly with sane percentage values right after the earlier
+   TP/SL fix deployed. No code change needed here this round.
+3. **Run-detail modal (Backtest page).** Clicking any Walkforward/Daily
+   Optimizer run row now opens a modal (`web/backtest.html`'s new
+   `#run-modal`) with the full `metrics`/`params` payload, error, and
+   Kaggle reference — replacing the old always-visible raw-JSON card.
+4. **Kaggle manual-trigger workflow, rewritten.** `kaggle_backtest/
+   run_backtest.py` no longer reads a `params.json` — parameters are
+   now inline Python constants between `# ── RUN PARAMETERS ──` /
+   `# ── END RUN PARAMETERS ──` markers, editable directly in Kaggle's
+   own editor before a manual "Save & Run All". `api/index.py`'s
+   `_push_kaggle_kernel()` was rewritten to match (string-replaces that
+   same block with real values via the new `_render_run_params_block()`
+   helper, instead of writing `params.json`), and a new endpoint,
+   `POST /api/backtests/sync-to-kaggle`, plus a "Sync to Kaggle" button
+   on the Backtest page, drive it — separate from `POST /api/backtests`
+   (still the GitHub Actions path / default "Run Backtest" button). See
+   `KAGGLE.md` Part K.
+5. **Backtest-vs-Live comparison page.** New `web/compare.html` (added
+   to every page's nav) renders `GET /api/compare`'s aggregate stats
+   side by side: live performance (`pyquant_state.compute_live_performance()`,
+   respecting the same baseline as the Dashboard) vs. the latest
+   completed walkforward run's metrics. v1 is aggregate-only by design
+   — see the page's own "Brainstorm" card (and this file's Decisions
+   section) for the per-trade version's prerequisites.
+
+**Not yet done from this pass:** live testing of "Sync to Kaggle" and
+the Compare page against real data (code-complete, pushed, unverified
+live — same caveat as the GitHub Actions backtest path below, which
+also still needs its one-time GitHub/Vercel secret setup before a live
+test is possible).
+
+**Previous update, 2026-10-26.** Kaggle 409 was fixed (confirmed: the
 owner deleted the old kernel and the next push created a correctly-
 typed script kernel), but the backtest **still failed** — and Kaggle's
 own UI showed "Failed" with no error log or detail at all, nothing to
@@ -209,6 +259,11 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [x] **Backtest "reform" pass (2026-10-27)** — signals baseline/"fresh
+  start", run-detail modal, Kaggle manual-trigger rewrite +
+  `POST /api/backtests/sync-to-kaggle`, Backtest-vs-Live Compare page.
+  Full writeup at top of this file. Code-complete, pushed; "Sync to
+  Kaggle" and Compare page not yet exercised against a real live run.
 - [x] **Backtest POST 502, round 1 — Read-only $HOME.** Real error was
   `[Errno 30] Read-only file system: '/home/sbx_user1051'` — Vercel's
   sandboxed $HOME, which the `kaggle` package's `KaggleApi` still
@@ -472,6 +527,20 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Decisions
 
+- **2026-10-27** — Compare page ships as aggregate-only (v1), not
+  per-trade. `walkforward.py`'s `run_walk_forward()` already builds an
+  `all_trades` list internally but never persists it past the in-memory
+  return value, so there's currently nothing on the backtest side to
+  match individual live signals against. A true per-trade version needs
+  (a) a new `pyquant_backtest_trades` table (run_id FK, symbol, side,
+  entry/exit price+time, pnl_pct), populated from `all_trades` at save
+  time the same way `pyquant_signals` already works for live trades,
+  and (b) a day/week-bucketed matching strategy rather than 1:1 trade-id
+  matching, since live ticks on a 5-minute real-time cadence while the
+  backtest walks fixed historical windows — exact timestamps won't
+  align. Deliberately deferred to a v2 rather than blocking this pass:
+  it's a real schema addition, not a tweak. Full note also lives inline
+  on `web/compare.html` itself.
 - **2026-10-25** — Considered and rejected switching the shared state
   store to Supabase Storage (an S3-compatible object-storage bucket)
   when the DATABASE_URL-mismatch investigation made the owner ask

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyQuant — Compare</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 7H21V13" stroke="#5B8DEF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span class="name">PyQuant</span>
+      <span class="subtitle">Control Center</span>
+    </div>
+    <div class="mode-switch" id="mode-switch"></div>
+  </header>
+  <nav class="primary">
+    <a href="index.html">Dashboard</a>
+    <a href="live-monitor.html">Live Monitor</a>
+    <a href="signals.html">Signals</a>
+    <a href="backtest.html">Backtest</a>
+    <a href="compare.html">Compare</a>
+    <a href="settings.html">API Keys &amp; Settings</a>
+  </nav>
+  <main>
+    <div id="banner-slot">
+      <div class="banner warn">
+        v1, aggregate-only: this compares <em>summary</em> stats (win rate,
+        average return) side by side — it does not yet match individual
+        live trades to individual backtest trades one-for-one. See the
+        brainstorm note at the bottom of this page and PLAN.md for why,
+        and what a true per-trade version would need.
+      </div>
+    </div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Live (Signal-Only Tracking)</h3>
+        <div id="live-stats" class="grid cols-2" style="gap:14px;">
+          <div class="empty-state">Loading…</div>
+        </div>
+        <p class="hint" id="live-since" style="margin-top:12px; margin-bottom:0;"></p>
+      </div>
+      <div class="card">
+        <h3>Latest Walkforward Backtest</h3>
+        <div id="wf-stats" class="grid cols-2" style="gap:14px;">
+          <div class="empty-state">Loading…</div>
+        </div>
+        <p class="hint" id="wf-when" style="margin-top:12px; margin-bottom:0;"></p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <h3>Brainstorm — toward a true per-trade comparison</h3>
+      <p class="hint" style="margin-top:-4px;">
+        Captured here per the owner's request to "properly brainstorm and
+        look into the concept architecture and setup for this" — kept as
+        a living note, not a committed roadmap item yet. Full version
+        lives in PLAN.md.
+      </p>
+      <ul style="font-size:13px; color:var(--text-dim); line-height:1.6; margin:0; padding-left:20px;">
+        <li><strong>What v1 has:</strong> live side uses <code class="mono">pyquant_signals</code>
+          (every real signal PyQuant opened/closed, with <code class="mono">realized_pnl_pct</code>).
+          Backtest side uses <code class="mono">pyquant_runs.metrics</code> — aggregate numbers only
+          (<code class="mono">Total Return (%)</code>, <code class="mono">Win Rate (%)</code>,
+          <code class="mono">Total Trades</code>) from whichever walkforward run finished last.</li>
+        <li><strong>What's missing for per-trade matching:</strong>
+          <code class="mono">walkforward.py</code>'s <code class="mono">run_walk_forward()</code>
+          already builds an <code class="mono">all_trades</code> list internally (entry/exit price,
+          side, PnL, timestamp per simulated trade) — it's just never persisted past the
+          in-memory return value. A per-trade comparison needs a new
+          <code class="mono">pyquant_backtest_trades</code> table (run_id FK, symbol, side, entry/exit
+          price+time, pnl_pct) populated from that same list at save time, mirroring how
+          <code class="mono">pyquant_signals</code> already works for the live side.</li>
+        <li><strong>Matching strategy once that exists:</strong> not a 1:1 trade-id match (the UKF
+          signal model is deterministic given the same inputs, but live ticks on a 5-minute
+          cadence against real-time bars while the backtest walks fixed historical windows —
+          timestamps won't line up exactly). The practical approach: bucket both sides by
+          calendar day (or week) and compare trade count / win rate / avg return per bucket,
+          which tolerates the timing skew while still being far more granular than one
+          whole-history number each.</li>
+        <li><strong>Why this is v2, not now:</strong> it's a real schema addition
+          (<code class="mono">pyquant_backtest_trades</code>) plus a <code class="mono">walkforward.py</code>
+          change to persist <code class="mono">all_trades</code> — exactly the kind of thing that
+          should follow, not block, getting the aggregate version (this page) out and the
+          Kaggle-manual-trigger path (Backtest page's "Sync to Kaggle") working first.</li>
+      </ul>
+    </div>
+  </main>
+  <footer class="hint">
+    "Live" figures respect the Settings page's signals baseline, same as the Dashboard —
+    see Settings → "Signals Baseline" if these numbers look like they include pre-fix history.
+  </footer>
+</div>
+<script src="./assets/app.js"></script>
+<script>
+function _statTile(label, value, cls) {
+  return `<div><div class="stat-value ${cls || ''}">${value}</div><div class="stat-label">${label}</div></div>`;
+}
+
+async function loadCompare() {
+  try {
+    const d = await apiGet("/compare");
+
+    const live = d.live || {};
+    document.getElementById("live-stats").innerHTML = [
+      _statTile("Avg. Return", fmtPct(live.avg_pnl_pct), pnlClass(live.avg_pnl_pct)),
+      _statTile("Win Rate", live.win_rate_pct != null ? `${live.win_rate_pct.toFixed(1)}%` : "—"),
+      _statTile("Closed Trades", live.trade_count ?? "—"),
+      _statTile("Wins / Losses", `${live.win_count ?? "—"} / ${live.loss_count ?? "—"}`),
+    ].join("");
+    document.getElementById("live-since").textContent = d.signals_baseline_at
+      ? `Since baseline reset: ${fmtTime(d.signals_baseline_at)}`
+      : "Counting all signal history (no baseline set).";
+
+    const wf = d.latest_walkforward_run;
+    if (!wf) {
+      document.getElementById("wf-stats").innerHTML =
+        `<div class="empty-state">No completed walkforward run yet — use the Backtest page.</div>`;
+      document.getElementById("wf-when").textContent = "";
+    } else {
+      const m = wf.metrics || {};
+      const retPct = m["Total Return (%)"];
+      const retFrac = retPct !== undefined && retPct !== null ? retPct / 100 : null;
+      document.getElementById("wf-stats").innerHTML = [
+        _statTile("Total Return", retFrac !== null ? fmtPct(retFrac) : "—", pnlClass(retFrac)),
+        _statTile("Win Rate", m["Win Rate (%)"] !== undefined ? `${m["Win Rate (%)"]}%` : "—"),
+        _statTile("Total Trades", m["Total Trades"] ?? m["trade_count"] ?? "—"),
+        _statTile("Run", `#${wf.id}`),
+      ].join("");
+      document.getElementById("wf-when").textContent = `Finished ${fmtTime(wf.finished_at)}`;
+    }
+  } catch (e) {
+    document.getElementById("banner-slot").innerHTML += `<div class="banner error">Could not reach the API (${e.message}).</div>`;
+  }
+}
+loadCompare();
+</script>
+</body>
+</html>

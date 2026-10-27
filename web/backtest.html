@@ -24,6 +24,7 @@
     <a href="live-monitor.html">Live Monitor</a>
     <a href="signals.html">Signals</a>
     <a href="backtest.html">Backtest</a>
+    <a href="compare.html">Compare</a>
     <a href="settings.html">API Keys &amp; Settings</a>
   </nav>
   <main>
@@ -43,7 +44,15 @@
         <label><input type="checkbox" name="use_bayesian" checked> Bayesian (Optuna)</label>
         <label><input type="checkbox" name="use_atr_sl" checked> ATR-adaptive SL</label>
         <button type="submit">Run Backtest</button>
+        <button type="button" id="btn-sync-kaggle" class="btn">Sync to Kaggle</button>
       </form>
+      <p class="hint" style="margin-top:8px;">
+        "Run Backtest" triggers GitHub Actions automatically. "Sync to
+        Kaggle" instead pushes these values into the Kaggle kernel's own
+        editor and leaves it queued — open the kernel and click "Save &amp;
+        Run All" yourself for full, visible console output. See KAGGLE.md
+        Part K.
+      </p>
       <div id="backtest-status" class="mono" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>
     </div>
     <div class="grid cols-2">
@@ -73,25 +82,64 @@
         </div>
       </div>
     </div>
-    <div class="card" style="margin-top:16px;" id="detail-card" style="display:none;">
-      <h3>Run Detail</h3>
-      <pre id="detail-pre" class="mono" style="white-space:pre-wrap; color:var(--text-dim); font-size:12px;"></pre>
-    </div>
   </main>
   <footer class="hint">Click a run to see its full metrics/params payload.</footer>
 </div>
+
+<!-- Run-detail modal — 2026-10-26, replaces the old inline raw-JSON card -->
+<div class="modal-overlay hidden" id="run-modal" onclick="if (event.target === this) closeDetail()">
+  <div class="modal-card">
+    <button class="modal-close" onclick="closeDetail()" aria-label="Close">&times;</button>
+    <h3 id="modal-title">Run #—</h3>
+    <div class="modal-sub" id="modal-sub">—</div>
+    <div id="modal-body">Loading…</div>
+  </div>
+</div>
+
 <script src="./assets/app.js"></script>
 <script>
+function closeDetail() {
+  document.getElementById("run-modal").classList.add("hidden");
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+
+function _kvGrid(obj) {
+  const keys = Object.keys(obj || {});
+  if (keys.length === 0) return `<div class="empty-state" style="padding:8px 0;">None</div>`;
+  return `<div class="kv-grid">${keys.map(k => `
+    <div class="kv-row"><span class="kv-key">${k}</span><span class="kv-val">${
+      obj[k] === null || obj[k] === undefined ? "—" : String(obj[k])
+    }</span></div>`).join("")}</div>`;
+}
+
 async function showDetail(runId) {
-  const card = document.getElementById("detail-card");
-  const pre = document.getElementById("detail-pre");
+  const modal = document.getElementById("run-modal");
+  const body = document.getElementById("modal-body");
+  document.getElementById("modal-title").textContent = `Run #${runId}`;
+  document.getElementById("modal-sub").textContent = "Loading…";
+  body.innerHTML = "Loading…";
+  modal.classList.remove("hidden");
   try {
     const run = await apiGet(`/runs/${runId}`);
-    pre.textContent = JSON.stringify(run, null, 2);
-    card.style.display = "block";
+    let params = {};
+    try { params = typeof run.params === "string" ? JSON.parse(run.params) : (run.params || {}); } catch {}
+    document.getElementById("modal-sub").textContent =
+      `${run.run_type || "—"} · ${run.status || "—"} · finished ${fmtTime(run.finished_at)}`;
+    body.innerHTML = `
+      <div class="modal-section">
+        <h4>Metrics</h4>
+        ${_kvGrid(run.metrics || {})}
+      </div>
+      <div class="modal-section">
+        <h4>Parameters used</h4>
+        ${_kvGrid(params)}
+      </div>
+      ${run.error ? `<div class="modal-section"><h4>Error</h4><div class="modal-error">${run.error}</div></div>` : ""}
+      ${run.kaggle_ref ? `<div class="modal-section"><h4>Kaggle reference</h4><div class="mono" style="font-size:13px;">${run.kaggle_ref}</div></div>` : ""}
+    `;
   } catch (e) {
-    pre.textContent = "Could not load run: " + e.message;
-    card.style.display = "block";
+    document.getElementById("modal-sub").textContent = "Error";
+    body.innerHTML = `<div class="modal-error">Could not load run: ${e.message}</div>`;
   }
 }
 
@@ -179,10 +227,30 @@ document.getElementById("backtest-form").addEventListener("submit", async (e) =>
   statusEl.textContent = "Submitting…";
   try {
     const result = await apiPost("/backtests", body);
-    statusEl.textContent = `Run #${result.run_id} queued — Kaggle is starting it now.`;
+    statusEl.textContent = `Run #${result.run_id} queued — GitHub Actions is starting it now.`;
     _pollRun(result.run_id);
   } catch (err) {
     statusEl.textContent = "Could not start the run: " + err.message;
+  }
+});
+
+document.getElementById("btn-sync-kaggle").addEventListener("click", async () => {
+  const statusEl = document.getElementById("backtest-status");
+  const fd = new FormData(document.getElementById("backtest-form"));
+  const body = {};
+  for (const k of ["walk_forward_days", "bayesian_trials"]) {
+    if (fd.get(k)) body[k] = parseInt(fd.get(k), 10);
+  }
+  if (fd.get("leverage")) body.leverage = parseFloat(fd.get("leverage"));
+  body.use_bayesian = fd.get("use_bayesian") === "on";
+  body.use_atr_sl = fd.get("use_atr_sl") === "on";
+
+  statusEl.textContent = "Pushing to Kaggle…";
+  try {
+    const result = await apiPost("/backtests/sync-to-kaggle", body);
+    statusEl.innerHTML = `Run #${result.run_id} pushed. <a href="${result.kaggle_kernel_url}" target="_blank" rel="noopener">Open the kernel on Kaggle</a> and click "Save &amp; Run All".`;
+  } catch (err) {
+    statusEl.textContent = "Could not push to Kaggle: " + err.message;
   }
 });
 </script>
