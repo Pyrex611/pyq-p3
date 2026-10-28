@@ -188,6 +188,36 @@ def _bootstrap_postgres(conn) -> None:
         # keep their old realized_pnl value, new closes get both.
         cur.execute("ALTER TABLE pyquant_signals ADD COLUMN IF NOT EXISTS realized_pnl_pct DOUBLE PRECISION")
 
+        # 2026-10-28 — per-trade backtest data, the prerequisite PLAN.md's
+        # 2026-10-27 Decisions entry named for a real Backtest-vs-Live
+        # comparison: one row per simulated trade a walkforward run
+        # produced (walkforward.py's own `all_trades` list, previously
+        # discarded after compute_metrics() ran — never persisted past
+        # the in-memory return value). Mirrors pyquant_signals' shape on
+        # purpose so a future day/week-bucketed comparison can treat both
+        # tables the same way.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_backtest_trades (
+                id              SERIAL PRIMARY KEY,
+                run_id          INTEGER NOT NULL REFERENCES pyquant_runs(id) ON DELETE CASCADE,
+                symbol          TEXT NOT NULL,
+                side            TEXT NOT NULL,
+                entry_price     DOUBLE PRECISION NOT NULL,
+                exit_price      DOUBLE PRECISION,
+                tp_price        DOUBLE PRECISION,
+                sl_price        DOUBLE PRECISION,
+                qty             DOUBLE PRECISION,
+                exit_leg        TEXT,
+                profit          DOUBLE PRECISION,
+                pnl_pct         DOUBLE PRECISION,
+                entry_ts        TIMESTAMPTZ,
+                exit_ts         TIMESTAMPTZ
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
+
 
 @contextmanager
 def _sqlite_conn():
@@ -231,6 +261,18 @@ def _sqlite_conn():
                 conn.execute(_ddl)
             except sqlite3.OperationalError:
                 pass  # column already exists
+
+        # 2026-10-28 — see the matching Postgres CREATE TABLE above for
+        # the full rationale (per-trade backtest data).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_backtest_trades ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id INTEGER NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,"
+            "  entry_price REAL NOT NULL, exit_price REAL, tp_price REAL, sl_price REAL,"
+            "  qty REAL, exit_leg TEXT, profit REAL, pnl_pct REAL,"
+            "  entry_ts TEXT, exit_ts TEXT)"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
         yield conn
         conn.commit()
     finally:
@@ -545,6 +587,66 @@ def _row_to_run(row: tuple) -> dict:
     # is none today; the modal/table display is pure frontend
     # fmtTime()) doesn't silently no-op the same way.
     return _row_timestamps_to_iso(d, ("started_at", "finished_at"))
+
+
+# ── Per-trade backtest data (2026-10-28 — prerequisite for a real
+# Backtest-vs-Live comparison; see PLAN.md's 2026-10-27 Decisions entry) ──
+
+def record_backtest_trades(run_id: int, trades: list) -> int:
+    """Bulk-inserts one row per simulated trade a walkforward run
+    produced. `trades` is a list of plain dicts — see
+    walkforward.py's `_trades_to_records()` for the exact shape this
+    expects (symbol/side/entry_price/exit_price/tp_price/sl_price/qty/
+    exit_leg/profit/pnl_pct/entry_ts/exit_ts; any missing key is stored
+    as NULL). Best-effort and non-fatal by this module's standing
+    convention: returns the number of rows actually inserted, 0 on any
+    failure (a backtest's own completion is never blocked by this)."""
+    if not trades:
+        return 0
+    cols = ["run_id", "symbol", "side", "entry_price", "exit_price", "tp_price",
+            "sl_price", "qty", "exit_leg", "profit", "pnl_pct", "entry_ts", "exit_ts"]
+    rows = [tuple((run_id if c == "run_id" else t.get(c)) for c in cols) for t in trades]
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                placeholders = ",".join(["%s"] * len(cols))
+                cur.executemany(
+                    f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})",
+                    rows,
+                )
+            return len(rows)
+        with _lock, _sqlite_conn() as conn:
+            placeholders = ",".join(["?"] * len(cols))
+            conn.executemany(
+                f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})",
+                rows,
+            )
+            return len(rows)
+    except Exception:
+        return 0
+
+
+def get_backtest_trades(run_id: int) -> list[dict]:
+    """Returns every persisted trade for one backtest run, oldest first."""
+    cols = ["id", "run_id", "symbol", "side", "entry_price", "exit_price", "tp_price",
+            "sl_price", "qty", "exit_leg", "profit", "pnl_pct", "entry_ts", "exit_ts"]
+    ts_cols = ("entry_ts", "exit_ts")
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"SELECT {','.join(cols)} FROM pyquant_backtest_trades "
+                    f"WHERE run_id = %s ORDER BY id ASC", (run_id,),
+                )
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in cur.fetchall()]
+        with _lock, _sqlite_conn() as conn:
+            rows = conn.execute(
+                f"SELECT {','.join(cols)} FROM pyquant_backtest_trades "
+                f"WHERE run_id = ? ORDER BY id ASC", (run_id,),
+            ).fetchall()
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in rows]
+    except Exception:
+        return []
 
 
 def list_runs(run_type: Optional[str] = None, limit: int = 50) -> list[dict]:

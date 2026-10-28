@@ -170,6 +170,18 @@ def main() -> None:
         metrics_dict["trade_count"] = len(all_trades)
         metrics_dict["source"] = "kaggle_manual" if is_manual_trigger else "kaggle_auto"
 
+        # 2026-10-28: persist per-trade data for this run — the
+        # prerequisite for a real Backtest-vs-Live comparison (PLAN.md's
+        # 2026-10-27 Decisions entry). Best-effort: a logging failure
+        # here must never stop this run from being marked completed.
+        try:
+            n = state_store.record_backtest_trades(
+                run_id, walkforward.trades_to_records(all_trades, walkforward.LEVERAGE)
+            )
+            print(f"[run_backtest] Persisted {n} per-trade rows for run {run_id}.", flush=True)
+        except Exception as e:
+            print(f"[run_backtest] (non-fatal) per-trade logging failed: {e}", flush=True)
+
         state_store.update_run_status(run_id, "completed", metrics=metrics_dict)
         print(f"[run_backtest] run {run_id} completed: {metrics_dict}", flush=True)
 

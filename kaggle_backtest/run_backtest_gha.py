@@ -45,6 +45,17 @@ import os
 import sys
 import traceback
 
+# 2026-10-28: fixes a real, confirmed-live ModuleNotFoundError ("No
+# module named 'pyquant_state'"). `python3 kaggle_backtest/run_backtest_gha.py`
+# puts the SCRIPT's own directory (kaggle_backtest/) at sys.path[0], not
+# the invoking shell's cwd (the repo root, where actions/checkout put
+# everything) — so `import pyquant_state`/`import walkforward`, both of
+# which live at the repo root, fail no matter what the workflow's
+# `working-directory` is set to. Explicitly adding the repo root (one
+# level up from this file) fixes it regardless of how the script is
+# invoked.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def _env_bool(name: str, default: bool) -> bool:
     v = os.environ.get(name, "").strip().lower()
@@ -119,6 +130,17 @@ def main() -> None:
         metrics, all_trades, capital_curve, params_log = walkforward.run_walk_forward()
         metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
         metrics_dict["trade_count"] = len(all_trades)
+
+        # 2026-10-28: persist per-trade data for this run — see
+        # kaggle_backtest/run_backtest.py's matching comment and
+        # PLAN.md's 2026-10-27 Decisions entry for the full rationale.
+        try:
+            n = state_store.record_backtest_trades(
+                run_id, walkforward.trades_to_records(all_trades, walkforward.LEVERAGE)
+            )
+            print(f"[run_backtest_gha] Persisted {n} per-trade rows for run {run_id}.", flush=True)
+        except Exception as e:
+            print(f"[run_backtest_gha] (non-fatal) per-trade logging failed: {e}", flush=True)
 
         state_store.update_run_status(run_id, "completed", metrics=metrics_dict)
         print(f"[run_backtest_gha] run {run_id} completed: {metrics_dict}", flush=True)

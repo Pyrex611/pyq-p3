@@ -35,6 +35,23 @@
       <div class="stat-label" id="heartbeat-text">Checking…</div>
     </div>
 
+    <div class="card" style="margin-bottom:16px;">
+      <h3>Leverage (display only)</h3>
+      <p class="hint" style="margin-top:-4px; margin-bottom:10px;">
+        Every %PnL figure below is a leveraged price-return
+        (<code class="mono">pyquant_signal_math.outcome_pct()</code>:
+        raw entry→exit price move × leverage) — the system actually
+        trades/simulates at <strong id="system-leverage">10</strong>×.
+        This control re-derives each figure from the same stored
+        entry/outcome prices at a different leverage, for "what if"
+        comparison only — it never changes what the engine itself uses.
+      </p>
+      <label>Leverage ×<br>
+        <input type="number" id="leverage-override" min="1" step="0.5" placeholder="10" style="width:90px;">
+      </label>
+      <button type="button" id="btn-leverage-reset" class="btn" style="margin-left:8px;">Reset to system default</button>
+    </div>
+
     <div class="grid cols-4" style="margin-bottom:16px;">
       <div class="card">
         <h3>Open Positions</h3>
@@ -81,10 +98,131 @@
 </div>
 <script src="./assets/app.js"></script>
 <script>
+// 2026-10-28: SYSTEM_LEVERAGE mirrors pyquant_signal_math.LEVERAGE_DEFAULT
+// (10) — every stored realized_pnl_pct value was computed with exactly
+// this leverage baked in (pyq_p4.py's _check_signal_only_closes() calls
+// outcome_pct() with no explicit leverage arg, so it always uses this
+// default — confirmed by reading that call site directly, not assumed).
+// Hardcoded here rather than fetched: it's a stable, rarely-changed
+// constant, and adding a round trip just to read one number isn't worth
+// it. If it's ever changed in pyquant_signal_math.py, update this too.
+const SYSTEM_LEVERAGE = 10;
+let _dashboardData = null;
+
+// Re-derives a RAW (unleveraged) price-return fraction from a signal's
+// own entry_price/outcome_price/side — the exact inverse of
+// pyquant_signal_math.outcome_pct()'s leveraged formula — so the
+// leverage override below can re-apply any leverage to it, entirely
+// client-side, with no backend round trip and no change to what's
+// actually stored.
+function rawPct(side, entry, exit) {
+  if (entry === null || entry === undefined || exit === null || exit === undefined || !entry) return null;
+  const isBuy = (side || "").toString().toUpperCase().startsWith("B");
+  return isBuy ? (exit - entry) / entry : (entry - exit) / entry;
+}
+
+function currentLeverage() {
+  const v = parseFloat(document.getElementById("leverage-override").value);
+  return (v && v > 0) ? v : SYSTEM_LEVERAGE;
+}
+
+function renderDashboard(d) {
+  const lev = currentLeverage();
+  const usingOverride = lev !== SYSTEM_LEVERAGE;
+
+  document.getElementById("stat-open").textContent = d.open_positions.length;
+
+  // Recomputed (if a leverage override is active) from the SAME rows
+  // the backend's avg_pnl_pct_recent covers — but only the ones also
+  // returned in recent_closed (10 of up to 200), since that's all this
+  // page has entry/outcome prices for. Labeled accordingly below so the
+  // scope difference is never silently hidden.
+  const closedWithPct = d.recent_closed
+    .map(s => rawPct(s.side, s.entry_price, s.outcome_price))
+    .filter(v => v !== null);
+  const avgRaw = closedWithPct.length
+    ? closedWithPct.reduce((a, b) => a + b, 0) / closedWithPct.length
+    : null;
+  const avgLeveraged = avgRaw !== null ? avgRaw * lev : null;
+
+  if (usingOverride && avgLeveraged !== null) {
+    document.getElementById("stat-pnl").textContent = fmtPct(avgLeveraged);
+    document.getElementById("stat-pnl").className = "stat-value " + pnlClass(avgLeveraged);
+    document.getElementById("stat-pnl-label").textContent = `at ${lev}× leverage, last ${closedWithPct.length} shown below`;
+  } else if (d.avg_pnl_pct_recent !== null && d.avg_pnl_pct_recent !== undefined) {
+    // 2026-10-25 (PnL-by-percentage): average leveraged % return is the
+    // headline figure now (meaningful with no real wallet balance under
+    // SIGNAL_ONLY_MODE); falls back to the old summed-USD figure only if
+    // no closed signal has a percentage yet (all pre-date this change).
+    document.getElementById("stat-pnl").textContent = fmtPct(d.avg_pnl_pct_recent);
+    document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.avg_pnl_pct_recent);
+    document.getElementById("stat-pnl-label").textContent = `avg. leveraged return (${SYSTEM_LEVERAGE}×), last 200 logged signals`;
+  } else {
+    document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);
+    document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.realized_pnl_recent);
+    document.getElementById("stat-pnl-label").textContent = "last 200 logged signals (USD — no % data yet)";
+  }
+
+  document.getElementById("stat-trading").textContent = d.trading_enabled ? "ON" : "OFF";
+  document.getElementById("stat-mode").textContent = d.mode.toUpperCase() + " mode";
+  if (d.last_run) {
+    document.getElementById("stat-last-run").textContent = d.last_run.run_type;
+    document.getElementById("stat-last-run-time").textContent = fmtTime(d.last_run.finished_at);
+  } else {
+    document.getElementById("stat-last-run").textContent = "—";
+    document.getElementById("stat-last-run-time").textContent = "no runs logged yet";
+  }
+
+  const openBody = document.querySelector("#tbl-open tbody");
+  if (d.open_positions.length === 0) {
+    document.getElementById("empty-open").style.display = "block";
+  } else {
+    openBody.innerHTML = d.open_positions.map(s => `
+      <tr>
+        <td class="mono">${s.symbol}</td>
+        <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+        <td class="mono">${fmtPrice(s.entry_price)}</td>
+        <td class="mono">${fmtPrice(s.sl_price)}</td>
+        <td class="mono">${fmtPrice(s.tp_price)}</td>
+        <td>${fmtTime(s.opened_at)}</td>
+      </tr>`).join("");
+  }
+
+  const closedBody = document.querySelector("#tbl-closed tbody");
+  if (d.recent_closed.length === 0) {
+    document.getElementById("empty-closed").style.display = "block";
+  } else {
+    closedBody.innerHTML = d.recent_closed.map(s => {
+      const raw = rawPct(s.side, s.entry_price, s.outcome_price);
+      const displayPct = usingOverride && raw !== null ? raw * lev
+        : (s.realized_pnl_pct !== null && s.realized_pnl_pct !== undefined ? s.realized_pnl_pct : null);
+      return `
+      <tr>
+        <td class="mono">${s.symbol}</td>
+        <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
+        <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
+        <td class="${pnlClass(displayPct ?? s.realized_pnl)}">${
+          displayPct !== null ? fmtPct(displayPct) : fmtMoney(s.realized_pnl)
+        }</td>
+        <td>${fmtTime(s.closed_at)}</td>
+      </tr>`;
+    }).join("");
+  }
+}
+
+document.getElementById("leverage-override").addEventListener("input", () => {
+  if (_dashboardData) renderDashboard(_dashboardData);
+});
+document.getElementById("btn-leverage-reset").addEventListener("click", () => {
+  document.getElementById("leverage-override").value = "";
+  if (_dashboardData) renderDashboard(_dashboardData);
+});
+
 async function loadDashboard() {
   const bannerSlot = document.getElementById("banner-slot");
   try {
     const d = await apiGet("/dashboard");
+    _dashboardData = d;
 
     const hbText = document.getElementById("heartbeat-text");
     const age = d.cron_age_seconds;
@@ -100,61 +238,7 @@ async function loadDashboard() {
       hbText.innerHTML = label;
     }
 
-    document.getElementById("stat-open").textContent = d.open_positions.length;
-    // 2026-10-25 (PnL-by-percentage): average leveraged % return is the
-    // headline figure now (meaningful with no real wallet balance under
-    // SIGNAL_ONLY_MODE); falls back to the old summed-USD figure only if
-    // no closed signal has a percentage yet (all pre-date this change).
-    if (d.avg_pnl_pct_recent !== null && d.avg_pnl_pct_recent !== undefined) {
-      document.getElementById("stat-pnl").textContent = fmtPct(d.avg_pnl_pct_recent);
-      document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.avg_pnl_pct_recent);
-      document.getElementById("stat-pnl-label").textContent = "avg. leveraged return, closed signals";
-    } else {
-      document.getElementById("stat-pnl").textContent = fmtMoney(d.realized_pnl_recent);
-      document.getElementById("stat-pnl").className = "stat-value " + pnlClass(d.realized_pnl_recent);
-      document.getElementById("stat-pnl-label").textContent = "last 200 logged signals (USD — no % data yet)";
-    }
-    document.getElementById("stat-trading").textContent = d.trading_enabled ? "ON" : "OFF";
-    document.getElementById("stat-mode").textContent = d.mode.toUpperCase() + " mode";
-    if (d.last_run) {
-      document.getElementById("stat-last-run").textContent = d.last_run.run_type;
-      document.getElementById("stat-last-run-time").textContent = fmtTime(d.last_run.finished_at);
-    } else {
-      document.getElementById("stat-last-run").textContent = "—";
-      document.getElementById("stat-last-run-time").textContent = "no runs logged yet";
-    }
-
-    const openBody = document.querySelector("#tbl-open tbody");
-    if (d.open_positions.length === 0) {
-      document.getElementById("empty-open").style.display = "block";
-    } else {
-      openBody.innerHTML = d.open_positions.map(s => `
-        <tr>
-          <td class="mono">${s.symbol}</td>
-          <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
-          <td class="mono">${fmtPrice(s.entry_price)}</td>
-          <td class="mono">${fmtPrice(s.sl_price)}</td>
-          <td class="mono">${fmtPrice(s.tp_price)}</td>
-          <td>${fmtTime(s.opened_at)}</td>
-        </tr>`).join("");
-    }
-
-    const closedBody = document.querySelector("#tbl-closed tbody");
-    if (d.recent_closed.length === 0) {
-      document.getElementById("empty-closed").style.display = "block";
-    } else {
-      closedBody.innerHTML = d.recent_closed.map(s => `
-        <tr>
-          <td class="mono">${s.symbol}</td>
-          <td class="${s.side === 'BUY' ? 'side-buy' : 'side-sell'}">${s.side}</td>
-          <td><span class="pill ${s.status}">${statusLabel(s.status)}</span></td>
-          <td class="${pnlClass(s.realized_pnl_pct ?? s.realized_pnl)}">${
-            s.realized_pnl_pct !== null && s.realized_pnl_pct !== undefined
-              ? fmtPct(s.realized_pnl_pct) : fmtMoney(s.realized_pnl)
-          }</td>
-          <td>${fmtTime(s.closed_at)}</td>
-        </tr>`).join("");
-    }
+    renderDashboard(d);
   } catch (e) {
     bannerSlot.innerHTML = `<div class="banner error">Could not reach the API (${e.message}). Check that the backend is deployed and PYQUANT_API_BASE / the /api rewrite is configured.</div>`;
   }

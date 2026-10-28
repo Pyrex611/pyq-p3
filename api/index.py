@@ -314,6 +314,19 @@ def get_run(run_id: int):
     return run
 
 
+@app.get("/api/runs/{run_id}/trades")
+def get_run_trades(run_id: int):
+    """2026-10-28: per-trade data for one backtest run — see
+    pyquant_state.record_backtest_trades()'s docstring. Not yet
+    rendered anywhere in the UI; this is the foundation a future
+    Backtest-vs-Live per-trade comparison reads from (PLAN.md's
+    2026-10-27 Decisions entry). Returns an empty list (not a 404) for
+    a run with no persisted trades — covers both "run predates this
+    feature" and "run_type isn't a backtest" without the caller having
+    to special-case either."""
+    return {"run_id": run_id, "trades": state_store.get_backtest_trades(run_id)}
+
+
 # ── Backtests (Backtest screen's "Run" button) ──────────────────────────
 #
 # See KAGGLE.md for full setup/rationale. Short version: Vercel has

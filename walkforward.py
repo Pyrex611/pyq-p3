@@ -37,6 +37,7 @@
 
 import os, math, time, warnings
 from itertools import product
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -90,6 +91,58 @@ PARAM_SMOOTHING_ALPHA = 0.7
 # usage (`python3 walkforward.py`) is completely unaffected — this stays
 # False unless a caller explicitly sets it.
 _SUPPRESS_AUTO_RECORD_RUN = False
+
+
+def _ts_to_str(v) -> Optional[str]:
+    if v is None:
+        return None
+    try:
+        return v.isoformat()
+    except AttributeError:
+        return str(v)
+
+
+def trades_to_records(all_trades: list, leverage: Optional[float] = None) -> list:
+    """Normalizes this module's own internal per-trade dict shape (built
+    throughout run_walk_forward()'s simulation loop — symbol/side/
+    entry_price/qty/tp_price/sl_price/ts/exit_price/exit_ts/exit_leg/
+    profit) into the plain, stable shape
+    pyquant_state.record_backtest_trades() expects, so a future refactor
+    of the simulation loop's own trade-dict keys doesn't silently break
+    the persisted comparison data (PLAN.md's 2026-10-27 Decisions entry
+    on why this table exists — the prerequisite for a real
+    Backtest-vs-Live per-trade comparison). `leverage` defaults to this
+    module's own LEVERAGE constant (whatever it was actually run with,
+    including a workflow_dispatch/Kaggle override) so `pnl_pct` is
+    leveraged the exact same way pyq_p4.py's live outcome_pct() calls
+    are — directly comparable to a live signal's realized_pnl_pct."""
+    lev = leverage if leverage is not None else LEVERAGE
+    out = []
+    for t in all_trades:
+        side = t.get("side") or ""
+        entry = t.get("entry_price")
+        exit_price = t.get("exit_price")
+        pnl_pct = None
+        if entry and exit_price and side:
+            try:
+                pnl_pct = signal_math.outcome_pct(side, entry, exit_price, lev)
+            except Exception:
+                pnl_pct = None
+        out.append({
+            "symbol": t.get("symbol"),
+            "side": side,
+            "entry_price": entry,
+            "exit_price": exit_price,
+            "tp_price": t.get("tp_price"),
+            "sl_price": t.get("sl_price"),
+            "qty": t.get("qty"),
+            "exit_leg": t.get("exit_leg"),
+            "profit": t.get("profit"),
+            "pnl_pct": pnl_pct,
+            "entry_ts": _ts_to_str(t.get("ts")),
+            "exit_ts": _ts_to_str(t.get("exit_ts")),
+        })
+    return out
 
 USE_ATR_SL            = True    # ATR-adaptive SL is active
 ATR_PERIOD            = 14
@@ -1187,7 +1240,7 @@ def run_walk_forward():
     if not _SUPPRESS_AUTO_RECORD_RUN:
         try:
             metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
-            state_store.record_run(
+            new_run_id = state_store.record_run(
                 run_type="walkforward",
                 metrics=metrics_dict,
                 symbol="BTC+ETH",
@@ -1199,6 +1252,13 @@ def run_walk_forward():
                     "use_pessimistic_exits": USE_PESSIMISTIC_EXITS,
                 },
             )
+            # 2026-10-28: persist per-trade data alongside the aggregate
+            # metrics above — see trades_to_records()'s docstring. Kept
+            # inside this same try/except: a logging failure here must
+            # never affect the run's own output/return value, matching
+            # record_run()'s own standing treatment just above.
+            if new_run_id is not None:
+                state_store.record_backtest_trades(new_run_id, trades_to_records(all_trades, LEVERAGE))
         except Exception as e:
             print(f"  (non-fatal) run logging failed: {e}")
 

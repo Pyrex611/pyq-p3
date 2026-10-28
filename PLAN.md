@@ -1,6 +1,66 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-28. **Verified (not theorized) root cause found
+**Last updated:** 2026-10-28, second pass same day. Follow-up to the
+previous pass's datetime-bug fix (owner confirmed the Dashboard now
+shows %PnL and a new signal again — the fix worked). Four more items:
+
+1. **%PnL leverage, confirmed by reading the code (not assumed):**
+   every `realized_pnl_pct` IS leveraged — `pyquant_signal_math.outcome_pct()`
+   returns `raw_price_move × leverage`, and `pyq_p4.py`'s
+   `_check_signal_only_closes()` calls it with no explicit `leverage`
+   argument, so it always uses `LEVERAGE_DEFAULT` (10×). Added a
+   display-only "Leverage ×" control to the Dashboard (`web/index.html`)
+   that re-derives each figure from the same stored
+   `entry_price`/`outcome_price`/`side` at any chosen leverage, entirely
+   client-side — no backend change, and it never touches what the
+   engine actually trades/simulates at. Scope-limited to the rows the
+   Dashboard already has prices for (`recent_closed`, up to 10) —
+   labeled as such rather than silently claiming to match the backend's
+   200-row aggregate.
+2. **Fixed a real, confirmed-live bug the owner hit testing the
+   GitHub Actions backtest path**: `ModuleNotFoundError: No module
+   named 'pyquant_state'` in `run_backtest_gha.py`. Root cause:
+   `python3 kaggle_backtest/run_backtest_gha.py` puts that SCRIPT's own
+   directory at `sys.path[0]`, not the invoking shell's cwd (the repo
+   root) — so `import pyquant_state`/`import walkforward`, both at the
+   repo root, never resolved, regardless of the workflow's working
+   directory. Fixed with an explicit `sys.path.insert()` for the repo
+   root at the top of the script.
+3. **Backtest flow restructured to the settled design**: "Run Backtest"
+   now pushes to the Kaggle kernel (what "Sync to Kaggle" used to do)
+   and reveals a new "Run on Kaggle →" button/link (opens the kernel in
+   a new tab) instead of triggering anything remotely. The GitHub
+   Actions trigger (item 2's fix) is kept, demoted to a collapsed
+   "Advanced" section — the owner's reported Kaggle-dataset-visibility
+   and import-path issues made the manual, full-console-visibility
+   Kaggle path the preferred default, not GitHub Actions.
+4. **Started the per-trade backtest data work** (the prerequisite
+   PLAN.md's 2026-10-27 Decisions entry named): new
+   `pyquant_backtest_trades` table (run_id FK, symbol/side/entry+exit
+   price/tp/sl/qty/exit_leg/profit/pnl_pct/entry+exit timestamp),
+   `pyquant_state.record_backtest_trades()`/`get_backtest_trades()`,
+   and `walkforward.py`'s new `trades_to_records()` (normalizes its own
+   internal trade-dict shape, computes `pnl_pct` via the same
+   `outcome_pct()` leveraged formula used live, so it's directly
+   comparable to a live signal's `realized_pnl_pct`). Wired into all
+   three places a walkforward run can finish: plain CLI usage,
+   `run_backtest.py` (Kaggle manual), `run_backtest_gha.py` (GitHub
+   Actions). New `GET /api/runs/{id}/trades` endpoint, and the Backtest
+   page's run-detail modal now shows a per-trade table when present —
+   not yet wired into the Compare page itself (still v1/aggregate-only
+   there; this is the data foundation for a future v2, not the v2 UI).
+
+**New standing architecture note** (owner's explicit instruction,
+2026-10-28): the "Compare menu only shows on some pages" class of
+report is exactly what a Next.js (or similar component-based) migration
+would prevent structurally (one shared layout component instead of
+N copy-pasted `<nav>` blocks). Decided NOT to invest further in
+copy-paste-discipline tooling for this static-HTML frontend going
+forward — see the new Backlog entry below for the full reasoning this
+should carry into future sessions' architecture choices.
+
+**Previous update, 2026-10-28, first pass same day.** **Verified (not
+theorized) root cause found
 for the Settings-page "Start Fresh From Now" baseline appearing to do
 nothing** (the owner reported the Dashboard still showing a stale "$6"
 figure even after clicking it and after the previous pass's self-heal
@@ -614,6 +674,27 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Backlog (Phase 4+, not yet started, no commitment to order)
 
+- [ ] **Next.js migration (architecture decision to observe from
+  2026-10-28 onward).** The owner has flagged this as the eventual fix
+  for a class of bug this static-HTML-per-page frontend keeps
+  producing: the nav bar (and anything else "shared") is hand-copy-pasted
+  into every `web/*.html` file, so adding a page (Compare) or changing
+  the nav means editing N files identically, and any ONE of them missed
+  or desynced is a real, reported bug (not a hypothetical) — see the
+  "Compare menu only on Settings/Compare pages" report, 2026-10-27/28
+  (which turned out to be a stale browser cache that turn, not a real
+  desync, but the underlying architectural risk is real and will recur).
+  Decided: **not worth fixing with more copy-paste discipline now** —
+  every new page/shared-UI change from this point should be built
+  assuming a future Next.js (or similar component-based) migration will
+  absorb this class of bug for free via a shared layout component, so:
+  avoid inventing further hand-rolled "sync nav across N files" tooling;
+  keep each page's own JS/markup as decoupled from the others as
+  practical (already mostly true — `app.js` holds the genuinely shared
+  logic); and treat any new recurring cross-page duplication as a signal
+  to prioritize the migration sooner rather than papering over it again.
+  Not started — no scoping/timeline decided yet, this entry exists so
+  that decision is tracked, not lost between sessions.
 - [ ] Trigger `daily_optimizer()` on demand from the UI (same
   queued-job pattern as the Kaggle backtest integration).
 - [ ] Editable (non-secret) settings from the UI — `/api/config` is

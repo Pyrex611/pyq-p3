@@ -32,10 +32,11 @@
     <div class="card" style="margin-bottom:16px;">
       <h3>Run a new backtest</h3>
       <p class="hint" style="margin-top:-4px;">
-        Runs on Kaggle (not on this server) — see KAGGLE.md if this returns
-        a "Kaggle isn't configured" error. A run typically takes a few
-        minutes to start (Kaggle's own queue) plus however long the
-        walkforward engine itself takes once it starts.
+        "Run Backtest" pushes these values into the Kaggle kernel's own
+        editor and leaves the run queued — click "Run on Kaggle" (appears
+        once the push succeeds) to open it and hit "Save &amp; Run All"
+        yourself for full, visible console output, which then syncs its
+        result back to this page automatically. See KAGGLE.md Part K.
       </p>
       <form id="backtest-form" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
         <label>Days<br><input type="number" name="walk_forward_days" placeholder="15" min="1" style="width:80px;"></label>
@@ -43,16 +44,18 @@
         <label>Leverage<br><input type="number" name="leverage" placeholder="10" min="1" step="0.5" style="width:80px;"></label>
         <label><input type="checkbox" name="use_bayesian" checked> Bayesian (Optuna)</label>
         <label><input type="checkbox" name="use_atr_sl" checked> ATR-adaptive SL</label>
-        <button type="submit">Run Backtest</button>
-        <button type="button" id="btn-sync-kaggle" class="btn">Sync to Kaggle</button>
+        <button type="submit" class="btn primary">Run Backtest</button>
+        <a id="btn-run-on-kaggle" class="btn" href="#" target="_blank" rel="noopener" style="display:none; text-decoration:none;">Run on Kaggle →</a>
       </form>
-      <p class="hint" style="margin-top:8px;">
-        "Run Backtest" triggers GitHub Actions automatically. "Sync to
-        Kaggle" instead pushes these values into the Kaggle kernel's own
-        editor and leaves it queued — open the kernel and click "Save &amp;
-        Run All" yourself for full, visible console output. See KAGGLE.md
-        Part K.
-      </p>
+      <details style="margin-top:10px;">
+        <summary class="hint" style="cursor:pointer;">Advanced: trigger via GitHub Actions instead</summary>
+        <p class="hint">
+          Runs the same walkforward logic as an automated GitHub Actions
+          job instead of a human clicking "Save &amp; Run All" on Kaggle —
+          no manual step, but less visible if something goes wrong mid-run.
+        </p>
+        <button type="button" id="btn-run-gha" class="btn">Trigger via GitHub Actions</button>
+      </details>
       <div id="backtest-status" class="mono" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>
     </div>
     <div class="grid cols-2">
@@ -136,7 +139,45 @@ async function showDetail(runId) {
       </div>
       ${run.error ? `<div class="modal-section"><h4>Error</h4><div class="modal-error">${run.error}</div></div>` : ""}
       ${run.kaggle_ref ? `<div class="modal-section"><h4>Kaggle reference</h4><div class="mono" style="font-size:13px;">${run.kaggle_ref}</div></div>` : ""}
+      <div class="modal-section" id="modal-trades-section" style="display:none;">
+        <h4>Per-trade data</h4>
+        <div id="modal-trades-body"></div>
+      </div>
     `;
+    // 2026-10-28: per-trade data (foundation for the future
+    // Backtest-vs-Live comparison — PLAN.md's 2026-10-27 Decisions
+    // entry). Loaded separately/lazily since it's a second request and
+    // most runs predate this feature (empty list, nothing to show).
+    if (run.run_type === "walkforward") {
+      try {
+        const t = await apiGet(`/runs/${runId}/trades`);
+        if (t.trades && t.trades.length > 0) {
+          const section = document.getElementById("modal-trades-section");
+          const tbody = document.getElementById("modal-trades-body");
+          if (section) section.style.display = "block";
+          if (tbody) {
+            tbody.innerHTML = `
+              <table style="font-size:12px;">
+                <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Exit via</th><th>PnL %</th><th>Opened</th></tr></thead>
+                <tbody>${t.trades.map(tr => `
+                  <tr>
+                    <td class="mono">${tr.symbol ?? "—"}</td>
+                    <td class="${tr.side === 'Buy' ? 'side-buy' : 'side-sell'}">${tr.side ?? "—"}</td>
+                    <td class="mono">${fmtPrice(tr.entry_price)}</td>
+                    <td class="mono">${fmtPrice(tr.exit_price)}</td>
+                    <td>${tr.exit_leg ?? "—"}</td>
+                    <td class="mono ${pnlClass(tr.pnl_pct)}">${fmtPct(tr.pnl_pct)}</td>
+                    <td>${fmtTime(tr.entry_ts)}</td>
+                  </tr>`).join("")}</tbody>
+              </table>
+              <div class="hint" style="margin-top:6px;">${t.trades.length} trade(s) — foundation data for the future Backtest-vs-Live comparison, not yet surfaced on the Compare page.</div>
+            `;
+          }
+        }
+      } catch (e) {
+        // Non-fatal — older runs simply have no persisted trades yet.
+      }
+    }
   } catch (e) {
     document.getElementById("modal-sub").textContent = "Error";
     body.innerHTML = `<div class="modal-error">Could not load run: ${e.message}</div>`;
@@ -212,30 +253,7 @@ function _pollRun(runId) {
   }, 15000); // Kaggle's own queue is usually minutes, not seconds — no need to poll faster
 }
 
-document.getElementById("backtest-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const statusEl = document.getElementById("backtest-status");
-  const fd = new FormData(e.target);
-  const body = {};
-  for (const k of ["walk_forward_days", "bayesian_trials"]) {
-    if (fd.get(k)) body[k] = parseInt(fd.get(k), 10);
-  }
-  if (fd.get("leverage")) body.leverage = parseFloat(fd.get("leverage"));
-  body.use_bayesian = fd.get("use_bayesian") === "on";
-  body.use_atr_sl = fd.get("use_atr_sl") === "on";
-
-  statusEl.textContent = "Submitting…";
-  try {
-    const result = await apiPost("/backtests", body);
-    statusEl.textContent = `Run #${result.run_id} queued — GitHub Actions is starting it now.`;
-    _pollRun(result.run_id);
-  } catch (err) {
-    statusEl.textContent = "Could not start the run: " + err.message;
-  }
-});
-
-document.getElementById("btn-sync-kaggle").addEventListener("click", async () => {
-  const statusEl = document.getElementById("backtest-status");
+function _formBody() {
   const fd = new FormData(document.getElementById("backtest-form"));
   const body = {};
   for (const k of ["walk_forward_days", "bayesian_trials"]) {
@@ -244,13 +262,43 @@ document.getElementById("btn-sync-kaggle").addEventListener("click", async () =>
   if (fd.get("leverage")) body.leverage = parseFloat(fd.get("leverage"));
   body.use_bayesian = fd.get("use_bayesian") === "on";
   body.use_atr_sl = fd.get("use_atr_sl") === "on";
+  return body;
+}
+
+// 2026-10-28: settled flow — "Run Backtest" pushes code+params to the
+// Kaggle kernel and leaves it queued (no remote trigger of Kaggle
+// itself); "Run on Kaggle" (revealed on a successful push) opens that
+// kernel in a new tab for a human to click "Save & Run All" — full,
+// visible console output, which syncs its result back here via the
+// same pyquant_runs row every other run already polls. GitHub Actions
+// remains available as a secondary, explicitly-opt-in path below.
+document.getElementById("backtest-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const statusEl = document.getElementById("backtest-status");
+  const runOnKaggleBtn = document.getElementById("btn-run-on-kaggle");
+  runOnKaggleBtn.style.display = "none";
 
   statusEl.textContent = "Pushing to Kaggle…";
   try {
-    const result = await apiPost("/backtests/sync-to-kaggle", body);
-    statusEl.innerHTML = `Run #${result.run_id} pushed. <a href="${result.kaggle_kernel_url}" target="_blank" rel="noopener">Open the kernel on Kaggle</a> and click "Save &amp; Run All".`;
+    const result = await apiPost("/backtests/sync-to-kaggle", _formBody());
+    statusEl.textContent = `Run #${result.run_id} pushed and queued.`;
+    runOnKaggleBtn.href = result.kaggle_kernel_url;
+    runOnKaggleBtn.style.display = "inline-block";
+    _pollRun(result.run_id);
   } catch (err) {
     statusEl.textContent = "Could not push to Kaggle: " + err.message;
+  }
+});
+
+document.getElementById("btn-run-gha").addEventListener("click", async () => {
+  const statusEl = document.getElementById("backtest-status");
+  statusEl.textContent = "Submitting to GitHub Actions…";
+  try {
+    const result = await apiPost("/backtests", _formBody());
+    statusEl.textContent = `Run #${result.run_id} queued — GitHub Actions is starting it now.`;
+    _pollRun(result.run_id);
+  } catch (err) {
+    statusEl.textContent = "Could not start the run: " + err.message;
   }
 });
 </script>
