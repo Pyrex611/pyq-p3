@@ -428,6 +428,33 @@ def update_signal_outcome(
         pass  # logging is best-effort; never let it break the trading path
 
 
+def _row_timestamps_to_iso(d: dict, keys: tuple) -> dict:
+    """Postgres (psycopg2) returns a native `datetime.datetime` object for a
+    TIMESTAMP(TZ) column — SQLite returns a plain `str` for the same column
+    (it has no native datetime type). Every caller that does
+    `datetime.fromisoformat(row["opened_at"])` (baseline/"fresh start"
+    filtering — `_after_baseline()` in api/index.py, `since` filtering in
+    compute_live_performance() below) was written and tested only against
+    SQLite, where that call works. On Postgres it silently raises
+    `TypeError: fromisoformat: argument must be str`, caught by a bare
+    `except Exception: ...` at each call site that was written to tolerate
+    a malformed/missing timestamp — not a wrong *type* — and so degrades to
+    "treat as in range" / "count everything", not a crash. Net effect in
+    production: the "fresh start" baseline (Settings page / self-heal in
+    get_signals_baseline()) silently filtered NOTHING, which is exactly
+    the reported "$6 still shows after clicking Start Fresh From Now" bug.
+    Fixed at the source instead of patching every comparison call site:
+    normalize every row's timestamp columns to an ISO string right here,
+    so every consumer — this module's own comparisons, and the JSON API
+    layer, which already did this implicitly via FastAPI's encoder — sees
+    the same plain-string type regardless of backend."""
+    for k in keys:
+        v = d.get(k)
+        if isinstance(v, datetime):
+            d[k] = v.isoformat()
+    return d
+
+
 def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, limit: int = 200) -> list[dict]:
     """Returns recent signals, newest first, optionally filtered by symbol/status."""
     where, params = [], []
@@ -441,6 +468,7 @@ def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, lim
     cols = ["id", "symbol", "side", "entry_price", "sl_price", "tp_price", "qty",
             "entry_capital", "expected_max_loss", "mode", "status", "outcome_price",
             "realized_pnl", "realized_pnl_pct", "opened_at", "closed_at"]
+    ts_cols = ("opened_at", "closed_at")
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:
@@ -448,13 +476,13 @@ def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, lim
                     f"SELECT {','.join(cols)} FROM pyquant_signals{clause} "
                     f"ORDER BY id DESC LIMIT %s", (*params, limit),
                 )
-                return [dict(zip(cols, row)) for row in cur.fetchall()]
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in cur.fetchall()]
         with _lock, _sqlite_conn() as conn:
             rows = conn.execute(
                 f"SELECT {','.join(cols)} FROM pyquant_signals{clause} "
                 f"ORDER BY id DESC LIMIT ?", (*params, limit),
             ).fetchall()
-            return [dict(zip(cols, row)) for row in rows]
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in rows]
     except Exception:
         return []
 
@@ -511,7 +539,12 @@ def _row_to_run(row: tuple) -> dict:
         d["params"] = json.loads(d["params"]) if d["params"] else None
     except Exception:
         pass
-    return d
+    # Same Postgres-vs-SQLite datetime-object-vs-string trap as
+    # list_signals()'s _row_timestamps_to_iso() above — normalize
+    # defensively so any future Python-side comparison on these (there
+    # is none today; the modal/table display is pure frontend
+    # fmtTime()) doesn't silently no-op the same way.
+    return _row_timestamps_to_iso(d, ("started_at", "finished_at"))
 
 
 def list_runs(run_type: Optional[str] = None, limit: int = 50) -> list[dict]:

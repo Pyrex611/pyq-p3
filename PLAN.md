@@ -1,6 +1,90 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-27, second pass same day. Live-incident root
+**Last updated:** 2026-10-28. **Verified (not theorized) root cause found
+for the Settings-page "Start Fresh From Now" baseline appearing to do
+nothing** (the owner reported the Dashboard still showing a stale "$6"
+figure even after clicking it and after the previous pass's self-heal
+fix). Confirmed by directly querying the live `GET /api/dashboard` and
+`GET /api/compare` endpoints: `signals_baseline_at` correctly showed a
+just-set, recent timestamp, yet `recent_closed`/`trade_count` still
+included every historical signal from days earlier, completely
+unfiltered — proof the baseline comparison itself was silently a no-op
+in production, not a caching or propagation issue (ruled out separately
+by fetching with cache-busting query params and getting identical
+results).
+
+**Root cause, confirmed by reading the code with that behavior in
+mind:** `pyquant_state.list_signals()` returns `dict(zip(cols, row))`
+straight from the DB cursor with no type normalization. On SQLite (this
+project's local/dev backend) a `TIMESTAMP` column comes back as a plain
+`str` — so `datetime.fromisoformat(row["opened_at"])`, used by both
+`api/index.py`'s `_after_baseline()` and `compute_live_performance()`'s
+`since` filter, works fine and was presumably tested/written against
+that backend. On **Postgres** (production, via psycopg2) the same
+column comes back as a native `datetime.datetime` object —
+`datetime.fromisoformat()` raises `TypeError: fromisoformat: argument
+must be str` on that input, which both call sites' bare `except
+Exception: return True` / `except Exception: pass` swallow silently,
+degrading to "treat as in range" — i.e. count everything, baseline
+filtering fully defeated, in production only. A classic backend-parity
+trap this project has hit before (the IPv6 `DATABASE_URL`/Neon
+incidents) — SQLite-vs-Postgres behavioral differences that only show
+up live. **Fixed at the source**: `list_signals()` (and `_row_to_run()`,
+defensively, for the same column-type risk on `pyquant_runs`) now
+normalizes any `datetime` object to its ISO string before returning, so
+every consumer sees a consistent type regardless of backend.
+
+**This same bug was ALSO silently defeating `_check_signal_only_closes()`'s
+multi-bar TP/SL lookback** (`pyq_p4.py`'s `_fetch_bar_extremes_since()`,
+built 2026-10-25 specifically to fix signals getting stuck open for
+days) — it's fed `row.get("opened_at")` from the exact same
+`list_signals()` call, hit the exact same `TypeError`, and fell back
+silently to **single-bar-only** checking (its own documented fallback
+behavior for "any error") on every tick in production, the entire time
+it's been deployed. That's the OLD, narrower check this feature was
+built to replace, quietly back in effect. Combined with `hourly_task()`'s
+"already has an open position — skipping new signal generation" gate
+(`pyq_p4.py` ~line 1361), a position that rarely closes (because its
+extended lookback silently never ran) directly blocks new signal
+generation for that symbol for as long as it stays open — a second,
+now-confirmed, concrete mechanism by which signal generation can stall
+for days, independent of the UKF-retrain-starvation fix below. Same
+source-level fix in `list_signals()` resolves this too.
+
+**Re-examined under scrutiny, ruled out as a cause:** `check_open_position()`
+(`p4_utils.py`) — the function actually used by the current `pyq_p4.py`
+stack — defaults `is_open_position` to `False` and only overwrites it
+on a successful Binance read; on the geo-block exception seen in the
+owner's GitHub Actions log (`'NoneType' object has no attribute
+'futures_position_information'`), it logs and returns that same
+all-`False` default. Confirmed by reading the function directly: this
+does **not** cause `already_open` to default to `True` and block signal
+generation — the geo-block errors in that log are noise for
+`SIGNAL_ONLY_MODE` purposes, not a hidden gate. Flagging this
+explicitly because it was a live suspect that scrutiny (not assumption)
+cleared.
+
+**Daily UKF-retrain-starvation fix (previous pass, below) status
+downgraded from "confirmed root cause" to "a real, independently-fixed
+bug of unconfirmed total impact":** the timeout/ordering flaw described
+below is real and worth having fixed regardless, but nothing in this
+session's evidence actually proves it fired on the specific days in
+question — that was inferred from the log snippet's shape, not
+confirmed from `pyquant_runs`/Actions run durations. Both fixes ship
+together; only the datetime bug above is independently verified from
+live data.
+
+**Compare-menu-only-on-Settings-page report: investigated and NOT
+reproduced.** Fetched the live, deployed `index.html` and
+`live-monitor.html` directly (not from this repo's working copy) and
+both already render "Compare" in the nav identically to every other
+page. Almost certainly a stale browser/tab cache on the owner's end
+from before the previous pass's deploy finished propagating — no code
+change made here since there's nothing to fix; suggested a hard
+refresh instead of a speculative "fix" for a problem not present in
+what's actually being served.
+
+**Previous update, 2026-10-27, second pass same day.** Live-incident root
 cause found: **no new signal generated for ~3 days.** Owner's report
 plus a GitHub Actions log from the top of an hour confirmed the daily
 UKF re-anchor was the suspect (`"Persisted UKF state found — using
