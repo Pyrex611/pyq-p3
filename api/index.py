@@ -1,20 +1,23 @@
 """
-api/index.py — PyQuant Control Center backend + frontend, one Vercel Function.
+api/index.py — PyQuant Control Center backend (API only, as of the
+2026-10-29 Next.js migration).
 
-Phase 2 (UI build). A FastAPI app, deployed via Vercel's Python FRAMEWORK
-PRESET (not the older "each file under api/ is its own function" model —
-see the redeploy note in the repo's VERCEL_DEPLOY.md for why that version
-404'd on every path). The project root's `pyproject.toml` sets
-`[tool.vercel].entrypoint = "api.index:app"`, which tells Vercel: detect
-FastAPI, load this exact module/variable, and route EVERY request to it —
-so this one app has to serve both the JSON API AND the static frontend.
-That's what the `StaticFiles` mount at the bottom of this file does: every
-`@app.get("/api/...")` route below is matched first (Starlette checks
-routes in registration order), and anything else falls through to the
-mount, which serves `web/`'s HTML/CSS/JS. This is the exact same
-app-plus-StaticFiles-mount shape already verified locally in this project's
-testing (TestClient + a headless-browser pass against a combined server) —
-production now matches that proven layout instead of introducing a new one.
+Phase 2 (UI build) gave this file a `StaticFiles` mount that served the
+whole frontend itself, under Vercel's Python "Other" framework preset
+(`pyproject.toml`'s `[tool.vercel].entrypoint` routed EVERY request to
+this one app). Phase 4's Next.js migration (see CLAUDE.md Section 2/3
+and PLAN.md's 2026-10-29 entry) replaces that static `web/` frontend
+with a proper Next.js app at the repo root (`pages/`, `components/`,
+`lib/`) — the former static pages now live at `legacy_web/`, unused,
+kept only for reference. This file's job shrank to match: it's an API
+only now. Next.js is the Vercel project's detected framework and owns
+routing for everything except `/api/*`; `vercel.json`'s rewrite sends
+every `/api/*` request to this file (still deployed as a Python
+serverless function — Vercel auto-detects the module-level `app` ASGI
+object, no `[tool.vercel]` entrypoint config needed for that anymore,
+which is why `pyproject.toml` no longer has one). The `StaticFiles`
+mount is gone; every route below still matches its exact path as
+before, just with no fallthrough static mount after it.
 
 Design choice worth stating explicitly: this API is a READ layer (plus one
 narrow, deliberately-scoped write: the trading on/off switch) over
@@ -38,11 +41,16 @@ exchange directly. Two reasons:
      NEW entries; it never touches an already-open position's protection).
 
 Local dev:  uvicorn api.index:app --reload --port 8000  (run from the repo root)
-Vercel:     this file + pyproject.toml is the whole deploy. vercel.json is
-            deliberately empty ({}) — a "functions"/"rewrites" block there
-            is the legacy file-based-function config model, and mixing it
-            with the framework-preset entrypoint above is exactly what
-            caused the earlier 404 (see VERCEL_DEPLOY.md).
+            — the Next.js frontend (`npm run dev`) talks to this over
+            `NEXT_PUBLIC_API_BASE`/`window.PYQUANT_API_BASE`, not a proxy;
+            see next.config.js's header comment.
+Vercel:     this file + pyproject.toml's dependency list is this one
+            serverless function. vercel.json now carries the `/api/*`
+            rewrite this file needs to receive every API path (see that
+            file's own comment) — the earlier "deliberately empty {}"
+            note no longer applies now that Next.js, not this file, owns
+            general routing; see VERCEL_DEPLOY.md for the historical 404
+            this evolved from.
 """
 from __future__ import annotations
 
@@ -57,14 +65,13 @@ import traceback
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# pyquant_state.py (and the web/ directory, mounted below) live at the repo
-# root, one level up from api/. Vercel's Python runtime sets the working
-# directory to the project root already (see "Reading relative files" in
-# Vercel's Python runtime docs), but this sys.path line makes `uvicorn
-# api.index:app` work identically when run locally from the repo root.
+# pyquant_state.py lives at the repo root, one level up from api/.
+# Vercel's Python runtime sets the working directory to the project root
+# already (see "Reading relative files" in Vercel's Python runtime
+# docs), but this sys.path line makes `uvicorn api.index:app` work
+# identically when run locally from the repo root.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
@@ -752,14 +759,9 @@ def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults 
     return state_store.compute_comparison_buckets(run_id=run_id, since=baseline)
 
 
-# ── Static frontend ─────────────────────────────────────────────────────
-#
-# Registered LAST, deliberately: Starlette (FastAPI's underlying router)
-# tries routes in the order they were added, so every "/api/..." route
-# above is matched first. A request this mount actually receives (e.g.
-# "/", "/signals.html", "/assets/app.js") is either not an API call at
-# all, or an API path that genuinely doesn't exist — StaticFiles returns
-# a real 404 for the latter, same as before this mount existed.
-# html=True makes "/" resolve to web/index.html, matching how the Phase 2
-# frontend pages link to each other (index.html, live-monitor.html, etc.)
-app.mount("/", StaticFiles(directory=str(_REPO_ROOT / "web"), html=True), name="frontend")
+# No static-frontend mount here anymore — see this file's module
+# docstring. Next.js (pages/, components/, lib/ at the repo root) is now
+# the Vercel project's detected framework and serves every non-"/api/*"
+# path itself; vercel.json's rewrite is what gets "/api/*" to this file
+# in production. StaticFiles/the `web/` mount this file used to end with
+# is gone along with `web/` itself (moved to `legacy_web/`, unused).

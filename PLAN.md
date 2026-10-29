@@ -1,6 +1,94 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-28, second pass same day. Follow-up to the
+**Last updated:** 2026-10-29. Three items, all from the owner's same
+message (sent right after confirming the GitHub Actions backtest path
+now works live):
+
+1. **Backtest page: GitHub Actions promoted to primary, Kaggle demoted
+   to a backup disclosure.** Inverts yesterday's decision (2026-10-28
+   entry below made Kaggle the default after GHA's `ModuleNotFoundError`
+   blocked it) — now that the `sys.path` fix is confirmed working on a
+   real run, "Run Backtest" triggers GitHub Actions directly again, no
+   manual step. Kaggle (unchanged otherwise — "Sync to Kaggle" / "Run on
+   Kaggle →") moved behind a `▼ Backup: run on Kaggle instead` `<details>`
+   disclosure with a one-paragraph description, per the owner's explicit
+   ask for "a downward facing arrow that will open up to reveal the
+   Kaggle backtest button and a brief description."
+2. **Dashboard Leverage card: trimmed to just the control**, per the
+   owner's explicit "remove all the extra text as description" — the
+   paragraph explaining what the control does and that it's
+   display-only is gone; only the label, input, and reset button remain.
+3. **Backtest-vs-Live comparison: day-bucketed data, the concrete next
+   step now that per-trade persistence exists** (`pyquant_backtest_trades`,
+   shipped 2026-10-28). New `pyquant_state.compute_comparison_buckets()` /
+   `GET /api/compare/daily` — buckets the latest completed walkforward
+   run's trades AND live closed signals (respecting the signals
+   baseline) by UTC calendar day, each with trade count / win rate / avg
+   %PnL. This is the matching strategy the 2026-10-26 "brainstorm" note
+   settled on (day-granularity, not a 1:1 trade match — live ticks every
+   ~5 minutes against real-time bars while a backtest walks fixed
+   historical windows, so exact timestamps never line up). Verified
+   end-to-end against a real temporary SQLite DB before committing (two
+   backtest trades + two live signals on different days, bucketed
+   correctly). Surfaced on the new Next.js Compare page (item 4) as a
+   merged day-by-day table with a Live-minus-Backtest delta column. One
+   approximation worth flagging: the backtest side's "win" is
+   `pnl_pct > 0` (the live side uses the exact `closed_tp` status,
+   available because live signals store their own close reason) —
+   documented in the Compare page's own copy, not hidden.
+4. **Next.js migration — the owner's main ask this message**, escalating
+   2026-10-28's "track this as an architecture decision, don't start
+   yet" to "migrate everything as is, now, no feature/UI changes."
+   Replaced the static `web/*.html` frontend (moved to `legacy_web/`,
+   kept for reference, not deployed) with a Next.js app at the repo
+   root: `pages/` (one file per route: `index.js`=Dashboard,
+   `live-monitor.js`, `signals.js`, `backtest.js`, `compare.js`,
+   `settings.js`), `components/Layout.jsx` (the single shared
+   topbar+nav — directly fixes the *class* of bug behind the "Compare
+   only shows in nav on some pages" report, since there is now exactly
+   one copy of that markup instead of one per HTML file),
+   `components/ModeSwitch.jsx`, `lib/api.js` (ported from
+   `web/assets/app.js` — same `apiGet`/`apiPost`/formatter functions,
+   same behavior), `styles/globals.css` (ported from
+   `web/assets/style.css`, near-verbatim). Every page was rewritten as
+   an idiomatic React component but checked line-by-line against its
+   HTML/JS original for feature parity — same fields, same table
+   columns, same polling behavior on the Backtest page's run-detail
+   modal, same leverage-override math on the Dashboard, same filter
+   behavior on Signals. This was a framework port, not a redesign — no
+   new visual design pass was done (the owner was explicit: "without
+   changing the features, functionalities, UI etc").
+   - **Backend side of the migration**: `api/index.py`'s `StaticFiles`
+     mount (which used to serve `web/` itself, under the old "one Python
+     app answers every request" Vercel framework-preset model) is
+     removed — `api/index.py` is now an ordinary Python serverless
+     function that only answers `/api/*`. `vercel.json` changed from a
+     deliberately-empty `{}` to a real rewrite:
+     `{"rewrites":[{"source":"/api/:path*","destination":"/api"}]}`.
+     **Destination is `/api`, not `/api/index`** — deliberately: this
+     repo's own `VERCEL_DEPLOY.md` already documented the original 404
+     incident's exact root cause as a `vercel.json` rewrite pointing at
+     the wrong destination for a function at `api/index.py` (Vercel
+     resolves that file to the path `/api`, no `/index` suffix); reusing
+     that already-learned lesson here, not re-deriving it. `pyproject.toml`'s
+     `[tool.vercel].entrypoint` section is removed too (it only made
+     sense under the old all-in-one-app model) — Vercel auto-detects the
+     module-level `app` ASGI object with zero extra config under the new
+     model.
+   - **Not yet confirmed on a real Vercel deploy** — this was built and
+     checked locally (`next build` succeeded, see below) but the owner
+     hasn't redeployed yet. First things to verify after deploy: Vercel's
+     Framework Preset auto-detects as Next.js (not "Other"), the
+     `/api/*` rewrite actually reaches `api/index.py`, and every page
+     renders against live data. `VERCEL_DEPLOY.md` was updated with the
+     new expectations (Framework Preset should read Next.js now, page
+     URLs lost their `.html` extension) so the next deploy attempt has
+     accurate instructions to check against.
+   - **Verification performed before pushing**: `npm run build` (Next.js
+     production build) completed with no errors; `python3 -c "import
+     ast; ast.parse(...)"` on every touched `.py` file.
+
+**Previous update, 2026-10-28, second pass same day.** Follow-up to the
 previous pass's datetime-bug fix (owner confirmed the Dashboard now
 shows %PnL and a new signal again — the fix worked). Four more items:
 
@@ -674,27 +762,12 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Backlog (Phase 4+, not yet started, no commitment to order)
 
-- [ ] **Next.js migration (architecture decision to observe from
-  2026-10-28 onward).** The owner has flagged this as the eventual fix
-  for a class of bug this static-HTML-per-page frontend keeps
-  producing: the nav bar (and anything else "shared") is hand-copy-pasted
-  into every `web/*.html` file, so adding a page (Compare) or changing
-  the nav means editing N files identically, and any ONE of them missed
-  or desynced is a real, reported bug (not a hypothetical) — see the
-  "Compare menu only on Settings/Compare pages" report, 2026-10-27/28
-  (which turned out to be a stale browser cache that turn, not a real
-  desync, but the underlying architectural risk is real and will recur).
-  Decided: **not worth fixing with more copy-paste discipline now** —
-  every new page/shared-UI change from this point should be built
-  assuming a future Next.js (or similar component-based) migration will
-  absorb this class of bug for free via a shared layout component, so:
-  avoid inventing further hand-rolled "sync nav across N files" tooling;
-  keep each page's own JS/markup as decoupled from the others as
-  practical (already mostly true — `app.js` holds the genuinely shared
-  logic); and treat any new recurring cross-page duplication as a signal
-  to prioritize the migration sooner rather than papering over it again.
-  Not started — no scoping/timeline decided yet, this entry exists so
-  that decision is tracked, not lost between sessions.
+- [x] **Next.js migration — DONE 2026-10-29** (was: "architecture
+  decision to observe from 2026-10-28 onward"). See the 2026-10-29 entry
+  at the top of this file for the full writeup. The owner escalated this
+  from "observe, don't start yet" to "migrate everything as is, now" the
+  same day the GitHub Actions backtest path was confirmed working live.
+  Not yet confirmed on a real Vercel deploy — see that entry's caveats.
 - [ ] Trigger `daily_optimizer()` on demand from the UI (same
   queued-job pattern as the Kaggle backtest integration).
 - [ ] Editable (non-secret) settings from the UI — `/api/config` is

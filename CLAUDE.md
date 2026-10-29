@@ -29,7 +29,7 @@ granular status.
 │  cron, or VPS fallback)   │◄──────►│  Vercel) — read-only over  │
 │   - ONLY holder of        │ writes │  the state store + ONE     │
 │     Binance/Alpaca creds  │        │  off-switch write; serves  │
-│   - one-shot per 5-min    │        │  web/'s 5 static pages     │
+│   - one-shot per 5-min    │        │  Next.js frontend served   │
 │     tick (cron_runner.py) │        └───────────────┬────────────┘
 └────────────┬─────────────┘                        │
              └───────────────┐        ┌─────────────┘
@@ -65,23 +65,42 @@ or compromise there cannot place a trade.
 - `cron_runner.py` — GitHub Actions cron entrypoint: stateless,
   one-shot, calls every task unconditionally and relies on each task's
   own `try_claim_run()` guard.
-- `api/index.py` — FastAPI backend (Vercel). `pyproject.toml`'s
-  `[tool.vercel]` entrypoint is what Vercel actually reads for deps —
-  **not** `api/requirements.txt` (see `SPEC.md` Section 7 and the
-  `kaggle` dependency incident, 2026-10-19, for why this matters: a
+- `api/index.py` — FastAPI backend, deployed as a standalone Python
+  serverless function under `/api/*` (not the whole app anymore — see
+  its own header comment for the 2026-10-29 Next.js migration).
+  `pyproject.toml`'s `dependencies` array is what Vercel actually reads
+  for deps — **not** `api/requirements.txt` (see `SPEC.md` Section 7 and
+  the `kaggle` dependency incident, 2026-10-19, for why this matters: a
   dependency listed only in `requirements.txt` is silently never
-  installed).
-- `web/` — 5 static pages (Dashboard, Live Monitor, Signals, Backtest,
-  Settings).
-- `vercel.json` — deliberately `{}`; don't add `"rewrites"`/`"functions"`
-  without reading `VERCEL_DEPLOY.md`'s opening note (caused the original
-  404).
+  installed). No `[tool.vercel]` entrypoint anymore — that was specific
+  to the old "route everything to this app" model; removing it was
+  deliberate (see that file's own comment).
+- `pages/`, `components/`, `lib/`, `styles/`, `package.json`,
+  `next.config.js`, `jsconfig.json` — **the Next.js frontend
+  (2026-10-29), replacing the old static `web/` site.** 6 pages
+  (Dashboard `pages/index.js`, Live Monitor, Signals, Backtest, Compare,
+  Settings), one shared `components/Layout.jsx` (topbar + nav — the
+  single-source-of-truth fix for the "nav only showed Compare on some
+  pages" class of bug the old copy-pasted-per-file `<nav>` produced),
+  `lib/api.js` (API/formatting helpers, ported from the old
+  `web/assets/app.js`). Same features/functionality/UI as the static
+  site it replaced — this was a framework migration, not a redesign.
+  See `PLAN.md`'s 2026-10-29 entry for the full writeup and what's
+  *not* yet true (no SSR/data-fetching patterns adopted, no new pages).
+- `vercel.json` — now carries a real rewrite: `/api/*` → `/api`. **Not**
+  `{}` anymore (that was the old all-in-one-app model) — see
+  `VERCEL_DEPLOY.md`'s 2026-10-29 update for exactly why the
+  destination must be `/api`, not `/api/index` (the original 404 this
+  guide was written to fix was this exact destination mistake, just
+  under a different model).
 - `kaggle_backtest/` — Kaggle kernel template for on-demand backtests
   (`KAGGLE.md`).
 
 **Legacy (not part of current work):** `pyq_p3.py`, `p3_backtest.py`,
 `pyquant_orchestra.py`, `pyquant_utils.py`, `.log` files — predate the
-"p4" rewrite, kept for reference only.
+"p4" rewrite, kept for reference only. `legacy_web/` — the pre-2026-10-29
+static HTML/CSS/JS frontend, superseded by the Next.js app above; kept
+only for reference, not deployed.
 
 **Housekeeping backlog:** `*.log` files are committed and growing — add
 to `.gitignore` next time it's touched anyway (see `PLAN.md` backlog).
@@ -142,6 +161,17 @@ section only orients a new session to where things stand structurally.
   end-to-end; real order placement needs a non-geo-blocked host
   (`BINANCE_GEOBLOCK.md` recommends residential/home IP, not a
   datacenter VPS).
+- **Done this session (2026-10-29), not yet confirmed on a live
+  deploy:** the Next.js frontend migration (Section 3's "Next.js
+  frontend" entry) — same features/functionality/UI as the static site
+  it replaced, `vercel.json` updated with the `/api/*` → `/api` rewrite
+  this needs, `api/index.py`'s `StaticFiles` mount removed. Needs a real
+  Vercel deploy to confirm the Framework Preset auto-detects as Next.js
+  and the rewrite actually reaches the API function — see
+  `VERCEL_DEPLOY.md`'s 2026-10-29 updates before assuming either works.
+  Also shipped the same session: `GET /api/compare/daily` (day-bucketed
+  Backtest-vs-Live data, `pyquant_state.compute_comparison_buckets()`),
+  surfaced on the new Compare page.
 
 ## 6. What's next
 

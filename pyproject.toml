@@ -40,14 +40,15 @@ dependencies = [
     "requests>=2.31.0",
 ]
 
-# This is what makes Vercel's Python framework preset find the app: without
-# it, Vercel only looks for an entrypoint named app.py/index.py/server.py/
-# main.py/wsgi.py/asgi.py at the PROJECT ROOT or under src/ or app/ — never
-# under api/. Pointing it here explicitly lets the app stay at api/index.py
-# (consistent with this repo's existing layout) while still using the
-# current, officially-recommended framework-preset deployment model, under
-# which Vercel routes EVERY request to this one app (api/index.py's own
-# docstring + its StaticFiles mount is what serves the frontend from the
-# same app for exactly this reason).
-[tool.vercel]
-entrypoint = "api.index:app"
+# 2026-10-29 Next.js migration: no [tool.vercel] entrypoint section here
+# anymore. That setting was specific to the old Python "Other" framework
+# preset, under which Vercel routed EVERY request to this one app (see
+# api/index.py's docstring history / VERCEL_DEPLOY.md for that model).
+# Now that Next.js (package.json/next.config.js at the repo root) is the
+# project's detected framework, api/index.py is just an ordinary Python
+# serverless function under api/ — Vercel auto-detects the module-level
+# `app` ASGI object with zero extra config, and vercel.json's rewrite
+# (not this file) is what routes "/api/*" requests to it. This section
+# is intentionally absent now, not just emptied — re-adding it would
+# re-enable the old "route everything to this app" behavior, which would
+# fight Next.js for every non-API path.

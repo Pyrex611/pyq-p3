@@ -1,9 +1,21 @@
 # Vercel Deployment Guide — PyQuant Control Center (API + Frontend)
 
 This is the complete, step-by-step procedure for deploying `api/index.py`
-+ `web/` to Vercel as the project `pyq-p3` (`https://pyq-p3.vercel.app`).
-Follow it top to bottom on a fresh checkout — every step is included, not
-just the ones that differ from "obvious" defaults.
+(API) + the Next.js frontend (`pages/`, `components/`, `lib/`,
+`package.json`) to Vercel as the project `pyq-p3`
+(`https://pyq-p3.vercel.app`). Follow it top to bottom on a fresh
+checkout — every step is included, not just the ones that differ from
+"obvious" defaults.
+
+> **2026-10-29 Next.js migration note:** everything below predates the
+> move from a static `web/` HTML/CSS/JS frontend to a Next.js app at the
+> repo root (`legacy_web/` is the old, now-unused static frontend, kept
+> for reference only). Most of this guide (env vars, `DATABASE_URL`,
+> troubleshooting a 500 on `/api/...`) is unchanged — only the parts
+> about **which framework Vercel detects** and **what `vercel.json`
+> should contain** changed, and are called out inline below. See
+> CLAUDE.md Section 2/3 and PLAN.md's 2026-10-29 entry for the full
+> migration writeup.
 
 **Why the earlier deploy 404'd on every path** (both `/` and `/api/health`):
 the repo's `vercel.json` had a `"rewrites"` block pointing `/api/*` at
@@ -86,8 +98,8 @@ cd C:\Users\Pyrex\pyq-p3
 ```
 
 (Adjust the path if your checkout lives somewhere else — it must be the
-folder that directly contains `vercel.json`, `pyproject.toml`, `api/`,
-and `web/`.)
+folder that directly contains `vercel.json`, `pyproject.toml`,
+`package.json`, `api/`, and `pages/`.)
 
 ### B2. Run the link command
 
@@ -208,15 +220,26 @@ the project page → **Deployments** tab → click the newest (top) row →
 
 ### D2. Confirm the Framework Preset Vercel detected
 
+**2026-10-29 Next.js migration:** this check changed. Before the
+migration, this guide wanted a Python-based preset (the whole app was
+one Python function serving everything). Now the project should show
+**Next.js** — `api/index.py` is a separate, ordinary Python serverless
+function, not the thing Vercel treats as "the framework."
+
 1. In the dashboard, go to **pyq-p3** → **Settings** → **General**.
 2. Scroll to **Build & Development Settings**.
-3. Confirm **Framework Preset** shows a Python-based preset (not
-   "Other" with no framework detected). If it shows "Other", click
-   **Edit**, and if a Python option isn't offered in the dropdown, this
-   usually self-corrects once `pyproject.toml` exists at the root for the
-   *next* deploy — re-run `vercel --prod --force` (the `--force` flag
-   skips Vercel's build cache, guaranteeing it re-reads `pyproject.toml`
+3. Confirm **Framework Preset** shows **Next.js**. If it shows "Other"
+   with no framework detected, click **Edit** and select **Next.js**
+   explicitly, then redeploy (`vercel --prod --force` to bypass the
+   build cache and guarantee it re-reads `package.json`/`next.config.js`
    from scratch).
+4. Separately, confirm `api/index.py` still deployed as a function: go
+   to the same deployment's **Functions** tab (or **Source** tab) and
+   look for `api/index.py` listed — Vercel auto-detects the module-level
+   `app` ASGI object there with no extra config needed (no
+   `[tool.vercel]` entrypoint in `pyproject.toml` anymore — see that
+   file's own comment for why removing it was deliberate, not an
+   oversight).
 
 ---
 
@@ -237,8 +260,11 @@ whatever you set `PYQUANT_MODE` to).
 
 Then open `https://pyq-p3.vercel.app/` in a browser — you should see the
 Dashboard page render (not a 404 JSON blob). Click through to
-`/signals.html`, `/backtest.html`, `/settings.html`, `/live-monitor.html`
-from the page's own nav links and confirm each one loads.
+`/signals`, `/backtest`, `/settings`, `/live-monitor`, `/compare` from
+the page's own nav links and confirm each one loads (2026-10-29: these
+are now Next.js routes with no `.html` extension — the old
+`/signals.html` etc. URLs from the static `legacy_web/` frontend no
+longer exist).
 
 If `/api/dashboard` shows all-empty data (`"open_positions":[]`,
 `"last_run":null`), that's expected until the VPS orchestra process
@@ -252,13 +278,21 @@ just has nothing logged yet.
 
 - **Still 404 on every path after `vercel --prod`:** run
   `vercel --prod --force` to bypass the build cache entirely, then repeat
-  Part E. Also double check `vercel.json`'s content is exactly `{}` — if
-  any leftover `"rewrites"` or `"functions"` key is present, delete it.
-- **404 only on `/api/...` paths, `/` works fine:** confirms the static
-  mount works but the API routes aren't registering — check
-  **Deployments → (latest) → Build Logs** for a Python import error (most
-  likely a missing dependency not listed in `pyproject.toml`'s
-  `dependencies` array).
+  Part E. **2026-10-29 update:** `vercel.json` should now contain the
+  `/api/*` → `/api` rewrite (see that file) — it is *not* supposed to be
+  `{}` anymore now that Next.js, not `api/index.py`, owns general
+  routing. (The historical note this guide opened with, about the
+  earlier 404, was for the OLD file-based model where the function at
+  `api/index.py` resolves to the path `/api` with no `/index` suffix —
+  that detail is exactly why the current rewrite's destination is
+  `/api`, not `/api/index`; getting that destination wrong reproduces
+  the same class of 404 this guide was originally written to fix.)
+- **404 only on `/api/...` paths, `/` works fine:** confirms Next.js is
+  serving pages correctly but the rewrite to the API function isn't
+  working — re-check `vercel.json`'s rewrite destination (must be
+  `/api`, see above), then check **Deployments → (latest) → Build Logs**
+  for a Python import error (most likely a missing dependency not listed
+  in `pyproject.toml`'s `dependencies` array).
 - **500 error on any `/api/...` route:** check
   **Deployments → (latest) → Functions** (or **Runtime Logs**) tab in the
   dashboard — this shows the actual Python traceback. The most common

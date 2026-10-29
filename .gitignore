@@ -16,6 +16,12 @@ __pycache__/
 *.pyc
 .vercel/
 
+# 2026-10-29 Next.js migration: node deps + build output, standard
+# Next.js ignores. package-lock.json IS committed (reproducible builds).
+node_modules/
+.next/
+npm-debug.log*
+
 # GitHub Actions cron migration: the database (pyquant_state.py) is now
 # the source of truth for all of this — these are purely local, best-
 # effort mirrors. Purged from existing git history too (see
