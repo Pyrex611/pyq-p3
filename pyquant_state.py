@@ -862,6 +862,87 @@ def compute_live_performance(since: Optional[str] = None, limit: int = 500) -> d
     }
 
 
+def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str] = None,
+                                limit: int = 1000) -> dict:
+    """Day-bucketed Backtest-vs-Live comparison data — the matching
+    strategy compare.html's "brainstorm" section settled on (2026-10-26):
+    not a 1:1 trade match (live ticks every ~5 minutes against real-time
+    bars while a backtest walks fixed historical windows, so timestamps
+    never line up exactly), but bucketing both sides by UTC calendar day
+    and comparing trade count / win rate / avg return per day — tolerant
+    of the timing skew while far more granular than one whole-history
+    number each. Built 2026-10-29 directly on the per-trade persistence
+    (`pyquant_backtest_trades`) added 2026-10-28.
+
+    `run_id`: which backtest run's trades to bucket; None (default) uses
+    the latest *completed* walkforward run. `since`: the same "fresh
+    start" signals baseline GET /api/dashboard and GET /api/compare
+    already respect, applied to the live side only — a backtest run has
+    no such concept; it's always its own fixed historical window.
+
+    Returns {"run_id": ..., "live_by_day": {date: {...}}, "backtest_by_day": {date: {...}}}
+    — one entry per UTC calendar day (YYYY-MM-DD) with at least one
+    trade on that side. Best-effort/non-fatal: empty buckets on any
+    failure rather than raising, matching this module's standing
+    try/except convention for every read used by the UI."""
+    def _bucket(rows: list, date_key: str, pct_key: str, win_pred) -> dict:
+        buckets: dict = {}
+        for r in rows:
+            ts = r.get(date_key)
+            if not ts:
+                continue
+            day = str(ts)[:10]  # ISO date prefix — same for a "...T..." timestamp or a bare date
+            if len(day) != 10:
+                continue
+            b = buckets.setdefault(day, {"trade_count": 0, "wins": 0, "pct_vals": []})
+            b["trade_count"] += 1
+            if win_pred(r):
+                b["wins"] += 1
+            pv = r.get(pct_key)
+            if pv is not None:
+                b["pct_vals"].append(pv)
+        out = {}
+        for day, b in buckets.items():
+            out[day] = {
+                "trade_count": b["trade_count"],
+                "win_rate_pct": (b["wins"] / b["trade_count"] * 100.0) if b["trade_count"] else None,
+                "avg_pnl_pct": (sum(b["pct_vals"]) / len(b["pct_vals"])) if b["pct_vals"] else None,
+            }
+        return out
+
+    try:
+        if run_id is None:
+            wf_runs = list_runs(run_type="walkforward", limit=1)
+            wf = wf_runs[0] if wf_runs and wf_runs[0].get("status") == "completed" else None
+            run_id = wf["id"] if wf else None
+
+        backtest_trades = get_backtest_trades(run_id) if run_id is not None else []
+        backtest_by_day = _bucket(
+            backtest_trades, "exit_ts", "pnl_pct",
+            lambda t: (t.get("pnl_pct") or 0) > 0,
+        )
+
+        live_rows = list_signals(limit=limit)
+        live_closed = [r for r in live_rows if r.get("status") not in (None, "open")]
+        if since:
+            try:
+                since_dt = datetime.fromisoformat(since)
+                live_closed = [
+                    r for r in live_closed
+                    if r.get("opened_at") and datetime.fromisoformat(r["opened_at"]) >= since_dt
+                ]
+            except Exception:
+                pass  # malformed baseline degrades to "count everything", not a crash
+        live_by_day = _bucket(
+            live_closed, "closed_at", "realized_pnl_pct",
+            lambda r: r.get("status") == "closed_tp",
+        )
+
+        return {"run_id": run_id, "live_by_day": live_by_day, "backtest_by_day": backtest_by_day}
+    except Exception:
+        return {"run_id": run_id, "live_by_day": {}, "backtest_by_day": {}}
+
+
 def get_run(run_id: int) -> Optional[dict]:
     """Returns a single run by id, or None if not found/on error."""
     cols = ", ".join(_RUN_COLUMNS)

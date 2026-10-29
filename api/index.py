@@ -738,6 +738,20 @@ def get_compare():
     }
 
 
+@app.get("/api/compare/daily")
+def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults to the latest completed walkforward run")):
+    """2026-10-29: the day-bucketed Backtest-vs-Live comparison —
+    the concrete next step compare.html's "brainstorm" section flagged
+    as what v2 needs (pyquant_backtest_trades, added 2026-10-28, is the
+    prerequisite that already shipped). See
+    state_store.compute_comparison_buckets()'s docstring for the
+    bucketing strategy and why it's day-granularity, not a 1:1 trade
+    match. Not yet a verdict on strategy parity by itself — it's the
+    data a future side-by-side chart/table reads from."""
+    baseline = state_store.get_signals_baseline()
+    return state_store.compute_comparison_buckets(run_id=run_id, since=baseline)
+
+
 # ── Static frontend ─────────────────────────────────────────────────────
 #
 # Registered LAST, deliberately: Starlette (FastAPI's underlying router)

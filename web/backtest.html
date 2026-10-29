@@ -32,11 +32,9 @@
     <div class="card" style="margin-bottom:16px;">
       <h3>Run a new backtest</h3>
       <p class="hint" style="margin-top:-4px;">
-        "Run Backtest" pushes these values into the Kaggle kernel's own
-        editor and leaves the run queued — click "Run on Kaggle" (appears
-        once the push succeeds) to open it and hit "Save &amp; Run All"
-        yourself for full, visible console output, which then syncs its
-        result back to this page automatically. See KAGGLE.md Part K.
+        "Run Backtest" starts the same walkforward logic as an automated
+        GitHub Actions job — no manual step, result syncs back here
+        automatically.
       </p>
       <form id="backtest-form" style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
         <label>Days<br><input type="number" name="walk_forward_days" placeholder="15" min="1" style="width:80px;"></label>
@@ -45,16 +43,20 @@
         <label><input type="checkbox" name="use_bayesian" checked> Bayesian (Optuna)</label>
         <label><input type="checkbox" name="use_atr_sl" checked> ATR-adaptive SL</label>
         <button type="submit" class="btn primary">Run Backtest</button>
-        <a id="btn-run-on-kaggle" class="btn" href="#" target="_blank" rel="noopener" style="display:none; text-decoration:none;">Run on Kaggle →</a>
       </form>
       <details style="margin-top:10px;">
-        <summary class="hint" style="cursor:pointer;">Advanced: trigger via GitHub Actions instead</summary>
+        <summary class="hint" style="cursor:pointer;">▼ Backup: run on Kaggle instead</summary>
         <p class="hint">
-          Runs the same walkforward logic as an automated GitHub Actions
-          job instead of a human clicking "Save &amp; Run All" on Kaggle —
-          no manual step, but less visible if something goes wrong mid-run.
+          Pushes these same values into the Kaggle kernel's own editor and
+          leaves the run queued — click "Run on Kaggle" (appears once the
+          push succeeds) to open it and hit "Save &amp; Run All" yourself
+          for full, visible console output, which then syncs its result
+          back to this page automatically. Use this if GitHub Actions is
+          unavailable or you want to watch the run live. See KAGGLE.md
+          Part K.
         </p>
-        <button type="button" id="btn-run-gha" class="btn">Trigger via GitHub Actions</button>
+        <button type="button" id="btn-run-kaggle" class="btn">Sync to Kaggle</button>
+        <a id="btn-run-on-kaggle" class="btn" href="#" target="_blank" rel="noopener" style="display:none; text-decoration:none; margin-left:8px;">Run on Kaggle →</a>
       </details>
       <div id="backtest-status" class="mono" style="margin-top:8px; font-size:12px; color:var(--text-dim);"></div>
     </div>
@@ -265,15 +267,30 @@ function _formBody() {
   return body;
 }
 
-// 2026-10-28: settled flow — "Run Backtest" pushes code+params to the
-// Kaggle kernel and leaves it queued (no remote trigger of Kaggle
-// itself); "Run on Kaggle" (revealed on a successful push) opens that
-// kernel in a new tab for a human to click "Save & Run All" — full,
-// visible console output, which syncs its result back here via the
-// same pyquant_runs row every other run already polls. GitHub Actions
-// remains available as a secondary, explicitly-opt-in path below.
+// 2026-10-29: GitHub Actions is now the primary, default path — it's
+// been confirmed working live (the sys.path ModuleNotFoundError that
+// blocked it is fixed), so "Run Backtest" triggers it directly with no
+// manual step. Kaggle (the original design, still fully wired) is kept
+// as a backup behind the "▼ Backup: run on Kaggle instead" disclosure —
+// "Sync to Kaggle" pushes code+params into the kernel's own editor and
+// leaves it queued; "Run on Kaggle" (revealed on a successful push)
+// opens that kernel in a new tab for a human to click "Save & Run All"
+// themselves for full, visible console output. Both paths sync their
+// result back here via the same pyquant_runs row every run already polls.
 document.getElementById("backtest-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const statusEl = document.getElementById("backtest-status");
+  statusEl.textContent = "Submitting to GitHub Actions…";
+  try {
+    const result = await apiPost("/backtests", _formBody());
+    statusEl.textContent = `Run #${result.run_id} queued — GitHub Actions is starting it now.`;
+    _pollRun(result.run_id);
+  } catch (err) {
+    statusEl.textContent = "Could not start the run: " + err.message;
+  }
+});
+
+document.getElementById("btn-run-kaggle").addEventListener("click", async () => {
   const statusEl = document.getElementById("backtest-status");
   const runOnKaggleBtn = document.getElementById("btn-run-on-kaggle");
   runOnKaggleBtn.style.display = "none";
@@ -287,18 +304,6 @@ document.getElementById("backtest-form").addEventListener("submit", async (e) =>
     _pollRun(result.run_id);
   } catch (err) {
     statusEl.textContent = "Could not push to Kaggle: " + err.message;
-  }
-});
-
-document.getElementById("btn-run-gha").addEventListener("click", async () => {
-  const statusEl = document.getElementById("backtest-status");
-  statusEl.textContent = "Submitting to GitHub Actions…";
-  try {
-    const result = await apiPost("/backtests", _formBody());
-    statusEl.textContent = `Run #${result.run_id} queued — GitHub Actions is starting it now.`;
-    _pollRun(result.run_id);
-  } catch (err) {
-    statusEl.textContent = "Could not start the run: " + err.message;
   }
 });
 </script>

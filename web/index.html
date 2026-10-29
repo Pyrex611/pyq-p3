@@ -36,16 +36,7 @@
     </div>
 
     <div class="card" style="margin-bottom:16px;">
-      <h3>Leverage (display only)</h3>
-      <p class="hint" style="margin-top:-4px; margin-bottom:10px;">
-        Every %PnL figure below is a leveraged price-return
-        (<code class="mono">pyquant_signal_math.outcome_pct()</code>:
-        raw entry→exit price move × leverage) — the system actually
-        trades/simulates at <strong id="system-leverage">10</strong>×.
-        This control re-derives each figure from the same stored
-        entry/outcome prices at a different leverage, for "what if"
-        comparison only — it never changes what the engine itself uses.
-      </p>
+      <h3>Leverage</h3>
       <label>Leverage ×<br>
         <input type="number" id="leverage-override" min="1" step="0.5" placeholder="10" style="width:90px;">
       </label>
