@@ -346,48 +346,42 @@ def get_run_trades(run_id: int):
 # any other run.
 #
 # 2026-10-25: switched the trigger from a Kaggle kernel push
-# (_push_kaggle_kernel(), kept below, unused, as a documented fallback —
-# see KAGGLE.md's "GitHub Actions alternative" section for why) to a
-# GitHub Actions workflow_dispatch (_trigger_github_backtest()). Root
-# cause of the switch: even after fixing the kernel-type 409 Conflict, a
+# (_push_kaggle_kernel(), kept below, as a documented backup — see
+# KAGGLE.md's "GitHub Actions alternative" section for why) to a GitHub
+# Actions workflow_dispatch (_trigger_github_backtest()). Root cause of
+# the switch: even after fixing the kernel-type 409 Conflict, a
 # subsequent real backtest attempt failed again with Kaggle's own UI
 # showing no error log at all — nothing programmatic to inspect from
 # this session, and nothing for the owner to act on either. GitHub
 # Actions' log viewer has already proven reliable for this exact
 # dependency stack (orchestra.yml's cron tick installs the same
 # requirements.txt successfully every ~5 minutes), so moving backtest
-# EXECUTION there — while still pulling historical data from the
-# existing Kaggle DATASET via a plain `kaggle datasets download` call,
-# which has none of the kernel sandbox's opacity — keeps everything that
-# was already working and only replaces the part that wasn't.
+# EXECUTION there kept everything that was already working and only
+# replaced the part that wasn't.
+#
+# 2026-10-29: this is now the PRIMARY path (confirmed working live —
+# the sys.path ModuleNotFoundError that blocked it is fixed), and its
+# historical-data source changed too: .github/workflows/backtest.yml's
+# own job now calls data_download.py directly against Alpaca (same
+# call daily_optimizer() already makes for the live engine) instead of
+# downloading a Kaggle Dataset snapshot that only updates when someone
+# manually re-uploads it — running the UI's "check current behavior"
+# button against stale, hand-maintained data defeated the point. No
+# dataset_slug is needed here anymore; KAGGLE_DATASET_SLUG is still
+# read by sync_backtest_to_kaggle() below, since the Kaggle-kernel
+# BACKUP path runs inside Kaggle's own sandbox with no Alpaca
+# credentials attached to it, so it still needs a pre-staged dataset.
 
 @app.post("/api/backtests")
 def create_backtest(body: BacktestRequest):
-    dataset_slug = os.environ.get("KAGGLE_DATASET_SLUG", "").strip()
-    # Found 2026-10-24: a real backtest attempt failed with Kaggle's own
-    # "Invalid dataset specification" — KAGGLE_DATASET_SLUG had been set to
-    # the full dataset page URL (https://www.kaggle.com/datasets/<owner>/
-    # <slug>) rather than the bare "<owner>/<slug>" the API expects
-    # (KAGGLE.md's own example already showed the bare form, but nothing
-    # stopped the URL form from being pasted in by mistake). Rather than
-    # just document it more loudly, strip a pasted URL down to the bare
-    # slug here so this specific mistake can't recur.
-    for _prefix in ("https://www.kaggle.com/datasets/", "http://www.kaggle.com/datasets/",
-                     "www.kaggle.com/datasets/", "kaggle.com/datasets/"):
-        if dataset_slug.lower().startswith(_prefix):
-            dataset_slug = dataset_slug[len(_prefix):]
-            break
-    dataset_slug = dataset_slug.strip("/")
-
     github_token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
-    if not (github_token and dataset_slug):
+    if not github_token:
         raise HTTPException(
             status_code=503,
             detail=(
                 "Backtest triggering isn't configured on this deployment "
-                "(missing GITHUB_DISPATCH_TOKEN and/or KAGGLE_DATASET_SLUG "
-                "env vars) — see KAGGLE.md's \"GitHub Actions alternative\" "
-                "section."
+                "(missing GITHUB_DISPATCH_TOKEN env var) — see "
+                "KAGGLE.md's \"GitHub Actions alternative\" section."
             ),
         )
 
@@ -397,7 +391,7 @@ def create_backtest(body: BacktestRequest):
         raise HTTPException(status_code=500, detail="Could not create the queued run (state store write failed)")
 
     try:
-        _trigger_github_backtest(run_id, params, dataset_slug, github_token)
+        _trigger_github_backtest(run_id, params, github_token)
     except Exception as e:
         # The queued row stays "queued" forever if we don't mark it —
         # fail it immediately so the UI shows a real error instead of a
@@ -462,7 +456,7 @@ def sync_backtest_to_kaggle(body: BacktestRequest):
     }
 
 
-def _trigger_github_backtest(run_id: int, params: dict, dataset_slug: str, github_token: str) -> None:
+def _trigger_github_backtest(run_id: int, params: dict, github_token: str) -> None:
     """Fires .github/workflows/backtest.yml's workflow_dispatch trigger via
     GitHub's REST API — see this section's header comment above for why
     this replaced a direct Kaggle kernel push. `github_token` is a
@@ -471,13 +465,16 @@ def _trigger_github_backtest(run_id: int, params: dict, dataset_slug: str, githu
     owner create for the cron-reliability pinger — reuse that one, or
     make a second one the same way).
 
+    No dataset_slug input anymore (2026-10-29) — the workflow pulls
+    fresh data straight from Alpaca now (see backtest.yml's own header
+    comment), not a Kaggle Dataset.
+
     Raises on any non-204 response — the caller above turns that into a
     failed run + a 502, rather than leaving the run stuck on "queued"."""
     import requests
 
     workflow_dispatch_inputs = {
         "run_id": str(run_id),
-        "dataset_slug": dataset_slug,
     }
     if params.get("walk_forward_days") is not None:
         workflow_dispatch_inputs["walk_forward_days"] = str(params["walk_forward_days"])

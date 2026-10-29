@@ -87,7 +87,7 @@ walkforwards — skip to whichever of these you haven't already done.
 |---|---|
 | `KAGGLE_USERNAME` | The `username` field from your `kaggle.json` |
 | `KAGGLE_KEY` | The `key` field from your `kaggle.json` |
-| `KAGGLE_DATASET_SLUG` | `yourkaggleusername/pyquant-historical-data` — the **bare** `owner/slug` form only, NOT the full dataset page URL (`https://www.kaggle.com/datasets/owner/slug`). Pasting the URL by mistake is exactly the error a live run hit on 2026-10-24: Kaggle's API rejected it with "Invalid dataset specification." `api/index.py`'s `create_backtest()` now defensively strips a pasted URL down to the bare slug, but set it correctly here anyway. (create this dataset in Part E below first, or come back and set this after) |
+| `KAGGLE_DATASET_SLUG` | `yourkaggleusername/pyquant-historical-data` — the **bare** `owner/slug` form only, NOT the full dataset page URL (`https://www.kaggle.com/datasets/owner/slug`). Pasting the URL by mistake is exactly the error a live run hit on 2026-10-24: Kaggle's API rejected it with "Invalid dataset specification." `api/index.py`'s `sync_backtest_to_kaggle()` now defensively strips a pasted URL down to the bare slug, but set it correctly here anyway. (create this dataset in Part E below first, or come back and set this after) — **2026-10-29: only used by the Kaggle-kernel BACKUP path (Part K) now; the primary GitHub Actions path (Part J) pulls fresh data straight from Alpaca and doesn't read this.** |
 
 3. Redeploy the Vercel project (**Deployments** tab → the three-dot menu
    on the latest deployment → **Redeploy**) so the new env vars take
@@ -277,7 +277,7 @@ roughly cheapest-to-build to most capable:
    for a kernel that currently only needs `DATABASE_URL`) and adding
    Alpaca API latency to every backtest run instead of just once a day.
 
-## Part J — GitHub Actions alternative (2026-10-25, now the active path)
+## Part J — GitHub Actions alternative (2026-10-25, now the primary path)
 
 Why this exists: see Part D's 2026-10-25 incident note. A backtest that
 still failed after the kernel-type fix, with Kaggle's own UI showing no
@@ -285,10 +285,24 @@ error detail at all, made the Kaggle-kernel path undebuggable from this
 session — so execution moved to GitHub Actions instead, reusing the
 exact `requirements.txt` this repo's `orchestra.yml` cron workflow
 already installs successfully on every tick (proven reliable) and
-GitHub's own log viewer (also already proven reliable). Historical data
-still comes from the Kaggle Dataset set up in Part E — only a plain
-`kaggle datasets download` call, not a kernel, so none of the opacity
-that caused this switch applies to it.
+GitHub's own log viewer (also already proven reliable).
+
+**2026-10-29 update: historical data no longer comes from the Kaggle
+Dataset.** It originally did (a plain `kaggle datasets download` call —
+no kernel involved, so none of the opacity that caused the original
+switch applied to it), but that dataset only updates when someone
+manually re-uploads a new version (Part H's "No automatic dataset
+refresh" limitation) — running the UI's "check current behavior"
+button against however-stale that snapshot happened to be defeated the
+point, now that this is the PRIMARY path (confirmed working live). The
+workflow now calls `data_download.py` directly against Alpaca instead —
+the exact same call `p4_orchestra.py`'s `daily_optimizer()` already
+makes once a day for the live engine, so the backtest and the live
+engine's own UKF retraining now draw from the same kind of
+always-fresh pull. No Kaggle Dataset maintenance is needed for this
+path anymore at all; Part E's dataset is now only read by Part K's
+Kaggle-kernel BACKUP path (below), since that script runs inside
+Kaggle's own sandbox with no Alpaca credentials attached to it.
 
 New files: `.github/workflows/backtest.yml` (the workflow) and
 `kaggle_backtest/run_backtest_gha.py` (the script it runs — a GitHub
@@ -296,18 +310,16 @@ Actions counterpart to `run_backtest.py`, see that file's own docstring
 for the exact differences). `api/index.py`'s `POST /api/backtests` now
 calls `_trigger_github_backtest()` instead of `_push_kaggle_kernel()`.
 
-### J1 — Add GitHub repository secrets (reuses your existing Kaggle credentials)
+### J1 — No new GitHub repository secrets needed
 
-Same place as `GITHUB_ACTIONS_SETUP.md` Part B (repo **Settings** →
-**Secrets and variables** → **Actions** → **New repository secret**):
-
-| Name | Value |
-|---|---|
-| `KAGGLE_USERNAME` | The same value as your Vercel `KAGGLE_USERNAME` env var (Part C above) |
-| `KAGGLE_KEY` | The same value as your Vercel `KAGGLE_KEY` env var |
-
-(`DATABASE_URL` is already a repo secret from `GITHUB_ACTIONS_SETUP.md`
-Part B — `backtest.yml` reuses it, nothing new needed there.)
+`ALPACA_API_KEY`/`ALPACA_SECRET_KEY` are already repo secrets from
+`GITHUB_ACTIONS_SETUP.md` Part B (`orchestra.yml`'s own cron tick uses
+them) — `backtest.yml` reuses the same two, nothing new to add. Same
+for `DATABASE_URL`. (`KAGGLE_USERNAME`/`KAGGLE_KEY` as GitHub repo
+secrets are no longer needed for this workflow — only Part K's Kaggle
+backup path reads Kaggle credentials, and it reads them as Vercel env
+vars, not GitHub repo secrets, since `_push_kaggle_kernel()` runs
+inside `api/index.py` on Vercel, not inside a GitHub Actions job.)
 
 ### J2 — Add a Vercel environment variable: `GITHUB_DISPATCH_TOKEN`
 
@@ -332,27 +344,19 @@ one, reuse its value here rather than making a second token:
    different now.
 2. To watch it directly: repo's **Actions** tab → **PyQuant Backtest
    (triggered by UI)** → the newest run → **backtest** job → step logs.
-   Every step (`Download historical-data Kaggle Dataset`, `Run
+   Every step (`Download fresh historical data from Alpaca`, `Run
    backtest`) shows its own full output, and `run_backtest_gha.py`
    prints a step-by-step `[run_backtest_gha] ...` trace specifically so
    a failure anywhere is visible here — unlike the Kaggle-kernel path's
    blank failure.
 3. **If `POST /api/backtests` itself returns "Backtest triggering isn't
-   configured on this deployment"**: `GITHUB_DISPATCH_TOKEN` or
-   `KAGGLE_DATASET_SLUG` is missing on Vercel — check J2 and Part C.
+   configured on this deployment"**: `GITHUB_DISPATCH_TOKEN` is missing
+   on Vercel — check J2.
 4. **If the GitHub Actions run itself shows a red ✕**: open its log
    (step 2 above) — every failure mode prints a real message, including
-   ones that would have been silent on Kaggle (a missing env var, the
-   dataset download failing, a `walkforward.py` exception).
-
-**Leaning recommendation if/when this gets built:** option 1, run from
-`daily_optimizer()` rather than the API — it reuses data already being
-downloaded for another reason, needs no new credential surface beyond
-one more Kaggle secret in the same place `SIGNAL_ONLY_MODE`/
-`PYQUANT_MODE` already live, and keeps the "Vercel never does heavy
-work" rule intact. Not yet designed in code-level detail or built —
-tracked as a backlog candidate in `PLAN.md` if the owner wants to pick
-it up.
+   ones that would have been silent on Kaggle (a missing/invalid
+   `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`, the Alpaca download failing, a
+   `walkforward.py` exception).
 
 ## Part K — Manual-trigger workflow (2026-10-26)
 

@@ -28,9 +28,13 @@ the Kaggle-kernel path, kept as-is, not deleted):
   file. Empty-string env vars (an input left blank) are treated the
   same as "no override" — matching params.json's `None`/missing-key
   handling in run_backtest.py.
-- The historical-data CSVs are already copied into the repo root by the
-  workflow's own "Download historical-data Kaggle Dataset" step, before
-  this script runs — so no dataset-copy step here at all.
+- The historical-data CSVs are already written fresh into the repo root
+  by the workflow's own "Download fresh historical data from Alpaca"
+  step (`python3 data_download.py`, 2026-10-29 — previously a Kaggle
+  Dataset download; switched because that dataset only updates when
+  someone manually re-uploads it, which defeats the point of an
+  on-demand "check current behavior" button), before this script runs —
+  so no data-download step here at all.
 
 Every print() below is flush=True and every step is wrapped so a
 failure anywhere (including ones run_backtest.py's equivalent flow
@@ -98,8 +102,9 @@ def main() -> None:
             if not os.path.isfile(fname):
                 raise FileNotFoundError(
                     f"{fname} not found in the working directory — the workflow's "
-                    f"'Download historical-data Kaggle Dataset' step should have put it "
-                    f"here before this script ran. Check that step's own log output."
+                    f"'Download fresh historical data from Alpaca' step should have "
+                    f"written it here before this script ran. Check that step's own "
+                    f"log output (likely an Alpaca API/credentials error)."
                 )
         print("[run_backtest_gha] Historical-data CSVs present.", flush=True)
 

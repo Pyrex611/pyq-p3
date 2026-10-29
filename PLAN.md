@@ -1,8 +1,34 @@
 # PLAN.md — Roadmap, status, and decision log
 
-**Last updated:** 2026-10-29. Three items, all from the owner's same
-message (sent right after confirming the GitHub Actions backtest path
-now works live):
+**Last updated:** 2026-10-29, second pass same day. The owner asked
+whether the Kaggle Dataset was still necessary now that the GitHub
+Actions backtest path is primary, noting `data_download.py` already
+exists — correct instinct, and a real gap: `KAGGLE.md` Part H already
+documented "No automatic dataset refresh" as an accepted limitation,
+which meant the primary backtest path was running against however-stale
+a hand-maintained snapshot the owner last uploaded, with nothing
+enforcing freshness. Fixed: `.github/workflows/backtest.yml`'s
+historical-data step now calls `data_download.py` directly against
+Alpaca (the same call `daily_optimizer()` already makes for the live
+engine) instead of `kaggle datasets download` — confirmed plausible and
+low-risk before building: `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` were
+already GitHub repo secrets (`orchestra.yml` uses them) and
+`alpaca-py`/`python-dotenv` were already in `requirements.txt` (which
+this workflow already installs), so this needed zero new secrets and
+zero new dependencies. `dataset_slug` is no longer a `workflow_dispatch`
+input, and `api/index.py`'s `create_backtest()`/`_trigger_github_backtest()`
+no longer require/pass `KAGGLE_DATASET_SLUG` — that env var and its
+URL-stripping logic now live only in `sync_backtest_to_kaggle()`
+(`_push_kaggle_kernel()`), since the Kaggle-kernel BACKUP path still
+runs inside Kaggle's own sandbox with no Alpaca credentials attached,
+so it still needs a pre-staged dataset. `KAGGLE.md` Part J, `PLAN.md`
+Backlog (below), and `CLAUDE.md` updated to match. Verified:
+`python3 -c "import ast; ast.parse(...)"` on both touched `.py` files,
+`yaml.safe_load()` on the edited workflow file.
+
+**Previous update, 2026-10-29, first pass same day.** Three items, all
+from the owner's same message (sent right after confirming the GitHub
+Actions backtest path now works live):
 
 1. **Backtest page: GitHub Actions promoted to primary, Kaggle demoted
    to a backup disclosure.** Inverts yesterday's decision (2026-10-28
@@ -787,10 +813,16 @@ here before moving on, even if you also wrote it up elsewhere.
   via an actual walkforward comparison (this is the validation
   `SIGNAL_ONLY_MODE` was built to let the project proceed without
   waiting on).
-- [ ] Automate the Kaggle dataset refresh (currently manual — `KAGGLE.md`
-  Part I has 3 brainstormed options; leaning recommendation is adding a
-  `dataset_create_version()` call to `daily_optimizer()`, reusing data
-  it already downloads). Not yet designed in code-level detail.
+- [x] **Automate the Kaggle dataset refresh — moot for the primary path,
+  DONE 2026-10-29 a different way.** Originally scoped as "push a new
+  Kaggle Dataset version automatically" (`KAGGLE.md` Part I's 3
+  brainstormed options). Took a simpler path instead once the GitHub
+  Actions backtest workflow became primary: it now pulls straight from
+  Alpaca via `data_download.py` at run time, bypassing the Kaggle
+  Dataset (and its staleness problem) entirely rather than automating
+  its refresh. The Kaggle Dataset itself is now only relevant to the
+  Kaggle-kernel BACKUP path, which still has no automatic refresh — low
+  priority to fix given it's a backup, not the default.
 
 ## Done (newest first)
 

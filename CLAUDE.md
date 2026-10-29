@@ -172,6 +172,16 @@ section only orients a new session to where things stand structurally.
   Also shipped the same session: `GET /api/compare/daily` (day-bucketed
   Backtest-vs-Live data, `pyquant_state.compute_comparison_buckets()`),
   surfaced on the new Compare page.
+- **Done 2026-10-29, second pass:** the primary (GitHub Actions)
+  backtest path no longer depends on the Kaggle Dataset for historical
+  data — `.github/workflows/backtest.yml` now calls `data_download.py`
+  directly against Alpaca (same call `daily_optimizer()` already makes
+  live), so a backtest run is never stale behind a manually-uploaded
+  snapshot. No new secrets/dependencies needed (`ALPACA_API_KEY`/
+  `ALPACA_SECRET_KEY` and `alpaca-py`/`python-dotenv` were already in
+  place for `orchestra.yml`). The Kaggle Dataset is now only read by
+  the Kaggle-kernel BACKUP path. See `PLAN.md`'s 2026-10-29 second-pass
+  entry and `KAGGLE.md` Part J for the full writeup.
 
 ## 6. What's next
 

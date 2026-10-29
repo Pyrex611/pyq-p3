@@ -10,12 +10,27 @@ name: PyQuant Backtest (triggered by UI)
 # same requirements.txt this repo's own orchestra.yml already installs
 # successfully on every single cron tick (proven reliable, unlike the
 # Kaggle kernel sandbox) and GitHub Actions' own already-proven-reliable
-# log viewer, while still using the existing Kaggle DATASET (not kernel)
-# as the historical-data source via a plain `kaggle datasets download`
-# call — Kaggle Datasets' download API is a simple, well-documented file
-# transfer with none of the kernel-execution opacity that's been the
-# actual problem. See KAGGLE.md's "GitHub Actions alternative" section
-# and PLAN.md's 2026-10-25 entry for the full writeup.
+# log viewer. See KAGGLE.md's "GitHub Actions alternative" section and
+# PLAN.md's 2026-10-25 entry for the full writeup of why this path was
+# built, and PLAN.md's 2026-10-29 entry for why it became the primary
+# path (confirmed working live) with Kaggle demoted to a backup.
+#
+# 2026-10-29: historical data now comes straight from Alpaca via
+# data_download.py — the SAME script `p4_orchestra.py`'s
+# `daily_optimizer()` already calls once a day for the live engine —
+# instead of a Kaggle Dataset snapshot that only updates when someone
+# manually re-uploads it (KAGGLE.md Part H's "No automatic dataset
+# refresh" limitation). This is now the primary backtest path, so
+# running it against however-stale a hand-maintained dataset happens to
+# be defeated the point of a "re-run this to check current behavior"
+# button. `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` were already GitHub repo
+# secrets (orchestra.yml's own cron tick uses them) and `alpaca-py`/
+# `python-dotenv` were already in requirements.txt — no new secrets, no
+# new dependencies, just a different source for the same two CSV files.
+# The Kaggle Dataset is no longer read by this workflow at all; it's
+# still what the Kaggle-kernel BACKUP path (kaggle_backtest/run_backtest.py)
+# reads, since that script runs inside Kaggle's own sandbox with no
+# Alpaca credentials attached to it.
 #
 # Triggered the same way as a manual test run (Actions tab -> this
 # workflow -> "Run workflow"), or programmatically by api/index.py's
@@ -27,10 +42,6 @@ on:
     inputs:
       run_id:
         description: "pyquant_runs row id this run reports back into"
-        required: true
-        type: string
-      dataset_slug:
-        description: "Kaggle dataset slug (owner/slug) holding btc_back366.csv/eth_back366.csv"
         required: true
         type: string
       walk_forward_days:
@@ -84,17 +95,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Kaggle CLI (dataset download only — no kernel involved)
-        run: pip install -q kaggle
-
-      - name: Download historical-data Kaggle Dataset
+      - name: Download fresh historical data from Alpaca
         env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-        run: |
-          kaggle datasets download -d "${{ inputs.dataset_slug }}" -p /tmp/pyq_dataset --unzip
-          cp /tmp/pyq_dataset/btc_back366.csv ./btc_back366.csv
-          cp /tmp/pyq_dataset/eth_back366.csv ./eth_back366.csv
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        # Same data_download() call daily_optimizer() already makes for
+        # the live engine — writes btc_back366.csv/eth_back366.csv (and
+        # the _365 variants walkforward.py doesn't read but no harm in
+        # having) freshly from Alpaca every time this job runs, instead
+        # of a Kaggle Dataset snapshot someone has to remember to update.
+        run: python3 data_download.py
 
       - name: Run backtest
         env:
