@@ -1,7 +1,7 @@
 """
-╔══════════════════════════════════════════════════════════════════════════════╗
+╔══════════════════════════════════════════════════════════════════════════════════╗
 ║    PyQuant Walk-Forward Backtest — v4 Production Edition                    ║
-╠══════════════════════════════════════════════════════════════════════════════╣
+╠══════════════════════════════════════════════════════════════════════════════════╣
 ║  v4 CHANGES FROM v3                                                          ║
 ║  ──────────────────                                                          ║
 ║  FIX 1  Entry fill validation — a Limit entry is only accepted if its price  ║
@@ -32,7 +32,7 @@
 ║         clock. Open positions now carry across day boundaries and are only  ║
 ║         force-closed ONCE, after the entire walk-forward period ends, to    ║
 ║         produce a final realized return figure.                             ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+╚══════════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os, math, time, warnings
@@ -61,9 +61,9 @@ except ImportError:
     print("⚠  Optuna not installed → using grid search fallback.")
     print("   Install: pip install optuna")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════╗
 # SECTION 1 — CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════╝
 
 LEVERAGE              = signal_math.LEVERAGE_DEFAULT  # 10x — shared with live (Phase 0 unification)
 INITIAL_CAPITAL       = 10.0
@@ -156,6 +156,7 @@ def trades_to_records(all_trades: list, leverage: Optional[float] = None) -> lis
         })
     return out
 
+
 USE_ATR_SL            = True    # ATR-adaptive SL is active
 ATR_PERIOD            = 14
 ATR_SL_RANGE          = (1.0, 3.0)
@@ -180,9 +181,9 @@ ENABLE_PLOTTING       = True
 BTC_CSV = 'btc_back366.csv'
 ETH_CSV = 'eth_back366.csv'
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════╗
 # SECTION 2 — EXECUTION COST MODEL
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
 
 MAKER_FEE            = 0.0002
 TAKER_FEE            = 0.0005
@@ -199,9 +200,10 @@ STRICTS_BTC_VALS = [0.004,  0.0045,  0.005, 0.0055, 0.006, 0.007,  0.0075]
 STRICT_ETH_VALS  = [0.0035, 0.004,   0.0045, 0.005, 0.0055, 0.006]
 STRICTS_ETH_VALS = [0.0045, 0.005,   0.0055, 0.006, 0.0065, 0.007, 0.0075, 0.008]
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════╗
 # SECTION 3 — ACCOUNTING & EXECUTION HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def floor_to_lot(qty: float, step: float) -> float:
     return math.floor(qty / step) * step
@@ -270,9 +272,10 @@ def funding_cost(entry_ts, exit_ts, qty: float, entry_price: float) -> float:
     except Exception:
         return 0.0
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 4 — ATR CALCULATION AND SL PRICING
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def compute_atr(df: pd.DataFrame, period: int = ATR_PERIOD) -> float:
     """
@@ -303,9 +306,10 @@ def sl_price(entry: float, side: str, symbol: str,
     return entry - signal_math.sl_delta(symbol, effective_atr, atr_mult) if side == 'Buy' \
         else entry + signal_math.sl_delta(symbol, effective_atr, atr_mult)
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 5 — UKF ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def _stabilise_P(ukf, floor: float = 1e-6):
     P = (ukf.P + ukf.P.T) / 2
@@ -353,9 +357,10 @@ def step_ukf(ukf, high_ukf, low_ukf, row: pd.Series):
         u.predict();   _stabilise_P(u)
     return ukf.x[0], high_ukf.x[0], low_ukf.x[0]
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 6 — SIGNAL GENERATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def generate_signal(price, pred, high_pred, low_pred, symbol, balance,
                     leverage, strict, stricts, atr=0.0, atr_mult=None):
@@ -404,9 +409,10 @@ def generate_signal(price, pred, high_pred, low_pred, symbol, balance,
 
     return None
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 7 — PARAMETER OPTIMISATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
                       balance, leverage, sb, sbs, se, ses, atr_mult=None):
@@ -537,7 +543,7 @@ def run_bayesian_search(btc_preds, eth_preds, btc_bars, eth_bars,
         se  = trial.suggest_float('strict_eth',  0.0025, 0.007,  step=0.00005)
         ses = trial.suggest_float('stricts_eth', 0.003,  0.009,  step=0.00005)
         am  = (trial.suggest_float('atr_mult', ATR_SL_RANGE[0], ATR_SL_RANGE[1],
-                                    step=0.1)
+                                   step=0.1)
                if USE_ATR_SL else None)
         ret = _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
                                 balance, leverage, sb, sbs, se, ses, am)
@@ -598,14 +604,15 @@ def smooth_params(new_params: dict, prev_params: dict,
             smoothed[k] = alpha * new_params[k] + (1 - alpha) * prev_params[k]
     return smoothed
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 8 — PAPER TRADING LOOP (single day, with cross-day position carry)
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
-                     params, equity, leverage,
-                     in_b=False, pos_b=None, in_e=False, pos_e=None,
-                     btc_atr_warmup=None, eth_atr_warmup=None):
+                    params, equity, leverage,
+                    in_b=False, pos_b=None, in_e=False, pos_e=None,
+                    btc_atr_warmup=None, eth_atr_warmup=None):
     """
     Simulates one day of live trading, bar by bar, with full verbose logging.
     Advances UKF state in-place.
@@ -726,8 +733,8 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
 
             if exit_leg:
                 xp, xc = (apply_exit(exit_trig, exit_leg, side, qty)
-                           if exit_leg in ('SL', 'TP') else
-                           market_exit(exit_trig, qty))
+                          if exit_leg in ('SL', 'TP') else
+                          market_exit(exit_trig, qty))
                 pnl_raw = compute_profit(side, ep, xp, qty)
                 fc      = funding_cost(pos_e['ts'], ts, qty, ep)
                 net_pnl = pnl_raw - xc - fc
@@ -822,9 +829,10 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
     # bars simply carries into the next call via the returned state.
     return equity, trades, equity_trace, in_b, pos_b, in_e, pos_e
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 9 — METRICS
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def compute_metrics(trades, capital_curve, initial_capital):
     if not trades:
@@ -910,9 +918,10 @@ def compute_metrics(trades, capital_curve, initial_capital):
     ]
     return pd.DataFrame(rows, columns=["Metric", "Value"])
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 10 — PLOTTING
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def plot_results(capital_curve, trades, daily_params_log, initial_capital):
     if not ENABLE_PLOTTING:
@@ -970,11 +979,11 @@ def plot_results(capital_curve, trades, daily_params_log, initial_capital):
     legs = [t.get('exit_leg', 'UNK') for t in trades]
     lc   = {k: legs.count(k) for k in sorted(set(legs))}
     cm   = {'TP': '#2ecc71', 'SL': '#e74c3c', 'MARKET': '#f39c12',
-             'REVERSAL': '#e67e22', 'FINAL': '#3498db', 'UNK': '#95a5a6'}
+            'REVERSAL': '#e67e22', 'FINAL': '#3498db', 'UNK': '#95a5a6'}
     bars_ax = ax4.bar(lc.keys(), lc.values(), color=[cm.get(k, '#95a5a6') for k in lc])
     for bar, count in zip(bars_ax, lc.values()):
         ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                  str(count), ha='center', va='bottom', fontsize=9)
+                 str(count), ha='center', va='bottom', fontsize=9)
     ax4.set_title('Exit Type Breakdown', fontsize=11, fontweight='bold')
     ax4.set_ylabel('Count'); ax4.grid(alpha=0.3, axis='y')
 
@@ -992,9 +1001,9 @@ def plot_results(capital_curve, trades, daily_params_log, initial_capital):
     if daily_params_log:
         days = [p['day'] for p in daily_params_log]
         ax6.plot(days, [p.get('strict_btc', 0) for p in daily_params_log],
-                  label='strict_btc', color='#f39c12', lw=0.9)
+                 label='strict_btc', color='#f39c12', lw=0.9)
         ax6.plot(days, [p.get('strict_eth', 0) for p in daily_params_log],
-                  label='strict_eth', color='#3498db', lw=0.9)
+                 label='strict_eth', color='#3498db', lw=0.9)
         if USE_ATR_SL:
             ax6_r = ax6.twinx()
             ax6_r.plot(days, [p.get('atr_mult', 0) for p in daily_params_log],
@@ -1011,9 +1020,10 @@ def plot_results(capital_curve, trades, daily_params_log, initial_capital):
     plt.show()
     print("  Chart saved to walkforward_v4_results.png")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╗
 # SECTION 11 — MAIN WALK-FORWARD LOOP
-# ══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════╝
+
 
 def run_walk_forward():
     global WALK_FORWARD_DAYS
@@ -1051,7 +1061,6 @@ def run_walk_forward():
     train_bars   = UKF_TRAIN_DAYS * bars_per_day
     opt_bars     = GRID_SEARCH_DAYS * bars_per_day
 
-    global WALK_FORWARD_DAYS
     if START_DATE or END_DATE:
         # Explicit date-range override (2026-10-31) — resolved against
         # this CSV's own 'timestamp' column rather than a day-count from
