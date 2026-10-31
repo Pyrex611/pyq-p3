@@ -1016,6 +1016,7 @@ def plot_results(capital_curve, trades, daily_params_log, initial_capital):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def run_walk_forward():
+    global WALK_FORWARD_DAYS
     print("=" * 80)
     print("  PyQuant Walk-Forward Backtest Engine — v4 Production Edition")
     print(f"  Leverage: {LEVERAGE}x | Capital: ${INITIAL_CAPITAL} | Window: {WALK_FORWARD_DAYS} days")
