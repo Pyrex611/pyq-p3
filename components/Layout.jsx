@@ -31,6 +31,15 @@ export default function Layout({ title, children, footer }) {
       <Head>
         <title>{title ? `PyQuant — ${title}` : "PyQuant"}</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* 2026-10-31: the owner's own logo (artifacts/logo.jpg, committed
+            to the repo), cropped to its square icon and used as-is —
+            gradient and all, per standing instruction not to flatten the
+            logo artwork itself (only the UI's own accent colors are flat,
+            see styles/globals.css). */}
+        <link rel="icon" href="/favicon-32.png" sizes="32x32" />
+        <link rel="icon" href="/favicon-48.png" sizes="48x48" />
+        <link rel="icon" href="/favicon-192.png" sizes="192x192" />
+        <link rel="apple-touch-icon" href="/favicon-180.png" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <link
@@ -41,10 +50,8 @@ export default function Layout({ title, children, footer }) {
       <div className="app-shell">
         <header className="topbar">
           <div className="brand">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M3 17L9 11L13 15L21 7" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              <path d="M15 7H21V13" stroke="#5B8DEF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/logo-icon.png" width="22" height="22" alt="" aria-hidden="true" style={{ borderRadius: 5 }} />
             <span className="name">PyQuant</span>
             <span className="subtitle">Control Center</span>
           </div>
