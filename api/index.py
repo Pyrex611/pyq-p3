@@ -134,6 +134,12 @@ class BacktestRequest(BaseModel):
     use_bayesian: Optional[bool] = None
     leverage: Optional[float] = None
     use_atr_sl: Optional[bool] = None
+    # 2026-10-31: explicit test-window dates ("YYYY-MM-DD"), an
+    # alternative to walk_forward_days — see walkforward.py's
+    # START_DATE/END_DATE for how these are resolved. Takes priority
+    # over walk_forward_days when start_date is set.
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
 
 
 # ── Health ───────────────────────────────────────────────────────────────
@@ -478,6 +484,10 @@ def _trigger_github_backtest(run_id: int, params: dict, github_token: str) -> No
     }
     if params.get("walk_forward_days") is not None:
         workflow_dispatch_inputs["walk_forward_days"] = str(params["walk_forward_days"])
+    if params.get("start_date"):
+        workflow_dispatch_inputs["start_date"] = str(params["start_date"])
+    if params.get("end_date"):
+        workflow_dispatch_inputs["end_date"] = str(params["end_date"])
     if params.get("bayesian_trials") is not None:
         workflow_dispatch_inputs["bayesian_trials"] = str(params["bayesian_trials"])
     if params.get("leverage") is not None:

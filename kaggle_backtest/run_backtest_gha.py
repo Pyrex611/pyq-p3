@@ -114,6 +114,13 @@ def main() -> None:
         wfd = _env_int("WALK_FORWARD_DAYS")
         if wfd is not None:
             walkforward.WALK_FORWARD_DAYS = wfd
+        # 2026-10-31: explicit date-range override (Backtest page's
+        # start/end date picker) — takes priority over WALK_FORWARD_DAYS
+        # when set; see walkforward.py's own START_DATE/END_DATE comment.
+        start_date = os.environ.get("START_DATE", "").strip()
+        end_date = os.environ.get("END_DATE", "").strip()
+        walkforward.START_DATE = start_date or None
+        walkforward.END_DATE = end_date or None
         bt = _env_int("BAYESIAN_TRIALS")
         if bt is not None:
             walkforward.BAYESIAN_TRIALS = bt

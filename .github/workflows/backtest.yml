@@ -45,7 +45,17 @@ on:
         required: true
         type: string
       walk_forward_days:
-        description: "Override walkforward.WALK_FORWARD_DAYS (blank = use the file's default)"
+        description: "Override walkforward.WALK_FORWARD_DAYS (blank = use the file's default). Ignored if start_date/end_date are set."
+        required: false
+        type: string
+        default: ""
+      start_date:
+        description: "2026-10-31: explicit test-window start date (YYYY-MM-DD, blank = use walk_forward_days)"
+        required: false
+        type: string
+        default: ""
+      end_date:
+        description: "2026-10-31: explicit test-window end date (YYYY-MM-DD, blank = latest available bar)"
         required: false
         type: string
         default: ""
@@ -111,6 +121,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           RUN_ID: ${{ inputs.run_id }}
           WALK_FORWARD_DAYS: ${{ inputs.walk_forward_days }}
+          START_DATE: ${{ inputs.start_date }}
+          END_DATE: ${{ inputs.end_date }}
           BAYESIAN_TRIALS: ${{ inputs.bayesian_trials }}
           LEVERAGE: ${{ inputs.leverage }}
           USE_BAYESIAN: ${{ inputs.use_bayesian }}

@@ -2,6 +2,51 @@ import { useEffect, useRef, useState } from "react";
 import Layout from "../components/Layout";
 import { apiGet, apiPost, fmtMoney, fmtPct, fmtPrice, fmtTime, pnlClass } from "../lib/api";
 
+// A lightweight inline-SVG line chart of cumulative trade PnL — the
+// closest practical analog to walkforward.py's own "Portfolio" equity
+// curve panel (run_walk_forward()'s ax1, plotted against capital_curve)
+// that's buildable from the per-trade data this UI already has (no
+// capital_curve array is persisted per run, only per-trade records —
+// see pyquant_backtest_trades/trades_to_records()). Labeled accordingly
+// below rather than claimed to be bit-for-bit the same curve.
+function EquityCurveChart({ trades }) {
+  const sorted = [...trades]
+    .filter((t) => t.exit_ts || t.entry_ts)
+    .sort((a, b) => new Date(a.exit_ts || a.entry_ts) - new Date(b.exit_ts || b.entry_ts));
+  if (sorted.length < 2) return null;
+
+  let running = 0;
+  const points = sorted.map((t) => {
+    running += t.profit ?? 0;
+    return running;
+  });
+  const min = Math.min(0, ...points);
+  const max = Math.max(0, ...points);
+  const span = max - min || 1;
+  const W = 760, H = 180, PAD = 8;
+  const toX = (i) => PAD + (i / (points.length - 1)) * (W - PAD * 2);
+  const toY = (v) => PAD + (1 - (v - min) / span) * (H - PAD * 2);
+  const path = points.map((v, i) => `${i === 0 ? "M" : "L"} ${toX(i).toFixed(1)} ${toY(v).toFixed(1)}`).join(" ");
+  const zeroY = toY(0).toFixed(1);
+  const final = points[points.length - 1];
+  const stroke = final >= 0 ? "var(--green)" : "var(--red)";
+
+  return (
+    <div className="modal-section">
+      <h4>Equity Curve (cumulative trade PnL)</h4>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
+        <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="var(--border)" strokeWidth="1" strokeDasharray="4 3" />
+        <path d={path} fill="none" stroke={stroke} strokeWidth="1.6" />
+      </svg>
+      <div className="hint" style={{ marginTop: 4 }}>
+        Cumulative $ PnL across this run&apos;s {sorted.length} trades, in exit order — the nearest equivalent
+        to walkforward.py&apos;s own equity-curve plot buildable from the per-trade data persisted for this run
+        (the exact capital_curve array it plots isn&apos;t itself persisted).
+      </div>
+    </div>
+  );
+}
+
 function KvGrid({ obj }) {
   const keys = Object.keys(obj || {});
   if (keys.length === 0) return <div className="empty-state" style={{ padding: "8px 0" }}>None</div>;
@@ -23,7 +68,7 @@ export default function Backtest() {
   const [loadError, setLoadError] = useState(null);
 
   const [form, setForm] = useState({
-    walk_forward_days: "", bayesian_trials: "", leverage: "",
+    walk_forward_days: "", start_date: "", end_date: "", bayesian_trials: "", leverage: "",
     use_bayesian: true, use_atr_sl: true,
   });
   const [statusText, setStatusText] = useState("");
@@ -51,7 +96,15 @@ export default function Backtest() {
 
   function formBody() {
     const body = {};
-    if (form.walk_forward_days) body.walk_forward_days = parseInt(form.walk_forward_days, 10);
+    // start_date/end_date (when start_date is set) take priority over
+    // walk_forward_days — see walkforward.py's START_DATE/END_DATE and
+    // BacktestRequest's docstring in api/index.py.
+    if (form.start_date) {
+      body.start_date = form.start_date;
+      if (form.end_date) body.end_date = form.end_date;
+    } else if (form.walk_forward_days) {
+      body.walk_forward_days = parseInt(form.walk_forward_days, 10);
+    }
     if (form.bayesian_trials) body.bayesian_trials = parseInt(form.bayesian_trials, 10);
     if (form.leverage) body.leverage = parseFloat(form.leverage);
     body.use_bayesian = !!form.use_bayesian;
@@ -156,12 +209,25 @@ export default function Backtest() {
         <h3>Run a new backtest</h3>
         <p className="hint" style={{ marginTop: -4 }}>
           &quot;Run Backtest&quot; starts the same walkforward logic as an automated GitHub Actions job — no
-          manual step, result syncs back here automatically.
+          manual step, result syncs back here automatically. Set a start date to test an explicit window instead
+          of &quot;last N days&quot; (end date defaults to the latest available data if left blank) — this
+          disables Days, which only applies when no start date is set. Dates must fall within the ~366-day
+          window the historical data covers.
         </p>
         <form onSubmit={handleSubmit} style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
           <label>Days<br />
             <input type="number" min="1" placeholder="15" style={{ width: 80 }}
+              disabled={!!form.start_date}
               value={form.walk_forward_days} onChange={(e) => setForm({ ...form, walk_forward_days: e.target.value })} />
+          </label>
+          <label>Start date<br />
+            <input type="date" style={{ width: 150 }}
+              value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} />
+          </label>
+          <label>End date (optional)<br />
+            <input type="date" style={{ width: 150 }}
+              disabled={!form.start_date}
+              value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
           </label>
           <label>Bayesian trials<br />
             <input type="number" min="1" placeholder="150" style={{ width: 90 }}
@@ -294,6 +360,7 @@ export default function Backtest() {
                     <div className="mono" style={{ fontSize: 13 }}>{modal.run.kaggle_ref}</div>
                   </div>
                 )}
+                {modal.trades && <EquityCurveChart trades={modal.trades} />}
                 {modal.trades && (
                   <div className="modal-section">
                     <h4>Per-trade data</h4>

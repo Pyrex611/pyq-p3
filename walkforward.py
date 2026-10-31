@@ -71,6 +71,18 @@ UKF_TRAIN_DAYS        = 30
 GRID_SEARCH_DAYS      = 15
 WALK_FORWARD_DAYS     = 15
 
+# 2026-10-31: explicit date-range override for the Backtest page's
+# "start/end date" picker, as an alternative to WALK_FORWARD_DAYS' plain
+# day-count (which always means "the last N days ending at whatever the
+# CSV's newest bar is"). Both None (the default) keeps the original
+# day-count behavior untouched. When set, run_walk_forward() resolves
+# them against the historical CSV's own 'timestamp' column (data_download.py's
+# ~366-day trailing window — see its own docstring) rather than fetching
+# new data, and reassigns WALK_FORWARD_DAYS/n_bars to match — no other
+# code in this function needed to change. ISO date strings ("YYYY-MM-DD").
+START_DATE            = None
+END_DATE              = None
+
 USE_BAYESIAN          = True
 BAYESIAN_TRIALS       = 150
 PARAM_SMOOTHING_ALPHA = 0.7
@@ -1038,11 +1050,45 @@ def run_walk_forward():
     train_bars   = UKF_TRAIN_DAYS * bars_per_day
     opt_bars     = GRID_SEARCH_DAYS * bars_per_day
 
-    start_bar = n_bars - (WALK_FORWARD_DAYS * bars_per_day)
-    if start_bar < train_bars:
-        start_bar = train_bars
-        print(f"  ⚠  Dataset too short for full recent-data targeting. "
-              f"Adjusting start to bar {start_bar}.")
+    global WALK_FORWARD_DAYS
+    if START_DATE or END_DATE:
+        # Explicit date-range override (2026-10-31) — resolved against
+        # this CSV's own 'timestamp' column rather than a day-count from
+        # the newest bar. Reassigning n_bars/WALK_FORWARD_DAYS here means
+        # every downstream use in this function (the day loop's bound
+        # check, the post-loop force-close, the metrics dict, the print
+        # statements) needs no further changes — they all already read
+        # from these two names.
+        ts = btc_full['timestamp']
+        end_bar = n_bars
+        if END_DATE:
+            end_mask = ts <= (pd.Timestamp(END_DATE) + pd.Timedelta(hours=23, minutes=59))
+            if not end_mask.any():
+                raise ValueError(
+                    f"END_DATE {END_DATE} is earlier than this dataset's first bar ({ts.iloc[0]})."
+                )
+            end_bar = int(end_mask[::-1].idxmax()) + 1  # last True index + 1, exclusive bound
+        if START_DATE:
+            start_mask = ts >= pd.Timestamp(START_DATE)
+            if not start_mask.any():
+                raise ValueError(
+                    f"START_DATE {START_DATE} is later than this dataset's last bar ({ts.iloc[-1]})."
+                )
+            start_bar = int(start_mask.idxmax())
+        else:
+            start_bar = max(train_bars, end_bar - (WALK_FORWARD_DAYS * bars_per_day))
+        if start_bar >= end_bar:
+            raise ValueError(f"START_DATE {START_DATE} is not before END_DATE {END_DATE}.")
+        WALK_FORWARD_DAYS = max(1, (end_bar - start_bar) // bars_per_day)
+        n_bars = end_bar
+        print(f"  Explicit date range: {START_DATE or '(start of window)'} → {END_DATE or '(latest bar)'} "
+              f"→ bars {start_bar}-{n_bars-1} ({WALK_FORWARD_DAYS} day(s))")
+    else:
+        start_bar = n_bars - (WALK_FORWARD_DAYS * bars_per_day)
+        if start_bar < train_bars:
+            start_bar = train_bars
+            print(f"  ⚠  Dataset too short for full recent-data targeting. "
+                  f"Adjusting start to bar {start_bar}.")
 
     print(f"\n  Total bars: {n_bars} (~{n_bars//24} days) | "
           f"Test window: bars {start_bar}-{n_bars-1}\n")
