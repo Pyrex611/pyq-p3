@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtMoney, fmtPct, fmtPrice, fmtTime, pnlClass, statusLabel } from "../lib/api";
+import { apiGet, fmtPct, fmtPrice, fmtTime, pnlClass, statusLabel } from "../lib/api";
 
 export default function Signals() {
   const [symbol, setSymbol] = useState("");
@@ -62,13 +62,22 @@ export default function Signals() {
               <tr key={i}>
                 <td className="mono">{s.symbol}</td>
                 <td className={s.side === "BUY" ? "side-buy" : "side-sell"}>{s.side}</td>
-                <td><span className={`pill ${s.status}`}>{statusLabel(s.status)}</span></td>
+                <td>
+                  <span className={`pill ${s.status}`}>{statusLabel(s.status)}</span>
+                  {s.is_ghosted && (
+                    <span
+                      className="pill"
+                      style={{ marginLeft: 6, background: "var(--accent-soft)", color: "var(--accent-soft-text)" }}
+                      title="Opened while a previous position on this symbol was still open — logged, but excluded from Avg. Return since the live engine's equity was still committed to the earlier trade."
+                    >
+                      GHOSTED
+                    </span>
+                  )}
+                </td>
                 <td className="mono">{fmtPrice(s.entry_price)}</td>
                 <td className="mono">{fmtPrice(s.outcome_price)}</td>
-                <td className={pnlClass(s.realized_pnl_pct ?? s.realized_pnl)}>
-                  {s.realized_pnl_pct !== null && s.realized_pnl_pct !== undefined
-                    ? fmtPct(s.realized_pnl_pct)
-                    : (s.realized_pnl !== null && s.realized_pnl !== undefined ? fmtMoney(s.realized_pnl) : "—")}
+                <td className={pnlClass(s.realized_pnl_pct ?? 0)}>
+                  {fmtPct(s.realized_pnl_pct ?? 0)}
                 </td>
                 <td>{s.mode}</td>
                 <td>{fmtTime(s.opened_at)}</td>

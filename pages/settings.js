@@ -2,6 +2,12 @@ import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { apiGet, apiPost, fmtTime } from "../lib/api";
 
+// Mirrors pyquant_signal_math.LEVERAGE_DEFAULT (10) — the Dashboard's
+// Avg. Return recomputes from this when an override is set. Kept in
+// sync with the same constant in pages/index.js.
+const SYSTEM_LEVERAGE = 10;
+const LEVERAGE_OVERRIDE_KEY = "pyquant_leverage_override";
+
 const EXCHANGE_KEYS = [
   ["ALPACA_API_KEY", "Alpaca API Key"],
   ["ALPACA_SECRET_KEY", "Alpaca Secret Key"],
@@ -39,6 +45,22 @@ export default function Settings() {
   const [cfgError, setCfgError] = useState(null);
   const [baseline, setBaseline] = useState(undefined); // undefined = loading, null = no baseline, string = set
   const [baselineError, setBaselineError] = useState(null);
+  const [leverageInput, setLeverageInput] = useState("");
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(LEVERAGE_OVERRIDE_KEY);
+      if (stored) setLeverageInput(stored);
+    } catch { /* localStorage unavailable — override just stays off */ }
+  }, []);
+
+  function updateLeverageInput(v) {
+    setLeverageInput(v);
+    try {
+      if (v) window.localStorage.setItem(LEVERAGE_OVERRIDE_KEY, v);
+      else window.localStorage.removeItem(LEVERAGE_OVERRIDE_KEY);
+    } catch { /* non-fatal — the Dashboard just won't pick up the override */ }
+  }
 
   async function loadBaseline() {
     try {
@@ -84,6 +106,21 @@ export default function Settings() {
         the actual values. Keys are managed in the Vercel project&apos;s Environment Variables, not here.
       </div>
       {cfgError && <div className="banner error">Could not reach the API ({cfgError}).</div>}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>Leverage Override</h3>
+        <label>
+          Leverage ×<br />
+          <input
+            type="number" min="1" step="0.5" placeholder={String(SYSTEM_LEVERAGE)} style={{ width: 90 }}
+            value={leverageInput}
+            onChange={(e) => updateLeverageInput(e.target.value)}
+          />
+        </label>
+        <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => updateLeverageInput("")}>
+          Reset to system default
+        </button>
+      </div>
 
       <div className="grid cols-2">
         <div className="card">

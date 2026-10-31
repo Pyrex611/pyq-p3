@@ -187,6 +187,17 @@ def _bootstrap_postgres(conn) -> None:
         # replacement for realized_pnl (a dollar figure) — existing rows
         # keep their old realized_pnl value, new closes get both.
         cur.execute("ALTER TABLE pyquant_signals ADD COLUMN IF NOT EXISTS realized_pnl_pct DOUBLE PRECISION")
+        # 2026-10-31 ("ghosting"): a signal opened for a symbol while a
+        # PREVIOUS signal on that same symbol is still open doesn't
+        # represent new capital at risk — live/paper trading would still
+        # have the prior trade's equity committed, so the two can't both
+        # be "real" simultaneous positions the way the return-average math
+        # assumes. Such a signal is still logged normally (visible on the
+        # Signals page) but is flagged is_ghosted so
+        # compute_live_performance()/compute_comparison_buckets() can
+        # exclude it from win-rate/avg-return/trade-count math. Decided
+        # by log_signal() itself at insert time (see its docstring).
+        cur.execute("ALTER TABLE pyquant_signals ADD COLUMN IF NOT EXISTS is_ghosted BOOLEAN NOT NULL DEFAULT FALSE")
 
         # 2026-10-28 — per-trade backtest data, the prerequisite PLAN.md's
         # 2026-10-27 Decisions entry named for a real Backtest-vs-Live
@@ -256,6 +267,7 @@ def _sqlite_conn():
             "ALTER TABLE pyquant_runs ADD COLUMN kaggle_ref TEXT",
             "ALTER TABLE pyquant_runs ADD COLUMN error TEXT",
             "ALTER TABLE pyquant_signals ADD COLUMN realized_pnl_pct REAL",
+            "ALTER TABLE pyquant_signals ADD COLUMN is_ghosted INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 conn.execute(_ddl)
@@ -407,32 +419,70 @@ def log_signal(
     expected_max_loss: Optional[float] = None,
     mode: str = "live",
 ) -> Optional[int]:
-    """Records a newly-opened signal/position. Returns its row id, or None on error."""
+    """Records a newly-opened signal/position. Returns its row id, or None on error.
+
+    "Ghosting" (2026-10-31): before inserting, checks whether `symbol`
+    already has an unclosed ('open') row. If so, the real-world/paper
+    equity for that symbol is still committed to the earlier trade, so
+    this new one can't represent independently-at-risk capital — it's
+    still inserted (so it's visible on the Signals page and its own
+    TP/SL can still be tracked/closed normally) but flagged
+    is_ghosted=True so compute_live_performance()/
+    compute_comparison_buckets() exclude it from win-rate/avg-return/
+    trade-count math. This check is a deliberate alternative to blocking
+    generation outright: it's driven by this state store's own view of
+    what's open (reliable regardless of exchange connectivity) rather
+    than a live Binance position lookup."""
     now = datetime.now(timezone.utc).isoformat()
     try:
+        is_ghosted = has_open_signal(symbol)
         if _using_postgres():
             with _pg_conn().cursor() as cur:
                 cur.execute(
                     "INSERT INTO pyquant_signals "
                     "(symbol, side, entry_price, sl_price, tp_price, qty, entry_capital, "
-                    " expected_max_loss, mode, status, opened_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',now()) RETURNING id",
+                    " expected_max_loss, mode, status, opened_at, is_ghosted) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open',now(),%s) RETURNING id",
                     (symbol, side, entry_price, sl_price, tp_price, qty, entry_capital,
-                     expected_max_loss, mode),
+                     expected_max_loss, mode, is_ghosted),
                 )
                 return cur.fetchone()[0]
         with _lock, _sqlite_conn() as conn:
             cur = conn.execute(
                 "INSERT INTO pyquant_signals "
                 "(symbol, side, entry_price, sl_price, tp_price, qty, entry_capital, "
-                " expected_max_loss, mode, status, opened_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,'open',?)",
+                " expected_max_loss, mode, status, opened_at, is_ghosted) "
+                "VALUES (?,?,?,?,?,?,?,?,?,'open',?,?)",
                 (symbol, side, entry_price, sl_price, tp_price, qty, entry_capital,
-                 expected_max_loss, mode, now),
+                 expected_max_loss, mode, now, is_ghosted),
             )
             return cur.lastrowid
     except Exception:
         return None
+
+
+def has_open_signal(symbol: str) -> bool:
+    """True iff `symbol` has a row in pyquant_signals with status='open'.
+    Used by log_signal() for "ghosting" overlapping signals; best-effort
+    like every other read here — an error degrades to False (not
+    ghosted) rather than raising, since this runs inline in the
+    signal-logging path."""
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM pyquant_signals WHERE symbol = %s AND status = 'open' LIMIT 1",
+                    (symbol,),
+                )
+                return cur.fetchone() is not None
+        with _lock, _sqlite_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM pyquant_signals WHERE symbol = ? AND status = 'open' LIMIT 1",
+                (symbol,),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
 
 
 def update_signal_outcome(
@@ -509,7 +559,7 @@ def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, lim
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     cols = ["id", "symbol", "side", "entry_price", "sl_price", "tp_price", "qty",
             "entry_capital", "expected_max_loss", "mode", "status", "outcome_price",
-            "realized_pnl", "realized_pnl_pct", "opened_at", "closed_at"]
+            "realized_pnl", "realized_pnl_pct", "opened_at", "closed_at", "is_ghosted"]
     ts_cols = ("opened_at", "closed_at")
     try:
         if _using_postgres():
@@ -837,7 +887,13 @@ def compute_live_performance(since: Optional[str] = None, limit: int = 500) -> d
     Backtest-vs-Live comparison page, PLAN.md's 2026-10-26 entry) so the
     two screens can't quietly compute this two different ways."""
     rows = list_signals(limit=limit)
-    closed = [r for r in rows if r.get("status") not in (None, "open")]
+    # "Ghosted" rows (log_signal()'s overlapping-signal flag, 2026-10-31)
+    # are excluded here on purpose — the prior open trade's equity was
+    # still committed when this one opened, so it isn't independently-
+    # at-risk capital and shouldn't move the average return. It's still
+    # a real row (visible via list_signals() on the Signals page); only
+    # the aggregate performance math skips it.
+    closed = [r for r in rows if r.get("status") not in (None, "open") and not r.get("is_ghosted")]
     if since:
         try:
             since_dt = datetime.fromisoformat(since)
@@ -923,7 +979,11 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
         )
 
         live_rows = list_signals(limit=limit)
-        live_closed = [r for r in live_rows if r.get("status") not in (None, "open")]
+        # Ghosted rows excluded here too — see compute_live_performance()'s
+        # matching comment; a comparison against the backtest shouldn't be
+        # skewed by overlapping-signal rows that never represented
+        # independent capital.
+        live_closed = [r for r in live_rows if r.get("status") not in (None, "open") and not r.get("is_ghosted")]
         if since:
             try:
                 since_dt = datetime.fromisoformat(since)

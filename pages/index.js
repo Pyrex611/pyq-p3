@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtMoney, fmtPct, fmtPrice, fmtTime, pnlClass, statusLabel, rawPct } from "../lib/api";
+import { apiGet, fmtPct, fmtPrice, fmtTime, pnlClass, statusLabel, rawPct } from "../lib/api";
+
+// localStorage key the leverage override lives under — set from the
+// Settings page (2026-10-31: the control itself moved there), read here
+// to recompute the Avg. Return stat at a custom leverage client-side.
+const LEVERAGE_OVERRIDE_KEY = "pyquant_leverage_override";
 
 // Mirrors pyquant_signal_math.LEVERAGE_DEFAULT (10) — every stored
 // realized_pnl_pct value was computed with exactly this leverage baked
@@ -22,6 +27,10 @@ export default function Dashboard() {
     apiGet("/dashboard")
       .then((d) => { if (!cancelled) setData(d); })
       .catch((e) => { if (!cancelled) setError(e.message); });
+    try {
+      const stored = window.localStorage.getItem(LEVERAGE_OVERRIDE_KEY);
+      if (stored) setLeverageInput(stored);
+    } catch { /* localStorage unavailable (private window, etc.) — override just stays off */ }
     return () => { cancelled = true; };
   }, []);
 
@@ -66,20 +75,18 @@ export default function Dashboard() {
     : null;
   const avgLeveraged = avgRaw !== null ? avgRaw * lev : null;
 
-  let pnlValue = "—", pnlLabel = "last 200 logged signals", pnlCls = "";
+  // Average Return is percent-only, always — never falls back to a USD
+  // figure (standing rule, 2026-10-31: "never ever again display $").
+  // Missing/zero % data both render as "0%" via fmtPct(0), not a dash.
+  let pnlValue = fmtPct(0), pnlCls = "";
   if (data) {
     if (usingOverride && avgLeveraged !== null) {
       pnlValue = fmtPct(avgLeveraged);
       pnlCls = pnlClass(avgLeveraged);
-      pnlLabel = `at ${lev}× leverage, last ${closedWithPct.length} shown below`;
-    } else if (data.avg_pnl_pct_recent !== null && data.avg_pnl_pct_recent !== undefined) {
-      pnlValue = fmtPct(data.avg_pnl_pct_recent);
-      pnlCls = pnlClass(data.avg_pnl_pct_recent);
-      pnlLabel = `avg. leveraged return (${SYSTEM_LEVERAGE}×), last 200 logged signals`;
     } else {
-      pnlValue = fmtMoney(data.realized_pnl_recent);
-      pnlCls = pnlClass(data.realized_pnl_recent);
-      pnlLabel = "last 200 logged signals (USD — no % data yet)";
+      const v = data.avg_pnl_pct_recent ?? 0;
+      pnlValue = fmtPct(v);
+      pnlCls = pnlClass(v);
     }
   }
 
@@ -98,21 +105,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="card" style={{ marginBottom: 16 }}>
-        <h3>Leverage</h3>
-        <label>
-          Leverage ×<br />
-          <input
-            type="number" min="1" step="0.5" placeholder="10" style={{ width: 90 }}
-            value={leverageInput}
-            onChange={(e) => setLeverageInput(e.target.value)}
-          />
-        </label>
-        <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => setLeverageInput("")}>
-          Reset to system default
-        </button>
-      </div>
-
       <div className="grid cols-4" style={{ marginBottom: 16 }}>
         <div className="card">
           <h3>Open Positions</h3>
@@ -122,7 +114,6 @@ export default function Dashboard() {
         <div className="card">
           <h3>Avg. Return (recent)</h3>
           <div className={`stat-value ${pnlCls}`}>{pnlValue}</div>
-          <div className="stat-label">{pnlLabel}</div>
         </div>
         <div className="card">
           <h3>Trading</h3>
@@ -179,8 +170,8 @@ export default function Dashboard() {
                     <td className="mono">{s.symbol}</td>
                     <td className={s.side === "BUY" ? "side-buy" : "side-sell"}>{s.side}</td>
                     <td><span className={`pill ${s.status}`}>{statusLabel(s.status)}</span></td>
-                    <td className={pnlClass(displayPct ?? s.realized_pnl)}>
-                      {displayPct !== null ? fmtPct(displayPct) : fmtMoney(s.realized_pnl)}
+                    <td className={pnlClass(displayPct ?? 0)}>
+                      {fmtPct(displayPct ?? 0)}
                     </td>
                     <td>{fmtTime(s.closed_at)}</td>
                   </tr>
