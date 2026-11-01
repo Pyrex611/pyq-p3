@@ -132,7 +132,8 @@ def main() -> None:
         walkforward._SUPPRESS_AUTO_RECORD_RUN = True
 
         print(
-            f"[run_backtest_gha] Params: WALK_FORWARD_DAYS={walkforward.WALK_FORWARD_DAYS} "
+            f"[run_backtest_gha] Parameters: WALK_FORWARD_DAYS={walkforward.WALK_FORWARD_DAYS} "
+            f"START_DATE={walkforward.START_DATE} END_DATE={walkforward.END_DATE} "
             f"BAYESIAN_TRIALS={walkforward.BAYESIAN_TRIALS} LEVERAGE={walkforward.LEVERAGE} "
             f"USE_BAYESIAN={walkforward.USE_BAYESIAN} USE_ATR_SL={walkforward.USE_ATR_SL}",
             flush=True,

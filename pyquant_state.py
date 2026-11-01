@@ -39,7 +39,7 @@ import os
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 _DB_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -694,23 +694,45 @@ def _row_to_run(row: tuple) -> dict:
     return _row_timestamps_to_iso(d, ("started_at", "finished_at"))
 
 
-# ── Per-trade backtest data (2026-10-28 — prerequisite for a real
-# Backtest-vs-Live comparison; see PLAN.md's 2026-10-27 Decisions entry) ──
+def _reap_stale_runs() -> None:
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "UPDATE pyquant_runs SET status = 'failed', "
+                    "error = 'Execution timed out or runner interrupted (45m TTL expired)', "
+                    "finished_at = now() WHERE status IN ('queued', 'running') AND finished_at < %s",
+                    (cutoff,),
+                )
+        else:
+            with _lock, _sqlite_conn() as conn:
+                now_str = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    "UPDATE pyquant_runs SET status = 'failed', "
+                    "error = 'Execution timed out or runner interrupted (45m TTL expired)', "
+                    "finished_at = ? WHERE status IN ('queued', 'running') AND finished_at < ?",
+                    (now_str, cutoff),
+                )
+    except Exception:
+        pass
+  
+  
+def _clean_val(v):
+    if v is None:
+        return None
+    if hasattr(v, "item"):
+        v = v.item()
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    return v
 
 def record_backtest_trades(run_id: int, trades: list) -> int:
-    """Bulk-inserts one row per simulated trade a walkforward run
-    produced. `trades` is a list of plain dicts — see
-    walkforward.py's `_trades_to_records()` for the exact shape this
-    expects (symbol/side/entry_price/exit_price/tp_price/sl_price/qty/
-    exit_leg/profit/pnl_pct/entry_ts/exit_ts; any missing key is stored
-    as NULL). Best-effort and non-fatal by this module's standing
-    convention: returns the number of rows actually inserted, 0 on any
-    failure (a backtest's own completion is never blocked by this)."""
     if not trades:
         return 0
     cols = ["run_id", "symbol", "side", "entry_price", "exit_price", "tp_price",
             "sl_price", "qty", "exit_leg", "profit", "pnl_pct", "entry_ts", "exit_ts"]
-    rows = [tuple((run_id if c == "run_id" else t.get(c)) for c in cols) for t in trades]
+    rows = [tuple(_clean_val(run_id if c == "run_id" else t.get(c)) for c in cols) for t in trades]
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:
@@ -727,9 +749,10 @@ def record_backtest_trades(run_id: int, trades: list) -> int:
                 rows,
             )
             return len(rows)
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.getLogger("pyquant.state").error(f"record_backtest_trades failed: {e}")
         return 0
-
 
 def get_backtest_trades(run_id: int) -> list[dict]:
     """Returns every persisted trade for one backtest run, oldest first."""
@@ -817,7 +840,8 @@ def list_diagnostic_history(symbol: Optional[str] = None, limit: int = 300) -> l
 
 
 def list_runs(run_type: Optional[str] = None, limit: int = 50) -> list[dict]:
-    """Returns recent runs, newest first, optionally filtered by run_type."""
+    """Returns recent runs with automatic stale-job cleanup."""
+    _reap_stale_runs()
     clause, params = "", []
     if run_type:
         clause = " WHERE run_type = %s" if _using_postgres() else " WHERE run_type = ?"

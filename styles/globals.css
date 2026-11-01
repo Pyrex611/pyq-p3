@@ -1,27 +1,29 @@
 /* PyQuant Control Center — Unified Stylesheet
-   Color tokens calibrated to the primary charcoal slate palette
-   with silver secondary accents, maintaining a high-contrast institutional aesthetic. */
+   Color tokens sampled directly from the PyQuant logo:
+   - Primary Accent: #3A3635 (warm charcoal grey from the inner plate and action button)
+   - Secondary Accent: #ADA4A2 (taupe silver from the outer plate)
+   - Deep Background: #0D0C0C & #151414 (warm obsidian) */
 
 :root {
-  --bg: #0B0D11;
-  --bg-panel: #13171F;
-  --bg-panel-elevated: #1A1F2A;
-  --border: #262D3D;
-  --border-soft: #1B212D;
-  --text: #E7E9ED;
-  --text-dim: #C9CDD4;
-  --text-muted: #8A909C;
-  --text-faint: #565C68;
+  --bg: #0D0C0C;
+  --bg-panel: #161515;
+  --bg-panel-elevated: #1E1D1D;
+  --border: #2C2928;
+  --border-soft: #201E1D;
+  --text: #ECE7E6;
+  --text-dim: #D1CBC9;
+  --text-muted: #8E8785;
+  --text-faint: #5C5654;
 
-  /* Primary Palette: Charcoal Slate of Action Button */
-  --accent: #2E3440;
-  --accent-hover: #3B4252;
-  --accent-soft: #242933;
-  --accent-soft-text: #ECEFF4;
+  /* Primary Logo Palette: Warm Charcoal of the Run Button */
+  --accent: #3A3635;
+  --accent-hover: #4A4544;
+  --accent-soft: #262322;
+  --accent-soft-text: #EAE6E5;
 
-  /* Secondary Accent: Precision Silver */
-  --accent-secondary: #B2B2B2;
-  --accent-secondary-dim: #7A808C;
+  /* Secondary Accent: Logo Outer Plate Taupe Silver */
+  --accent-secondary: #ADA4A2;
+  --accent-secondary-dim: #7A7371;
 
   /* Semantic Telemetry Colors */
   --green: #3FB950;
@@ -57,7 +59,7 @@ th {
   letter-spacing: 0.05em; font-size: 11px; border-bottom: 1px solid var(--border);
 }
 td { border-bottom: 1px solid var(--border-soft); color: var(--text-dim); }
-tbody tr:hover td { background: #10141C; }
+tbody tr:hover td { background: #1A1818; }
 
 .app-shell {
   min-height: 100vh; width: 100%; max-width: 1440px; margin: 0 auto;
@@ -84,7 +86,7 @@ tbody tr:hover td { background: #10141C; }
   color: var(--text-muted); cursor: pointer; transition: background .12s, color .12s;
 }
 .mode-switch button.active { background: var(--accent); color: var(--accent-soft-text); }
-.mode-switch button.off.active { background: #4a2328; color: #ffb3b8; }
+.mode-switch button.off.active { background: #451E20; color: #FFA1A6; }
 
 nav.primary { display: flex; gap: 20px; padding: 0 24px; border-bottom: 1px solid var(--border); background: var(--bg); }
 nav.primary a {
@@ -106,7 +108,7 @@ main { padding: 24px; flex: 1 1 auto; }
 
 .card {
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 18px 20px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  padding: 18px 20px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 .card h3 {
   margin: 0 0 14px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
@@ -120,10 +122,10 @@ main { padding: 24px; flex: 1 1 auto; }
   display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
   font-weight: 600; letter-spacing: 0.02em;
 }
-.pill.open { background: #1c2636; color: #8fa5c4; border: 1px solid #28364d; }
-.pill.closed_tp { background: #11291b; color: #6fd99a; border: 1px solid #1a422b; }
-.pill.closed_sl { background: #331818; color: #ff9a92; border: 1px solid #522727; }
-.pill.closed_manual { background: #262417; color: #e0d27a; border: 1px solid #423e27; }
+.pill.open { background: #22201E; color: #ADA4A2; border: 1px solid #363230; }
+.pill.closed_tp { background: #132417; color: #6fd99a; border: 1px solid #1c3b24; }
+.pill.closed_sl { background: #2E1617; color: #ff9a92; border: 1px solid #4D2123; }
+.pill.closed_manual { background: #2B2618; color: #e0d27a; border: 1px solid #483F25; }
 
 .side-buy { color: var(--green); font-weight: 600; }
 .side-sell { color: var(--red); font-weight: 600; }
@@ -132,13 +134,12 @@ main { padding: 24px; flex: 1 1 auto; }
 
 .empty-state { color: var(--text-muted); font-size: 13px; padding: 24px; text-align: center; }
 
-/* Custom Inputs & Dropdowns */
 select.dropdown-select {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 7px 12px;
+  padding: 8px 12px;
   font-size: 13px;
   font-family: inherit;
   outline: none;
@@ -146,9 +147,8 @@ select.dropdown-select {
   transition: border-color .12s, box-shadow .12s;
 }
 select.dropdown-select:hover { border-color: var(--accent-secondary); }
-select.dropdown-select:focus { border-color: var(--accent-secondary); box-shadow: 0 0 0 2px rgba(178, 178, 178, 0.15); }
+select.dropdown-select:focus { border-color: var(--accent-secondary); box-shadow: 0 0 0 2px rgba(173, 164, 162, 0.15); }
 
-/* Interactive Calendar Date Picker Button */
 .date-picker-button {
   display: inline-flex;
   align-items: center;
@@ -157,14 +157,14 @@ select.dropdown-select:focus { border-color: var(--accent-secondary); box-shadow
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 7px 12px;
+  padding: 8px 12px;
   font-size: 13px;
   font-family: 'IBM Plex Mono', monospace;
   cursor: pointer;
   transition: border-color .12s, background .12s;
-  min-width: 140px;
+  min-width: 145px;
 }
-.date-picker-button:hover { border-color: var(--accent-secondary); background: #131720; }
+.date-picker-button:hover { border-color: var(--accent-secondary); background: #181616; }
 .date-picker-button.active { border-color: var(--accent-secondary); color: #FFF; }
 
 button.btn {
@@ -176,9 +176,9 @@ button.btn {
 button.btn:hover { background: var(--accent); border-color: var(--accent-secondary); color: #FFF; }
 button.btn.primary {
   background: var(--accent);
-  border-color: #434C5E;
+  border-color: #524C4A;
   color: #FFF;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 button.btn.primary:hover {
   background: var(--accent-hover);
@@ -189,28 +189,28 @@ button.btn.primary:hover {
   padding: 10px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 16px;
   display: flex; align-items: center; gap: 10px;
 }
-.banner.warn { background: #261f12; color: #e3b96a; border: 1px solid #4a3c22; }
-.banner.error { background: #2a1214; color: #ff9a92; border: 1px solid #4d2224; }
-.banner.info { background: #121e2a; color: #8ec3eb; border: 1px solid #1c3347; }
+.banner.warn { background: #262013; color: #e3b96a; border: 1px solid #4a3e22; }
+.banner.error { background: #2b1315; color: #ff9a92; border: 1px solid #4f2123; }
+.banner.info { background: #1C1919; color: var(--accent-secondary); border: 1px solid var(--border); }
 
 footer.hint { padding: 16px 24px; color: var(--text-faint); font-size: 12px; }
 
 /* Modal Architecture */
 .modal-overlay {
-  position: fixed; inset: 0; background: rgba(5, 7, 10, 0.82);
+  position: fixed; inset: 0; background: rgba(8, 7, 7, 0.86);
   display: flex; align-items: flex-start; justify-content: center;
-  padding: 40px 16px; z-index: 100; overflow-y: auto; backdrop-filter: blur(2px);
+  padding: 36px 16px; z-index: 100; overflow-y: auto; backdrop-filter: blur(3px);
 }
 .modal-card {
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px;
-  width: 100%; max-width: 800px; padding: 22px 24px; position: relative;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  width: 100%; max-width: 860px; padding: 24px 26px; position: relative;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
 }
 .modal-card h3 { margin: 0 0 4px 0; font-size: 16px; color: var(--text); }
 .modal-card .modal-sub { font-size: 12px; color: var(--text-muted); margin-bottom: 16px; }
 .modal-close {
   position: absolute; top: 16px; right: 18px; background: none; border: none;
-  color: var(--text-muted); font-size: 22px; line-height: 1; cursor: pointer;
+  color: var(--text-muted); font-size: 24px; line-height: 1; cursor: pointer;
 }
 .modal-close:hover { color: var(--text); }
 .modal-section { margin-bottom: 16px; }
@@ -219,14 +219,13 @@ footer.hint { padding: 16px 24px; color: var(--text-faint); font-size: 12px; }
   color: var(--text-faint); margin: 0 0 8px 0; font-weight: 600;
 }
 .kv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 16px; }
-.kv-grid .kv-row { display: flex; justify-content: space-between; font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border-soft); }
+.kv-grid .kv-row { display: flex; justify-content: space-between; font-size: 12px; padding: 6px 0; border-bottom: 1px solid var(--border-soft); }
 .kv-grid .kv-key { color: var(--text-muted); }
 .kv-grid .kv-val { color: var(--text-dim); font-family: 'IBM Plex Mono', monospace; font-weight: 500; }
 .modal-error { color: #ff9a92; font-size: 13px; white-space: pre-wrap; font-family: 'IBM Plex Mono', monospace; }
 
-/* Interactive Trade Card Accordion */
 .trade-compare-drawer {
-  background: #0E1218;
+  background: #111010;
   border-left: 2px solid var(--accent-secondary);
   padding: 12px 14px;
   margin-top: 6px;

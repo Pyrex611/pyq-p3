@@ -1,16 +1,30 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtPrice, fmtTime, fmtMoney, diagStageLabel } from "../lib/api";
+import { apiGet, fmtPrice, fmtTime, diagStageLabel } from "../lib/api";
 
 function ClearanceGauge({ passed, ratio, label, details }) {
   const boundedPct = Math.min(100, Math.max(0, ratio * 100));
-  const barColor = passed ? "var(--green)" : boundedPct > 75 ? "var(--amber)" : "var(--border)";
+  
+  // If the directional check failed despite high ratio, show clear status
+  let statusText = `${boundedPct.toFixed(0)}%`;
+  let barColor = "var(--border)";
+
+  if (passed) {
+    statusText = "CLEARED";
+    barColor = "var(--green)";
+  } else if (boundedPct >= 100) {
+    statusText = "NO RETRACE";
+    barColor = "var(--amber)";
+  } else if (boundedPct > 70) {
+    statusText = `${boundedPct.toFixed(0)}%`;
+    barColor = "var(--amber)";
+  }
 
   return (
-    <div style={{ minWidth: 140 }}>
+    <div style={{ minWidth: 145 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 3 }}>
-        <span style={{ color: passed ? "var(--green)" : "var(--text-muted)", fontWeight: 600 }}>
-          {passed ? "CLEARED" : `${boundedPct.toFixed(0)}%`}
+        <span style={{ color: passed ? "var(--green)" : boundedPct >= 100 ? "var(--amber)" : "var(--text-muted)", fontWeight: 600 }}>
+          {statusText}
         </span>
         <span style={{ color: "var(--text-faint)", fontSize: 10 }}>{label}</span>
       </div>
@@ -27,7 +41,6 @@ function ClearanceGauge({ passed, ratio, label, details }) {
 export default function LiveMonitor() {
   const [heartbeat, setHeartbeat] = useState(null);
   const [live, setLive] = useState(null);
-  const [diagHistory, setDiagHistory] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -38,9 +51,6 @@ export default function LiveMonitor() {
     apiGet("/signals/open")
       .then((d) => !cancelled && setLive(d))
       .catch((e) => !cancelled && setError(e.message));
-    apiGet("/diagnostics/history", { limit: 200 })
-      .then((d) => !cancelled && setDiagHistory(d.history))
-      .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
   }, []);
 
@@ -48,7 +58,7 @@ export default function LiveMonitor() {
   const symbols = Object.keys(diag);
 
   return (
-    <Layout title="Live Monitor" footer="Telemetry streams from pyquant_state and pyquant_diagnostics_history.">
+    <Layout title="Live Monitor" footer="Real-time gate telemetry streams from pyquant_diagnostics_history and pyquant_state.">
       {error && <div className="banner error">Connection Notice: {error}</div>}
 
       {/* Heartbeat Status Cards */}
@@ -88,7 +98,13 @@ export default function LiveMonitor() {
 
       {/* Signal Diagnostics Clearance Table */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>Signal Generation Gates (Last Hourly Tick)</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+          <h3 style={{ margin: 0 }}>Signal Generation Gates (Last Hourly Tick)</h3>
+          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+            Evaluated every hour at :02 past the hour
+          </span>
+        </div>
+
         <table>
           <thead>
             <tr>
@@ -146,7 +162,7 @@ export default function LiveMonitor() {
           </tbody>
         </table>
         {symbols.length === 0 && (
-          <div className="empty-state">No gate diagnostics logged yet. Hourly tasks record state at :02 past the hour.</div>
+          <div className="empty-state">No gate diagnostics logged yet. Next tick evaluates at :02 past the hour.</div>
         )}
       </div>
 
@@ -175,8 +191,8 @@ export default function LiveMonitor() {
                 <td className="mono">{fmtPrice(s.entry_price)}</td>
                 <td className="mono">{fmtPrice(s.sl_price)}</td>
                 <td className="mono">{fmtPrice(s.tp_price)}</td>
-                <td className="mono">{fmtMoney(s.entry_capital)}</td>
-                <td className="mono">{fmtMoney(s.expected_max_loss)}</td>
+                <td className="mono">{fmtPrice(s.entry_capital)}</td>
+                <td className="mono">{fmtPrice(s.expected_max_loss)}</td>
                 <td><span className="pill open">{s.mode}</span></td>
                 <td>{fmtTime(s.opened_at)}</td>
               </tr>
@@ -184,7 +200,7 @@ export default function LiveMonitor() {
           </tbody>
         </table>
         {(!live?.signals || live.signals.length === 0) && (
-          <div className="empty-state">Zero positions currently active. Strategy is awaiting trigger threshold.</div>
+          <div className="empty-state">Zero open positions. The strategy is waiting for gate clearance.</div>
         )}
       </div>
     </Layout>

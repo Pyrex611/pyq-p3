@@ -114,42 +114,50 @@ def _ts_to_str(v) -> Optional[str]:
         return str(v)
 
 
+def _to_utc_timestamp(date_val):
+    """Converts a date string to a timezone-aware UTC pd.Timestamp."""
+    if not date_val or str(date_val).strip() in ("", "None"):
+        return None
+    t = pd.Timestamp(str(date_val).strip())
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    return t
+
+def _clean_num(val):
+    if val is None or pd.isna(val):
+        return None
+    try:
+        f = float(val)
+        return None if math.isnan(f) or math.isinf(f) else f
+    except Exception:
+        return None
+
+
 def trades_to_records(all_trades: list, leverage: Optional[float] = None) -> list:
-    """Normalizes this module's own internal per-trade dict shape (built
-    throughout run_walk_forward()'s simulation loop — symbol/side/
-    entry_price/qty/tp_price/sl_price/ts/exit_price/exit_ts/exit_leg/
-    profit) into the plain, stable shape
-    pyquant_state.record_backtest_trades() expects, so a future refactor
-    of the simulation loop's own trade-dict keys doesn't silently break
-    the persisted comparison data (PLAN.md's 2026-10-27 Decisions entry
-    on why this table exists — the prerequisite for a real
-    Backtest-vs-Live per-trade comparison). `leverage` defaults to this
-    module's own LEVERAGE constant (whatever it was actually run with,
-    including a workflow_dispatch/Kaggle override) so `pnl_pct` is
-    leveraged the exact same way pyq_p4.py's live outcome_pct() calls
-    are — directly comparable to a live signal's realized_pnl_pct."""
     lev = leverage if leverage is not None else LEVERAGE
     out = []
     for t in all_trades:
-        side = t.get("side") or ""
-        entry = t.get("entry_price")
-        exit_price = t.get("exit_price")
+        side = str(t.get("side") or "").capitalize()
+        entry = _clean_num(t.get("entry_price"))
+        exit_p = _clean_num(t.get("exit_price"))
         pnl_pct = None
-        if entry and exit_price and side:
+        if entry and exit_p and side:
             try:
-                pnl_pct = signal_math.outcome_pct(side, entry, exit_price, lev)
+                pnl_pct = float(signal_math.outcome_pct(side, entry, exit_p, lev))
             except Exception:
                 pnl_pct = None
         out.append({
-            "symbol": t.get("symbol"),
+            "symbol": str(t.get("symbol") or "BTC"),
             "side": side,
             "entry_price": entry,
-            "exit_price": exit_price,
-            "tp_price": t.get("tp_price"),
-            "sl_price": t.get("sl_price"),
-            "qty": t.get("qty"),
-            "exit_leg": t.get("exit_leg"),
-            "profit": t.get("profit"),
+            "exit_price": exit_p,
+            "tp_price": _clean_num(t.get("tp_price")),
+            "sl_price": _clean_num(t.get("sl_price")),
+            "qty": _clean_num(t.get("qty")),
+            "exit_leg": str(t.get("exit_leg") or "CLOSE"),
+            "profit": _clean_num(t.get("profit")),
             "pnl_pct": pnl_pct,
             "entry_ts": _ts_to_str(t.get("ts")),
             "exit_ts": _ts_to_str(t.get("exit_ts")),
@@ -1062,24 +1070,25 @@ def run_walk_forward():
     opt_bars     = GRID_SEARCH_DAYS * bars_per_day
 
     if START_DATE or END_DATE:
-        # Explicit date-range override (2026-10-31) — resolved against
-        # this CSV's own 'timestamp' column rather than a day-count from
-        # the newest bar. Reassigning n_bars/WALK_FORWARD_DAYS here means
-        # every downstream use in this function (the day loop's bound
-        # check, the post-loop force-close, the metrics dict, the print
-        # statements) needs no further changes — they all already read
-        # from these two names.
         ts = btc_full['timestamp']
+        # Guarantee ts is timezone-aware UTC for comparison
+        if ts.dt.tz is None:
+            ts = ts.dt.tz_localize("UTC")
+        else:
+            ts = ts.dt.tz_convert("UTC")
+
         end_bar = n_bars
         if END_DATE:
-            end_mask = ts <= (pd.Timestamp(END_DATE) + pd.Timedelta(hours=23, minutes=59))
+            end_dt = _to_utc_timestamp(END_DATE) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+            end_mask = ts <= end_dt
             if not end_mask.any():
                 raise ValueError(
                     f"END_DATE {END_DATE} is earlier than this dataset's first bar ({ts.iloc[0]})."
                 )
-            end_bar = int(end_mask[::-1].idxmax()) + 1  # last True index + 1, exclusive bound
+            end_bar = int(end_mask[::-1].idxmax()) + 1
         if START_DATE:
-            start_mask = ts >= pd.Timestamp(START_DATE)
+            start_dt = _to_utc_timestamp(START_DATE)
+            start_mask = ts >= start_dt
             if not start_mask.any():
                 raise ValueError(
                     f"START_DATE {START_DATE} is later than this dataset's last bar ({ts.iloc[-1]})."
@@ -1087,11 +1096,13 @@ def run_walk_forward():
             start_bar = int(start_mask.idxmax())
         else:
             start_bar = max(train_bars, end_bar - (WALK_FORWARD_DAYS * bars_per_day))
+
         if start_bar >= end_bar:
             raise ValueError(f"START_DATE {START_DATE} is not before END_DATE {END_DATE}.")
+
         WALK_FORWARD_DAYS = max(1, (end_bar - start_bar) // bars_per_day)
         n_bars = end_bar
-        print(f"  Explicit date range: {START_DATE or '(start of window)'} → {END_DATE or '(latest bar)'} "
+        print(f"  Explicit date range resolved: {START_DATE or '(start of window)'} → {END_DATE or '(latest bar)'} "
               f"→ bars {start_bar}-{n_bars-1} ({WALK_FORWARD_DAYS} day(s))")
     else:
         start_bar = n_bars - (WALK_FORWARD_DAYS * bars_per_day)
