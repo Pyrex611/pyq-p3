@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtPct, fmtTime, pnlClass } from "../lib/api";
+import { apiGet, fmtPct, fmtPrice, fmtTime, pnlClass } from "../lib/api";
 
-function StatTile({ label, value, cls }) {
+function StatCard({ label, value, cls }) {
   return (
     <div>
       <div className={`stat-value ${cls || ""}`}>{value}</div>
@@ -13,139 +13,195 @@ function StatTile({ label, value, cls }) {
 
 export default function Compare() {
   const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
   const [daily, setDaily] = useState(null);
-  const [dailyError, setDailyError] = useState(null);
+  const [error, setError] = useState(null);
+  const [expandedDay, setExpandedDay] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     apiGet("/compare")
-      .then((d) => { if (!cancelled) setData(d); })
-      .catch((e) => { if (!cancelled) setError(e.message); });
+      .then((d) => !cancelled && setData(d))
+      .catch((e) => !cancelled && setError(e.message));
     apiGet("/compare/daily")
-      .then((d) => { if (!cancelled) setDaily(d); })
-      .catch((e) => { if (!cancelled) setDailyError(e.message); });
+      .then((d) => !cancelled && setDaily(d))
+      .catch((e) => !cancelled && setError(e.message));
     return () => { cancelled = true; };
   }, []);
 
-  const live = (data && data.live) || {};
-  const wf = data && data.latest_walkforward_run;
-  const wfMetrics = (wf && wf.metrics) || {};
-  const retPct = wfMetrics["Total Return (%)"];
-  const retFrac = retPct !== undefined && retPct !== null ? retPct / 100 : null;
+  const live = data?.live || {};
+  const wf = data?.latest_walkforward_run;
+  const wfMetrics = wf?.metrics || {};
 
-  // Merge both sides' day buckets into one sorted list of dates for the
-  // table below — any date present on either side gets a row (missing
-  // on one side just renders as "—" for that side's columns).
-  const liveByDay = (daily && daily.live_by_day) || {};
-  const backtestByDay = (daily && daily.backtest_by_day) || {};
-  const allDates = Array.from(new Set([...Object.keys(liveByDay), ...Object.keys(backtestByDay)])).sort();
+  const liveByDay = daily?.live_by_day || {};
+  const backtestByDay = daily?.backtest_by_day || {};
+  const allDates = Array.from(new Set([...Object.keys(liveByDay), ...Object.keys(backtestByDay)])).sort().reverse();
 
   return (
-    <Layout
-      title="Compare"
-      footer={'"Live" figures respect the Settings page\'s signals baseline, same as the Dashboard — see Settings → "Signals Baseline" if these numbers look like they include pre-fix history.'}
-    >
-      <div className="banner warn">
-        Aggregate (whole-history) comparison below; the day-by-day table further down bucket-matches both
-        sides by calendar day — see that section for why day-granularity, not a 1:1 trade match.
-      </div>
-      {error && <div className="banner error">Could not reach the API ({error}).</div>}
+    <Layout title="Comparative Analytics" footer="Comparison aligns Live signals against Backtest trades by calendar date.">
+      {error && <div className="banner error">Connection Notice: {error}</div>}
 
-      <div className="grid cols-2">
+      {/* Aggregate Header Comparison */}
+      <div className="grid cols-2" style={{ marginBottom: 16 }}>
         <div className="card">
-          <h3>Live (Signal-Only Tracking)</h3>
+          <h3>Live Tracking Aggregate</h3>
           <div className="grid cols-2" style={{ gap: 14 }}>
-            {!data ? (
-              <div className="empty-state">Loading…</div>
-            ) : (
-              <>
-                <StatTile label="Avg. Return" value={fmtPct(live.avg_pnl_pct)} cls={pnlClass(live.avg_pnl_pct)} />
-                <StatTile label="Win Rate" value={live.win_rate_pct != null ? `${live.win_rate_pct.toFixed(1)}%` : "—"} />
-                <StatTile label="Closed Trades" value={live.trade_count ?? "—"} />
-                <StatTile label="Wins / Losses" value={`${live.win_count ?? "—"} / ${live.loss_count ?? "—"}`} />
-              </>
-            )}
+            <StatCard label="Avg Return (%)" value={fmtPct(live.avg_pnl_pct)} cls={pnlClass(live.avg_pnl_pct)} />
+            <StatCard label="Win Rate (%)" value={live.win_rate_pct != null ? `${live.win_rate_pct.toFixed(1)}%` : "—"} />
+            <StatCard label="Total Trades" value={live.trade_count ?? "—"} />
+            <StatCard label="Win / Loss Count" value={`${live.win_count ?? 0} / ${live.loss_count ?? 0}`} />
           </div>
-          <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>
-            {data && data.signals_baseline_at
-              ? `Since baseline reset: ${fmtTime(data.signals_baseline_at)}`
-              : data ? "Counting all signal history (no baseline set)." : ""}
-          </p>
+          <div className="hint" style={{ marginTop: 10 }}>
+            {data?.signals_baseline_at ? `Baseline Active: Since ${fmtTime(data.signals_baseline_at)}` : "All Time"}
+          </div>
         </div>
+
         <div className="card">
           <h3>Latest Walkforward Backtest</h3>
           <div className="grid cols-2" style={{ gap: 14 }}>
-            {!data ? (
-              <div className="empty-state">Loading…</div>
-            ) : !wf ? (
-              <div className="empty-state">No completed walkforward run yet — use the Backtest page.</div>
-            ) : (
-              <>
-                <StatTile label="Total Return" value={retFrac !== null ? fmtPct(retFrac) : "—"} cls={pnlClass(retFrac)} />
-                <StatTile label="Win Rate" value={wfMetrics["Win Rate (%)"] !== undefined ? `${wfMetrics["Win Rate (%)"]}%` : "—"} />
-                <StatTile label="Total Trades" value={wfMetrics["Total Trades"] ?? wfMetrics["trade_count"] ?? "—"} />
-                <StatTile label="Run" value={`#${wf.id}`} />
-              </>
-            )}
+            <StatCard label="Total Return (%)" value={wfMetrics["Total Return (%)"] ? `${wfMetrics["Total Return (%)"]}%` : "—"} cls={pnlClass(wfMetrics["Total Return (%)"])} />
+            <StatCard label="Win Rate (%)" value={wfMetrics["Win Rate (%)"] ? `${wfMetrics["Win Rate (%)"]}%` : "—"} />
+            <StatCard label="Total Trades" value={wfMetrics["Total Trades"] ?? wfMetrics.trade_count ?? "—"} />
+            <StatCard label="Run Reference" value={wf ? `#${wf.id}` : "—"} />
           </div>
-          <p className="hint" style={{ marginTop: 12, marginBottom: 0 }}>{wf ? `Finished ${fmtTime(wf.finished_at)}` : ""}</p>
+          <div className="hint" style={{ marginTop: 10 }}>
+            {wf ? `Finished: ${fmtTime(wf.finished_at)}` : "No completed backtest found."}
+          </div>
         </div>
       </div>
 
-      <div className="card" style={{ marginTop: 16 }}>
-        <h3>Day-by-Day (per-trade foundation)</h3>
-        <p className="hint" style={{ marginTop: -4 }}>
-          Added 2026-10-29, built on the per-trade backtest logging shipped 2026-10-28
-          (<code className="mono">pyquant_backtest_trades</code>). Not a 1:1 trade match — live ticks on a
-          ~5-minute cadence against real-time bars while the backtest walks fixed historical windows, so
-          exact timestamps never line up — instead both sides are bucketed by UTC calendar day and compared
-          trade count / win rate / avg return per day, from run <code className="mono">#{daily ? daily.run_id ?? "—" : "—"}</code>.
-          &quot;Win&quot; on the backtest side is approximated as a positive <code className="mono">pnl_pct</code> trade
-          (the live side uses the exact <code className="mono">closed_tp</code> status); treat the win-rate column
-          as directionally comparable, not bit-for-bit identical in definition.
-        </p>
-        {dailyError && <div className="banner error">Could not reach the API ({dailyError}).</div>}
-        {daily && allDates.length === 0 && (
-          <div className="empty-state">No overlapping data yet — run a backtest and let the live engine log some closed signals.</div>
-        )}
-        {daily && allDates.length > 0 && (
-          <div className="daily-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Live Trades</th><th>Live Win %</th><th>Live Avg %</th>
-                  <th>Backtest Trades</th><th>Backtest Win %</th><th>Backtest Avg %</th>
-                  <th>Avg % Δ (Live − Backtest)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {allDates.map((day) => {
-                  const l = liveByDay[day];
-                  const b = backtestByDay[day];
-                  const delta = l && b && l.avg_pnl_pct !== null && b.avg_pnl_pct !== null
-                    ? l.avg_pnl_pct - b.avg_pnl_pct
-                    : null;
-                  return (
-                    <tr key={day}>
-                      <td className="mono">{day}</td>
+      {/* Granular Master-Detail Date Drilldown Table */}
+      <div className="card">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+          <h3 style={{ margin: 0 }}>Day-by-Day Trade Reconciliation</h3>
+          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+            Click any row to drill down into matching trades
+          </span>
+        </div>
+
+        <div className="daily-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date (UTC)</th>
+                <th>Live Trades</th>
+                <th>Live Win %</th>
+                <th>Live Avg %</th>
+                <th>Backtest Trades</th>
+                <th>Backtest Win %</th>
+                <th>Backtest Avg %</th>
+                <th>Return Delta (Live - Sim)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allDates.map((day) => {
+                const l = liveByDay[day];
+                const b = backtestByDay[day];
+                const delta = l && b && l.avg_pnl_pct !== null && b.avg_pnl_pct !== null ? l.avg_pnl_pct - b.avg_pnl_pct : null;
+                const isExpanded = expandedDay === day;
+
+                return (
+                  <React.Fragment key={day}>
+                    <tr
+                      style={{ cursor: "pointer", background: isExpanded ? "var(--border-soft)" : "transparent" }}
+                      onClick={() => setExpandedDay(isExpanded ? null : day)}
+                    >
+                      <td className="mono" style={{ fontWeight: 600 }}>
+                        {isExpanded ? "▼" : "▶"} {day}
+                      </td>
                       <td className="mono">{l ? l.trade_count : "—"}</td>
-                      <td className="mono">{l && l.win_rate_pct !== null ? `${l.win_rate_pct.toFixed(1)}%` : "—"}</td>
-                      <td className={`mono ${l ? pnlClass(l.avg_pnl_pct) : ""}`}>{l && l.avg_pnl_pct !== null ? fmtPct(l.avg_pnl_pct) : "—"}</td>
+                      <td className="mono">{l?.win_rate_pct != null ? `${l.win_rate_pct.toFixed(1)}%` : "—"}</td>
+                      <td className={`mono ${pnlClass(l?.avg_pnl_pct)}`}>{l?.avg_pnl_pct != null ? fmtPct(l.avg_pnl_pct) : "—"}</td>
                       <td className="mono">{b ? b.trade_count : "—"}</td>
-                      <td className="mono">{b && b.win_rate_pct !== null ? `${b.win_rate_pct.toFixed(1)}%` : "—"}</td>
-                      <td className={`mono ${b ? pnlClass(b.avg_pnl_pct) : ""}`}>{b && b.avg_pnl_pct !== null ? fmtPct(b.avg_pnl_pct) : "—"}</td>
+                      <td className="mono">{b?.win_rate_pct != null ? `${b.win_rate_pct.toFixed(1)}%` : "—"}</td>
+                      <td className={`mono ${pnlClass(b?.avg_pnl_pct)}`}>{b?.avg_pnl_pct != null ? fmtPct(b.avg_pnl_pct) : "—"}</td>
                       <td className={`mono ${delta !== null ? (delta >= 0 ? "delta-pos" : "delta-neg") : ""}`}>
                         {delta !== null ? fmtPct(delta) : "—"}
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+
+                    {/* Master-Detail Accordion Body */}
+                    {isExpanded && (
+                      <tr>
+                        <td colSpan={8} style={{ padding: "12px 16px", background: "#0e1117", borderBottom: "2px solid var(--border)" }}>
+                          <div className="grid cols-2" style={{ gap: 16 }}>
+                            {/* Live Trades on this date */}
+                            <div>
+                              <h4 style={{ margin: "0 0 6px 0", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                                Live Signals ({day})
+                              </h4>
+                              {l?.trades && l.trades.length > 0 ? (
+                                <table style={{ fontSize: 11 }}>
+                                  <thead>
+                                    <tr>
+                                      <th>Symbol</th>
+                                      <th>Side</th>
+                                      <th>Entry</th>
+                                      <th>Exit</th>
+                                      <th>Return %</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {l.trades.map((t, idx) => (
+                                      <tr key={idx}>
+                                        <td className="mono">{t.symbol}</td>
+                                        <td className={t.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{t.side}</td>
+                                        <td className="mono">{fmtPrice(t.entry_price)}</td>
+                                        <td className="mono">{fmtPrice(t.exit_price)}</td>
+                                        <td className={`mono ${pnlClass(t.pnl_pct)}`}>{fmtPct(t.pnl_pct)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <div className="empty-state" style={{ padding: 8 }}>Zero live signals executed.</div>
+                              )}
+                            </div>
+
+                            {/* Backtest Trades on this date */}
+                            <div>
+                              <h4 style={{ margin: "0 0 6px 0", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                                Backtest Trades ({day})
+                              </h4>
+                              {b?.trades && b.trades.length > 0 ? (
+                                <table style={{ fontSize: 11 }}>
+                                  <thead>
+                                    <tr>
+                                      <th>Symbol</th>
+                                      <th>Side</th>
+                                      <th>Entry</th>
+                                      <th>Exit</th>
+                                      <th>Return %</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {b.trades.map((t, idx) => (
+                                      <tr key={idx}>
+                                        <td className="mono">{t.symbol}</td>
+                                        <td className={t.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{t.side}</td>
+                                        <td className="mono">{fmtPrice(t.entry_price)}</td>
+                                        <td className="mono">{fmtPrice(t.exit_price)}</td>
+                                        <td className={`mono ${pnlClass(t.pnl_pct)}`}>{fmtPct(t.pnl_pct)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              ) : (
+                                <div className="empty-state" style={{ padding: 8 }}>Zero backtest trades executed.</div>
+                              )}
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+          {allDates.length === 0 && (
+            <div className="empty-state">No overlapping day records found between live execution and backtest runs.</div>
+          )}
+        </div>
       </div>
     </Layout>
   );

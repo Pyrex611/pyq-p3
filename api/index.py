@@ -667,6 +667,19 @@ def _render_run_params_block(script: str, run_id: int, params: dict, dataset_slu
     return script[:block_start] + new_block + script[block_end:]
 
 
+@app.get("/api/backtests/bounds")
+def get_backtest_bounds():
+    """Returns historical data boundaries to constrain Backtest UI date pickers."""
+    today = datetime.now(timezone.utc).date()
+    earliest = today - timedelta(days=366)
+    return {
+        "max_days": 366,
+        "earliest_date": earliest.isoformat(),
+        "latest_date": today.isoformat(),
+        "default_days": 15,
+    }
+
+
 # ── Dashboard summary ────────────────────────────────────────────────────
 
 @app.get("/api/dashboard")
@@ -784,3 +797,85 @@ def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults 
 # path itself; vercel.json's rewrite is what gets "/api/*" to this file
 # in production. StaticFiles/the `web/` mount this file used to end with
 # is gone along with `web/` itself (moved to `legacy_web/`, unused).
+
+
+# Inserted into api/index.py to service the new UI capabilities
+
+@app.get("/api/backtests/bounds")
+def get_backtest_bounds():
+    """Returns dataset historical boundaries to bound date inputs in Backtest Studio."""
+    today = datetime.now(timezone.utc).date()
+    earliest = today - timedelta(days=366)
+    return {
+        "max_days": 366,
+        "earliest_date": earliest.isoformat(),
+        "latest_date": today.isoformat(),
+        "default_days": 15,
+    }
+
+
+@app.get("/api/compare/trade-alignment")
+def get_trade_alignment(
+    symbol: str = Query(..., description="Asset symbol (e.g. BTCUSDT or BTC/USD)"),
+    timestamp: str = Query(..., description="ISO entry timestamp of the backtest trade"),
+):
+    """
+    Finds the nearest live gate diagnostics and any recorded live signal
+    within a +/- 90 minute window of a backtest trade to perform side-by-side
+    reconciliation of model decisions.
+    """
+    clean_sym = "BTCUSDT" if "BTC" in symbol.upper() else "ETHUSDT"
+    diag_sym = "BTC/USD" if "BTC" in symbol.upper() else "ETH/USD"
+
+    try:
+        target_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if target_dt.tzinfo is None:
+            target_dt = target_dt.replace(tzinfo=timezone.utc)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {e}")
+
+    window_start = (target_dt - timedelta(minutes=90)).isoformat()
+    window_end = (target_dt + timedelta(minutes=90)).isoformat()
+
+    # 1. Fetch nearest diagnostics history
+    diagnostics = None
+    try:
+        history = state_store.list_diagnostic_history(symbol=diag_sym, limit=200)
+        # Find closest record in window
+        closest = None
+        min_delta = float("inf")
+        for h in history:
+            try:
+                h_dt = datetime.fromisoformat(h["ts"].replace("Z", "+00:00"))
+                delta = abs((h_dt - target_dt).total_seconds())
+                if delta <= 5400 and delta < min_delta:
+                    min_delta = delta
+                    closest = h
+            except Exception:
+                continue
+        diagnostics = closest
+    except Exception as e:
+        pass
+
+    # 2. Fetch nearest live signal
+    matching_signal = None
+    try:
+        signals = state_store.list_signals(symbol=clean_sym, limit=200)
+        for s in signals:
+            try:
+                s_dt = datetime.fromisoformat(s["opened_at"].replace("Z", "+00:00"))
+                delta = abs((s_dt - target_dt).total_seconds())
+                if delta <= 5400:
+                    matching_signal = s
+                    break
+            except Exception:
+                continue
+    except Exception as e:
+        pass
+
+    return {
+        "symbol": symbol,
+        "target_ts": timestamp,
+        "live_diagnostics": diagnostics,
+        "live_signal": matching_signal,
+    }

@@ -1058,28 +1058,43 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
     trade on that side. Best-effort/non-fatal: empty buckets on any
     failure rather than raising, matching this module's standing
     try/except convention for every read used by the UI."""
+    # Updated snippet inside pyquant_state.py -> compute_comparison_buckets()
     def _bucket(rows: list, date_key: str, pct_key: str, win_pred) -> dict:
         buckets: dict = {}
         for r in rows:
             ts = r.get(date_key)
             if not ts:
                 continue
-            day = str(ts)[:10]  # ISO date prefix — same for a "...T..." timestamp or a bare date
+            day = str(ts)[:10]
             if len(day) != 10:
                 continue
-            b = buckets.setdefault(day, {"trade_count": 0, "wins": 0, "pct_vals": []})
+            b = buckets.setdefault(day, {"trade_count": 0, "wins": 0, "pct_vals": [], "trades": []})
             b["trade_count"] += 1
             if win_pred(r):
                 b["wins"] += 1
             pv = r.get(pct_key)
             if pv is not None:
                 b["pct_vals"].append(pv)
+            # Store individual trade record for drill-down view
+            b["trades"].append({
+                "id": r.get("id"),
+                "symbol": r.get("symbol"),
+                "side": r.get("side"),
+                "entry_price": r.get("entry_price"),
+                "exit_price": r.get("exit_price"),
+                "pnl_pct": pv,
+                "status": r.get("status"),
+                "exit_leg": r.get("exit_leg"),
+                "entry_ts": r.get("entry_ts") or r.get("opened_at"),
+                "exit_ts": r.get("exit_ts") or r.get("closed_at"),
+            })
         out = {}
         for day, b in buckets.items():
             out[day] = {
                 "trade_count": b["trade_count"],
                 "win_rate_pct": (b["wins"] / b["trade_count"] * 100.0) if b["trade_count"] else None,
                 "avg_pnl_pct": (sum(b["pct_vals"]) / len(b["pct_vals"])) if b["pct_vals"] else None,
+                "trades": b["trades"],
             }
         return out
 

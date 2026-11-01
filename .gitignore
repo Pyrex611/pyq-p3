@@ -33,3 +33,4 @@ active_trades.json
 watchdog_trades.json
 last_execution_timestamp.txt
 minute_execution_timestamp.txt
+.vercel
