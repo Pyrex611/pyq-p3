@@ -298,7 +298,16 @@ def _persist_signal_diagnostic(symbol: str, diag: dict) -> None:
     """Best-effort merge of this symbol's latest signal-generation
     diagnostic into the shared state store, keyed by symbol. A failure here
     never affects trading logic — it only means the UI's diagnostic panel
-    is stale until the next successful tick."""
+    is stale until the next successful tick.
+
+    2026-10-31: also appends the same diagnostic to
+    pyquant_diagnostics_history (state_store.record_diagnostic_history())
+    — the owner's own feedback was that the single-latest-snapshot view
+    this KV blob gives "doesn't provide much insight into why no signal
+    was generated this turn" with no way to see a trend. Both writes are
+    kept: the KV blob is still the cheap "last tick" read GET
+    /api/heartbeat already serves, the history table is the new append-
+    only log GET /api/diagnostics/history reads."""
     try:
         existing = state_store.get_json(_SIGNAL_DIAG_KEY) or {}
         entry = dict(diag)
@@ -307,6 +316,10 @@ def _persist_signal_diagnostic(symbol: str, diag: dict) -> None:
         state_store.set_json(_SIGNAL_DIAG_KEY, existing)
     except Exception as e:
         logger.warning(f"Signal diagnostic persist failed (non-fatal): {e}")
+    try:
+        state_store.record_diagnostic_history(symbol, diag)
+    except Exception as e:
+        logger.warning(f"Signal diagnostic history append failed (non-fatal): {e}")
 
 # ── Signal Generator & PositionGuard ──────────────────────────────────────────
 signal_generator = SignalGenerator()

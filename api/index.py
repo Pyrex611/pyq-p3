@@ -296,6 +296,18 @@ def get_heartbeat():
     }
 
 
+# 2026-10-31: history counterpart to the "last tick only" diagnostics
+# blob above — see pyquant_state.py's pyquant_diagnostics_history table
+# comment and record_diagnostic_history()/list_diagnostic_history()
+# docstrings. Powers the Live Monitor page's new history chart/table.
+@app.get("/api/diagnostics/history")
+def get_diagnostics_history(
+    symbol: Optional[str] = Query(None),
+    limit: int = Query(300, ge=1, le=2000),
+):
+    return {"history": state_store.list_diagnostic_history(symbol=symbol, limit=limit)}
+
+
 # ── Runs (Backtest screen) ───────────────────────────────────────────────
 
 @app.get("/api/runs")

@@ -1,6 +1,49 @@
 import { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtPrice, fmtTime, fmtMoney } from "../lib/api";
+import { apiGet, fmtPrice, fmtTime, fmtMoney, diagStageLabel } from "../lib/api";
+
+// Small inline-SVG line chart — pct_diff (how far price has actually
+// moved from the UKF prediction) against its vol_gate_threshold (how
+// far it needs to move to clear the gate) over the recent diagnostics
+// history for one symbol. A line that stays well under the dashed
+// threshold for a long stretch is the strategy correctly waiting, not
+// a stuck engine; a line that crosses it with signal_fired still false
+// nearby points at something worth checking in the entry ("strict")
+// gate instead. Rows arrive newest-first from the API; charted oldest-
+// first (left to right).
+function DiagHistoryChart({ rows }) {
+  const sorted = [...rows].reverse();
+  if (sorted.length < 2) return null;
+  const vals = sorted.map((r) => r.pct_diff).filter((v) => v !== null && v !== undefined);
+  const thresholds = sorted.map((r) => r.vol_gate_threshold).filter((v) => v !== null && v !== undefined);
+  if (vals.length < 2) return null;
+  const max = Math.max(...vals, ...thresholds, 0.0001) * 1.1;
+  const W = 760, H = 120, PAD = 6;
+  const n = sorted.length;
+  const toX = (i) => PAD + (i / (n - 1)) * (W - PAD * 2);
+  const toY = (v) => PAD + (1 - (v ?? 0) / max) * (H - PAD * 2);
+  let path = "", started = false;
+  sorted.forEach((r, i) => {
+    if (r.pct_diff === null || r.pct_diff === undefined) { started = false; return; }
+    path += `${started ? "L" : "M"} ${toX(i).toFixed(1)} ${toY(r.pct_diff).toFixed(1)} `;
+    started = true;
+  });
+  const avgThreshold = thresholds.length ? thresholds.reduce((a, b) => a + b, 0) / thresholds.length : null;
+  const firedXs = sorted.map((r, i) => (r.signal_fired ? toX(i) : null)).filter((x) => x !== null);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
+      {avgThreshold !== null && (
+        <line x1={PAD} y1={toY(avgThreshold)} x2={W - PAD} y2={toY(avgThreshold)}
+          stroke="var(--amber)" strokeWidth="1" strokeDasharray="4 3" />
+      )}
+      <path d={path} fill="none" stroke="var(--accent)" strokeWidth="1.4" />
+      {firedXs.map((x, i) => (
+        <circle key={i} cx={x} cy={PAD} r="3" fill="var(--green)" />
+      ))}
+    </svg>
+  );
+}
 
 // live-monitor.html's inline script locally redefined fmtPct with
 // different precision/no sign (3 decimals, raw) from the shared
@@ -17,6 +60,8 @@ export default function LiveMonitor() {
   const [hbError, setHbError] = useState(null);
   const [live, setLive] = useState(null);
   const [liveError, setLiveError] = useState(null);
+  const [diagHistory, setDiagHistory] = useState(null);
+  const [diagHistoryError, setDiagHistoryError] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +71,9 @@ export default function LiveMonitor() {
     apiGet("/signals/open")
       .then((d) => { if (!cancelled) setLive(d); })
       .catch((e) => { if (!cancelled) setLiveError(e.message); });
+    apiGet("/diagnostics/history", { limit: 300 })
+      .then((d) => { if (!cancelled) setDiagHistory(d.history); })
+      .catch((e) => { if (!cancelled) setDiagHistoryError(e.message); });
     return () => { cancelled = true; };
   }, []);
 
@@ -125,7 +173,7 @@ export default function LiveMonitor() {
                   <td className="mono">{dg.pct_diff !== undefined ? fmtDiagPct(dg.pct_diff) : "—"}</td>
                   <td>{volGate}</td>
                   <td>{entryGate}</td>
-                  <td>{dg.signal_fired ? "YES" : (dg.stage_reached === "exception" ? `error: ${dg.error ?? ""}` : "no")}</td>
+                  <td style={{ color: dg.signal_fired ? "var(--green)" : undefined }}>{diagStageLabel(dg)}</td>
                   <td>{fmtTime(dg.ts)}</td>
                 </tr>
               );
@@ -145,6 +193,56 @@ export default function LiveMonitor() {
           Mechanics are identical to the validated walkforward.py backtest (see SPEC.md/DOCS.md) — nothing
           here is a reduced or temporary version of the real signal logic.
         </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>Signal Diagnostics History</h3>
+        <p className="hint" style={{ marginTop: -4 }}>
+          Every hourly tick, per symbol, not just the latest — added so a quiet stretch (strategy correctly
+          waiting) is visible as a trend rather than a single opaque snapshot. The solid line is how far price
+          has actually moved from the UKF prediction each tick; the dashed line is how far it needs to move to
+          clear the volatility gate — green dots mark ticks where a signal actually fired. Comparing this
+          against a specific backtest run&apos;s own trade timing (Backtest page) is the next step here; for
+          now this is the live side only.
+        </p>
+        {diagHistoryError && <div className="banner error">Could not reach the API ({diagHistoryError}).</div>}
+        {diagHistory && diagHistory.length === 0 && (
+          <div className="empty-state">No diagnostics history yet — it accumulates from this point forward.</div>
+        )}
+        {diagHistory && diagHistory.length > 0 && (
+          <>
+            {[...new Set(diagHistory.map((r) => r.symbol))].map((sym) => {
+                const rows = diagHistory.filter((r) => r.symbol === sym);
+                return (
+                  <div key={sym} style={{ marginTop: 14 }}>
+                    <div className="stat-label" style={{ marginBottom: 4 }}>
+                      {sym} — last {rows.length} tick(s)
+                    </div>
+                    <DiagHistoryChart rows={rows} />
+                    <details style={{ marginTop: 6 }}>
+                      <summary className="hint" style={{ cursor: "pointer" }}>▼ Raw ticks</summary>
+                      <table style={{ fontSize: 12, marginTop: 6 }}>
+                        <thead>
+                          <tr><th>As of</th><th>Trend</th><th>Stage</th><th>% Move</th><th>Vol Gate Thresh.</th></tr>
+                        </thead>
+                        <tbody>
+                          {rows.slice(0, 20).map((r) => (
+                            <tr key={r.id}>
+                              <td>{fmtTime(r.ts)}</td>
+                              <td>{r.trend ?? "flat"}</td>
+                              <td style={{ color: r.signal_fired ? "var(--green)" : undefined }}>{diagStageLabel(r)}</td>
+                              <td className="mono">{r.pct_diff !== null && r.pct_diff !== undefined ? `${(r.pct_diff * 100).toFixed(3)}%` : "—"}</td>
+                              <td className="mono">{r.vol_gate_threshold !== null && r.vol_gate_threshold !== undefined ? `${(r.vol_gate_threshold * 100).toFixed(3)}%` : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  </div>
+                );
+              })}
+          </>
+        )}
       </div>
 
       <div className="card">

@@ -229,6 +229,44 @@ def _bootstrap_postgres(conn) -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
 
+        # 2026-10-31 — Signal Diagnostics HISTORY. Before this, pyq_p4.py's
+        # _persist_signal_diagnostic() only ever overwrote a single
+        # pyquant_kv blob per symbol (GET /api/heartbeat's
+        # signal_diagnostics) — the Live Monitor page could only ever show
+        # the latest tick, with no way to see a trend or spot a deviation
+        # from backtest behavior over time (owner feedback, 2026-10-31).
+        # This table is the append-only counterpart: one row per tick per
+        # symbol, written alongside (not instead of) that existing KV
+        # snapshot. Columns mirror SignalGenerator.last_diagnostic's keys
+        # (p4_utils.py) directly — nothing new is computed, this just
+        # stops discarding it every hour.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_diagnostics_history (
+                id                  SERIAL PRIMARY KEY,
+                symbol              TEXT NOT NULL,
+                ts                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                stage_reached       TEXT,
+                signal_fired        BOOLEAN,
+                trend               TEXT,
+                price               DOUBLE PRECISION,
+                pred                DOUBLE PRECISION,
+                pct_diff            DOUBLE PRECISION,
+                vol                 DOUBLE PRECISION,
+                vol_gate_threshold  DOUBLE PRECISION,
+                vol_gate_passed     BOOLEAN,
+                strict_diff         DOUBLE PRECISION,
+                strict_threshold    DOUBLE PRECISION,
+                strict_gate_passed  BOOLEAN,
+                error               TEXT
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS pyquant_diagnostics_history_symbol_ts_idx "
+            "ON pyquant_diagnostics_history(symbol, ts DESC)"
+        )
+
 
 @contextmanager
 def _sqlite_conn():
@@ -285,6 +323,23 @@ def _sqlite_conn():
             "  entry_ts TEXT, exit_ts TEXT)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
+
+        # 2026-10-31 — see the matching Postgres CREATE TABLE above for the
+        # full rationale (Signal Diagnostics history).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_diagnostics_history ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  symbol TEXT NOT NULL, ts TEXT NOT NULL,"
+            "  stage_reached TEXT, signal_fired INTEGER, trend TEXT,"
+            "  price REAL, pred REAL, pct_diff REAL, vol REAL,"
+            "  vol_gate_threshold REAL, vol_gate_passed INTEGER,"
+            "  strict_diff REAL, strict_threshold REAL, strict_gate_passed INTEGER,"
+            "  error TEXT)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pyquant_diagnostics_history_symbol_ts_idx "
+            "ON pyquant_diagnostics_history(symbol, ts DESC)"
+        )
         yield conn
         conn.commit()
     finally:
@@ -695,6 +750,68 @@ def get_backtest_trades(run_id: int) -> list[dict]:
                 f"WHERE run_id = ? ORDER BY id ASC", (run_id,),
             ).fetchall()
             return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in rows]
+    except Exception:
+        return []
+
+
+_DIAG_HISTORY_COLS = [
+    "symbol", "stage_reached", "signal_fired", "trend", "price", "pred",
+    "pct_diff", "vol", "vol_gate_threshold", "vol_gate_passed",
+    "strict_diff", "strict_threshold", "strict_gate_passed", "error",
+]
+
+
+def record_diagnostic_history(symbol: str, diag: dict) -> None:
+    """Appends one Signal Diagnostics row (2026-10-31) — see this
+    module's pyquant_diagnostics_history CREATE TABLE comment for why
+    this exists alongside (not instead of) the single-latest-snapshot
+    pyquant_kv blob pyq_p4.py also still writes. Best-effort/non-fatal,
+    like every write this module makes from the trading engine's own
+    path — never raises into the caller."""
+    try:
+        row = tuple(diag.get(c) for c in _DIAG_HISTORY_COLS)
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO pyquant_diagnostics_history ({','.join(_DIAG_HISTORY_COLS)}, ts) "
+                    f"VALUES ({','.join(['%s'] * len(_DIAG_HISTORY_COLS))}, now())",
+                    row,
+                )
+            return
+        with _lock, _sqlite_conn() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                f"INSERT INTO pyquant_diagnostics_history ({','.join(_DIAG_HISTORY_COLS)}, ts) "
+                f"VALUES ({','.join(['?'] * len(_DIAG_HISTORY_COLS))}, ?)",
+                row + (now,),
+            )
+    except Exception:
+        pass  # diagnostics logging is best-effort, never lets a trading tick fail
+
+
+def list_diagnostic_history(symbol: Optional[str] = None, limit: int = 300) -> list[dict]:
+    """Returns recent Signal Diagnostics history rows, newest first,
+    optionally filtered to one symbol. Powers the Live Monitor page's
+    history chart/table (2026-10-31) — see record_diagnostic_history()."""
+    cols = ["id", "symbol", "ts"] + _DIAG_HISTORY_COLS[1:]
+    where, params = "", []
+    if symbol:
+        where = " WHERE symbol = %s" if _using_postgres() else " WHERE symbol = ?"
+        params.append(symbol)
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"SELECT {','.join(cols)} FROM pyquant_diagnostics_history{where} "
+                    f"ORDER BY id DESC LIMIT %s", (*params, limit),
+                )
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in cur.fetchall()]
+        with _lock, _sqlite_conn() as conn:
+            rows = conn.execute(
+                f"SELECT {','.join(cols)} FROM pyquant_diagnostics_history{where} "
+                f"ORDER BY id DESC LIMIT ?", (*params, limit),
+            ).fetchall()
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in rows]
     except Exception:
         return []
 
