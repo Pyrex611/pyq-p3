@@ -59,7 +59,9 @@ export default function RunsTable({ wfRuns, optRuns, onSelectRun, onRefresh, isA
         <div className="card">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h3 style={{ margin: 0 }}>Daily Optimizer Runs</h3>
-            <span style={{ fontSize: 11, color: "var(--text-faint)" }}>UTC 00:03 Daily</span>
+            {/* Not a fixed time — see CLAUDE.md/SPEC.md: it runs on whichever
+                ~5-min GitHub Actions tick first crosses a new UTC day. */}
+            <span style={{ fontSize: 11, color: "var(--text-faint)" }}>~Once per UTC day</span>
           </div>
           <table>
             <thead>

@@ -232,3 +232,12 @@ footer.hint { padding: 16px 24px; color: var(--text-faint); font-size: 12px; }
   border-radius: 0 6px 6px 0;
   font-size: 12px;
 }
+
+/* 2026-11-02: Compare page's day-by-day table (pages/compare.js)
+   referenced these two classes with no matching rule anywhere in this
+   file — the scroll container had no overflow styling and the
+   Return-Delta column had no green/red coloring, both silently falling
+   back to browser/inherited defaults. */
+.daily-table-wrap { overflow-x: auto; }
+.delta-pos { color: var(--green); }
+.delta-neg { color: var(--red); }

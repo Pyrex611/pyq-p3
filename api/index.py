@@ -798,19 +798,6 @@ def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults 
 # in production. StaticFiles/the `web/` mount this file used to end with
 # is gone along with `web/` itself (moved to `legacy_web/`, unused).
 
-@app.get("/api/backtests/bounds")
-def get_backtest_bounds():
-    """Returns dataset historical boundaries to constrain Backtest UI date pickers."""
-    today = datetime.now(timezone.utc).date()
-    earliest = today - timedelta(days=366)
-    return {
-        "max_days": 366,
-        "earliest_date": earliest.isoformat(),
-        "latest_date": today.isoformat(),
-        "default_days": 15,
-    }
-
-
 @app.get("/api/compare/trade-alignment")
 def get_trade_alignment(
     symbol: str = Query(..., description="Asset symbol (e.g. BTCUSDT or BTC/USD)"),
@@ -821,73 +808,6 @@ def get_trade_alignment(
     within a +/- 90 minute window of a backtest trade to perform side-by-side
     reconciliation of model decisions.
     """
-    clean_sym = "BTCUSDT" if "BTC" in symbol.upper() else "ETHUSDT"
-    diag_sym = "BTC/USD" if "BTC" in symbol.upper() else "ETH/USD"
-
-    try:
-        target_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if target_dt.tzinfo is None:
-            target_dt = target_dt.replace(tzinfo=timezone.utc)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid timestamp format: {e}")
-
-    diagnostics = None
-    try:
-        history = state_store.list_diagnostic_history(symbol=diag_sym, limit=300)
-        closest = None
-        min_delta = float("inf")
-        for h in history:
-            try:
-                h_dt = datetime.fromisoformat(h["ts"].replace("Z", "+00:00"))
-                delta = abs((h_dt - target_dt).total_seconds())
-                if delta <= 5400 and delta < min_delta:
-                    min_delta = delta
-                    closest = h
-            except Exception:
-                continue
-        diagnostics = closest
-    except Exception:
-        pass
-
-    matching_signal = None
-    try:
-        signals = state_store.list_signals(symbol=clean_sym, limit=300)
-        for s in signals:
-            try:
-                s_dt = datetime.fromisoformat(s["opened_at"].replace("Z", "+00:00"))
-                delta = abs((s_dt - target_dt).total_seconds())
-                if delta <= 5400:
-                    matching_signal = s
-                    break
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    return {
-        "symbol": symbol,
-        "target_ts": timestamp,
-        "live_diagnostics": diagnostics,
-        "live_signal": matching_signal,
-    }
-    
-@app.get("/api/backtests/bounds")
-def get_backtest_bounds():
-    today = datetime.now(timezone.utc).date()
-    earliest = today - timedelta(days=366)
-    return {
-        "max_days": 366,
-        "earliest_date": earliest.isoformat(),
-        "latest_date": today.isoformat(),
-        "default_days": 15,
-    }
-
-
-@app.get("/api/compare/trade-alignment")
-def get_trade_alignment(
-    symbol: str = Query(..., description="Asset symbol"),
-    timestamp: str = Query(..., description="ISO entry timestamp"),
-):
     clean_sym = "BTCUSDT" if "BTC" in symbol.upper() else "ETHUSDT"
     diag_sym = "BTC/USD" if "BTC" in symbol.upper() else "ETH/USD"
 

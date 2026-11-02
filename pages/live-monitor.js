@@ -2,6 +2,46 @@ import React, { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { apiGet, fmtPrice, fmtTime, diagStageLabel } from "../lib/api";
 
+// 2026-11-02: restores the diagnostics-HISTORY chart (GET
+// /api/diagnostics/history) that this page's rewrite dropped while the
+// footer text below still claimed to stream from it. Solid line = how
+// far price has actually moved from the UKF prediction each tick;
+// dashed line = the volatility gate's required move; green dots mark
+// ticks where a signal actually fired.
+function DiagHistoryChart({ rows }) {
+  const sorted = [...rows].reverse();
+  if (sorted.length < 2) return null;
+  const vals = sorted.map((r) => r.pct_diff).filter((v) => v !== null && v !== undefined);
+  const thresholds = sorted.map((r) => r.vol_gate_threshold).filter((v) => v !== null && v !== undefined);
+  if (vals.length < 2) return null;
+  const max = Math.max(...vals, ...thresholds, 0.0001) * 1.1;
+  const W = 760, H = 110, PAD = 6;
+  const n = sorted.length;
+  const toX = (i) => PAD + (i / (n - 1)) * (W - PAD * 2);
+  const toY = (v) => PAD + (1 - (v ?? 0) / max) * (H - PAD * 2);
+  let path = "", started = false;
+  sorted.forEach((r, i) => {
+    if (r.pct_diff === null || r.pct_diff === undefined) { started = false; return; }
+    path += `${started ? "L" : "M"} ${toX(i).toFixed(1)} ${toY(r.pct_diff).toFixed(1)} `;
+    started = true;
+  });
+  const avgThreshold = thresholds.length ? thresholds.reduce((a, b) => a + b, 0) / thresholds.length : null;
+  const firedXs = sorted.map((r, i) => (r.signal_fired ? toX(i) : null)).filter((x) => x !== null);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} style={{ display: "block" }}>
+      {avgThreshold !== null && (
+        <line x1={PAD} y1={toY(avgThreshold)} x2={W - PAD} y2={toY(avgThreshold)}
+          stroke="var(--amber)" strokeWidth="1" strokeDasharray="4 3" />
+      )}
+      <path d={path} fill="none" stroke="var(--accent-secondary)" strokeWidth="1.4" />
+      {firedXs.map((x, i) => (
+        <circle key={i} cx={x} cy={PAD} r="3" fill="var(--green)" />
+      ))}
+    </svg>
+  );
+}
+
 function ClearanceGauge({ passed, ratio, label, details }) {
   const boundedPct = Math.min(100, Math.max(0, ratio * 100));
   
@@ -42,6 +82,7 @@ export default function LiveMonitor() {
   const [heartbeat, setHeartbeat] = useState(null);
   const [live, setLive] = useState(null);
   const [error, setError] = useState(null);
+  const [diagHistory, setDiagHistory] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +92,9 @@ export default function LiveMonitor() {
     apiGet("/signals/open")
       .then((d) => !cancelled && setLive(d))
       .catch((e) => !cancelled && setError(e.message));
+    apiGet("/diagnostics/history", { limit: 300 })
+      .then((d) => !cancelled && setDiagHistory(d.history))
+      .catch(() => {}); // non-fatal — the latest-tick table above still works without it
     return () => { cancelled = true; };
   }, []);
 
@@ -163,6 +207,27 @@ export default function LiveMonitor() {
         </table>
         {symbols.length === 0 && (
           <div className="empty-state">No gate diagnostics logged yet. Next tick evaluates at :02 past the hour.</div>
+        )}
+      </div>
+
+      {/* Signal Diagnostics History — one row per tick, not just the
+          latest, so a quiet stretch (strategy correctly waiting) reads
+          as a trend rather than a single opaque snapshot. */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>Signal Diagnostics History</h3>
+        {diagHistory && diagHistory.length === 0 && (
+          <div className="empty-state">No diagnostics history yet — it accumulates from this point forward.</div>
+        )}
+        {diagHistory && diagHistory.length > 0 && (
+          [...new Set(diagHistory.map((r) => r.symbol))].map((sym) => {
+            const rows = diagHistory.filter((r) => r.symbol === sym);
+            return (
+              <div key={sym} style={{ marginTop: 10 }}>
+                <div className="stat-label" style={{ marginBottom: 4 }}>{sym} — last {rows.length} tick(s)</div>
+                <DiagHistoryChart rows={rows} />
+              </div>
+            );
+          })
         )}
       </div>
 

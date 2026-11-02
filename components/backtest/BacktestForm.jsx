@@ -43,7 +43,7 @@ export default function BacktestForm({
             style={{ padding: "4px 10px", fontSize: 11 }}
             onClick={() => setPreset(d)}
           >
-            {d === "365" ? "Full Dataset (366D)" : `${d} Days`}
+            {d === "365" ? "Full Dataset (365D)" : `${d} Days`}
           </button>
         ))}
       </div>

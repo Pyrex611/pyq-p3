@@ -1,8 +1,12 @@
 import React, { useMemo } from "react";
 
 export default function BacktestConfirmModal({ isOpen, onClose, onConfirm, form, bounds }) {
-  if (!isOpen) return null;
-
+  // 2026-11-02: useMemo must run on every render regardless of isOpen —
+  // this component stays mounted with isOpen just toggling true/false,
+  // so an early return before a hook call is a Rules-of-Hooks violation
+  // ("Rendered more hooks than during the previous render") the moment
+  // isOpen flips from false to true. The early return now comes AFTER
+  // every hook.
   const resolved = useMemo(() => {
     let mode = "Duration Days";
     let startStr = "";
@@ -26,6 +30,8 @@ export default function BacktestConfirmModal({ isOpen, onClose, onConfirm, form,
 
     return { mode, startStr, endStr, daysCount };
   }, [form, bounds]);
+
+  if (!isOpen) return null;
 
   return (
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
