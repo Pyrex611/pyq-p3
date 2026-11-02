@@ -178,9 +178,17 @@ def main() -> None:
             n = state_store.record_backtest_trades(
                 run_id, walkforward.trades_to_records(all_trades, walkforward.LEVERAGE)
             )
-            print(f"[run_backtest] Persisted {n} per-trade rows for run {run_id}.", flush=True)
+            print(f"[run_backtest] Persisted {n}/{len(all_trades)} per-trade rows for run {run_id}.", flush=True)
         except Exception as e:
             print(f"[run_backtest] (non-fatal) per-trade logging failed: {e}", flush=True)
+
+        # 2026-11-02: see run_backtest_gha.py's matching comment / this
+        # repo's pyquant_state.record_capital_curve() docstring.
+        try:
+            ok = state_store.record_capital_curve(run_id, capital_curve)
+            print(f"[run_backtest] Capital curve ({len(capital_curve)} points) persisted: {ok}", flush=True)
+        except Exception as e:
+            print(f"[run_backtest] (non-fatal) capital curve logging failed: {e}", flush=True)
 
         state_store.update_run_status(run_id, "completed", metrics=metrics_dict)
         print(f"[run_backtest] run {run_id} completed: {metrics_dict}", flush=True)

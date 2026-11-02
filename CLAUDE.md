@@ -182,6 +182,38 @@ section only orients a new session to where things stand structurally.
   place for `orchestra.yml`). The Kaggle Dataset is now only read by
   the Kaggle-kernel BACKUP path. See `PLAN.md`'s 2026-10-29 second-pass
   entry and `KAGGLE.md` Part J for the full writeup.
+- **Fixed 2026-11-02 — root cause of "0 trades persisted" on real runs:**
+  `pyquant_state.py` never imported `math`, but `_clean_val()` (added in
+  the owner's independent `2fdf36b`) calls `math.isnan`/`math.isinf` on
+  every float field — so every call to `record_backtest_trades()`/the
+  new `record_capital_curve()` raised a bare `NameError` on the first
+  float value it touched, outside any inner try/except, caught only by
+  the caller's own best-effort wrapper in `run_backtest_gha.py`/
+  `run_backtest.py` and silently logged as "(non-fatal)". This is why a
+  completed run could report "267 total trades" in its metrics but 0
+  rows in `pyquant_backtest_trades` (RunDetailModal's equity chart then
+  fell back to a straight 2-point line, and the Executed Trades Log
+  showed the generic "run predates per-trade logging" message on a run
+  that didn't). Fixed by adding the import. Hardened on top of that:
+  `record_backtest_trades()` now inserts rows individually instead of
+  one `executemany()` call, so one future bad row can never drop an
+  entire run's trades again; `trades_to_records()` never emits
+  None for the NOT NULL `entry_price`/`side` columns either.
+- **Added 2026-11-02:** real per-bar `capital_curve` persistence
+  (`pyquant_backtest_curves` table, `record_capital_curve()`/
+  `get_capital_curve()`, `GET /api/runs/{id}/curve`) — `walkforward.py`
+  always computed this array but it was discarded after each run;
+  `EquityCurveChart.tsx` now plots it (downsampled to 400 points) when
+  present instead of reconstructing a curve from trades. Also fixed:
+  `update_run_status()` now bumps `finished_at` on every terminal
+  status (`completed`/`failed`), not only when `metrics` is passed —
+  previously every failure call site left `finished_at` stuck at
+  request-time, so a failed run's "Finished" timestamp was meaningless;
+  and `RunDetailModal.jsx`'s Backtest Window & Runtime panel no longer
+  shows a blank End Date/Test Window for a date-range run with no
+  explicit `end_date` (that means "ran to the latest available data",
+  a real resolved value — it now falls back to `bounds.latest_date` and
+  computes Test Window from the resolved start/end dates).
 
 ## 6. What's next
 

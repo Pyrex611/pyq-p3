@@ -134,7 +134,7 @@ export default function Backtest() {
   }
 
   async function handleSelectRun(runId) {
-    setModal({ runId, loading: true, run: null, params: {}, error: null, trades: null });
+    setModal({ runId, loading: true, run: null, params: {}, error: null, trades: null, curve: null });
     try {
       const run = await apiGet(`/runs/${runId}`);
       let params = {};
@@ -148,9 +148,18 @@ export default function Backtest() {
         if (t.trades && t.trades.length > 0) trades = t.trades;
       } catch {}
 
-      setModal({ runId, loading: false, run, params, error: null, trades });
+      // 2026-11-02: the real per-bar capital_curve, when this run
+      // persisted one — see pyquant_state.record_capital_curve() /
+      // EquityCurveChart's "prefer the real curve" comment.
+      let curve = null;
+      try {
+        const c = await apiGet(`/runs/${runId}/curve`);
+        if (c.curve && c.curve.length > 1) curve = c.curve;
+      } catch {}
+
+      setModal({ runId, loading: false, run, params, error: null, trades, curve });
     } catch (e) {
-      setModal({ runId, loading: false, run: null, params: {}, error: e.message, trades: null });
+      setModal({ runId, loading: false, run: null, params: {}, error: e.message, trades: null, curve: null });
     }
   }
 
@@ -191,6 +200,7 @@ export default function Backtest() {
       <RunDetailModal
         modal={modal}
         onClose={() => setModal(null)}
+        bounds={bounds}
       />
     </Layout>
   );

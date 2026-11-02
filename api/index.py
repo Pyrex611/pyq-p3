@@ -352,6 +352,16 @@ def get_run_trades(run_id: int):
     return {"run_id": run_id, "trades": state_store.get_backtest_trades(run_id)}
 
 
+@app.get("/api/runs/{run_id}/curve")
+def get_run_curve(run_id: int):
+    """2026-11-02: the real per-bar capital_curve for one backtest run —
+    see pyquant_state.record_capital_curve()'s docstring. Returns an
+    empty list (not a 404) for a run with no persisted curve (predates
+    this feature, or the write failed non-fatally), same convention as
+    GET /api/runs/{run_id}/trades above."""
+    return {"run_id": run_id, "curve": state_store.get_capital_curve(run_id)}
+
+
 # ── Backtests (Backtest screen's "Run" button) ──────────────────────────
 #
 # See KAGGLE.md for full setup/rationale. Short version: Vercel has

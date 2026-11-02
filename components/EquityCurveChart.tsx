@@ -1,7 +1,22 @@
 import React, { useState, useMemo } from "react";
 import { fmtMoney, fmtPct, fmtTime, pnlClass } from "../lib/api";
 
-export default function EquityCurveChart({ trades, runMetrics = {}, initialCapital = 10.0 }) {
+// 2026-11-02: downsamples a long real capital_curve (up to ~8800 points
+// for a full-dataset run) to a chart-friendly size, always keeping the
+// first and last point so the displayed start/end capital match the
+// real run exactly. Simple stride sampling — this is a trajectory-shape
+// visual, not a forensic per-bar reconstruction.
+function downsample(arr, maxPoints) {
+  if (arr.length <= maxPoints) return arr.map((v, i) => ({ v, i }));
+  const stride = Math.ceil(arr.length / maxPoints);
+  const out = [];
+  for (let i = 0; i < arr.length; i += stride) out.push({ v: arr[i], i });
+  const last = arr.length - 1;
+  if (out[out.length - 1].i !== last) out.push({ v: arr[last], i: last });
+  return out;
+}
+
+export default function EquityCurveChart({ trades, curve, runMetrics = {}, startDate, endDate, initialCapital = 10.0 }) {
   const [hoverIndex, setHoverIndex] = useState(null);
   const [activeTab, setActiveTab] = useState("equity");
 
@@ -15,6 +30,50 @@ export default function EquityCurveChart({ trades, runMetrics = {}, initialCapit
     let currentCapital = initialCapital;
     let peakCapital = initialCapital;
 
+    // 2026-11-02: prefer the REAL per-bar capital_curve walkforward.py
+    // persisted (see pyquant_state.record_capital_curve()) over
+    // reconstructing a trajectory from trades. This is what actually
+    // shows the real up-and-down shape of a run instead of either a
+    // trade-count-sized zig-zag or (with 0 persisted trades) a flat
+    // straight line from start to finish. "Point" below is a bar index
+    // into the downsampled curve, not a trade — there's no per-bar
+    // timestamp, so the hovered label falls back to interpolating
+    // between the run's start/end dates. curve[0] is already the real
+    // starting capital, so it doubles as the anchor point — no separate
+    // synthetic Point 0 needed here (unlike the trade-based paths below).
+    if (curve && curve.length > 1) {
+      const sampled = downsample(curve, 400);
+      const startTs = sortedTrades[0]?.entry_ts || startDate || runMetrics["Start Date"];
+      const endTs = endDate || runMetrics["End Date"];
+      const startMs = startTs ? new Date(startTs).getTime() : null;
+      const endMs = endTs ? new Date(endTs).getTime() : null;
+      const lastIdx = sampled[sampled.length - 1].i || 1;
+      const points = [];
+      let prevCap = initialCapital;
+
+      sampled.forEach(({ v, i }) => {
+        const cap = v ?? initialCapital;
+        if (cap > peakCapital) peakCapital = cap;
+        const drawdownPct = peakCapital > 0 ? ((cap - peakCapital) / peakCapital) * 100 : 0;
+        const returnPct = ((cap - initialCapital) / initialCapital) * 100;
+        const frac = lastIdx > 0 ? i / lastIdx : 0;
+        const ts = startMs !== null && endMs !== null
+          ? new Date(startMs + frac * (endMs - startMs)).toISOString()
+          : null;
+        points.push({
+          tradeIndex: i,
+          trade: { exit_leg: i === 0 ? "INITIAL" : "BAR", pnl_pct: null, profit: cap - prevCap },
+          capital: cap,
+          cumPnl: cap - initialCapital,
+          returnPct,
+          drawdownPct,
+          ts,
+        });
+        prevCap = cap;
+      });
+      return points;
+    }
+
     // Anchor Point 0 at start ($10.00, 0% PnL)
     const points = [
       {
@@ -24,7 +83,7 @@ export default function EquityCurveChart({ trades, runMetrics = {}, initialCapit
         cumPnl: 0,
         returnPct: 0,
         drawdownPct: 0,
-        ts: sortedTrades[0]?.entry_ts || runMetrics["Start Date"] || new Date().toISOString(),
+        ts: sortedTrades[0]?.entry_ts || startDate || runMetrics["Start Date"] || new Date().toISOString(),
       },
     ];
 
@@ -42,7 +101,7 @@ export default function EquityCurveChart({ trades, runMetrics = {}, initialCapit
         cumPnl: finalCapital - initialCapital,
         returnPct: finalRetPct,
         drawdownPct: maxDdPval,
-        ts: runMetrics["End Date"] || new Date().toISOString(),
+        ts: endDate || runMetrics["End Date"] || new Date().toISOString(),
       });
       return points;
     }
@@ -101,7 +160,11 @@ export default function EquityCurveChart({ trades, runMetrics = {}, initialCapit
             Simulation Trajectory
           </h4>
           <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            {sortedTrades.length > 0 ? `${sortedTrades.length} Trade Points Plotted` : "Summary Performance Curve"}
+            {curve && curve.length > 1
+              ? `${curve.length} Bars (Real Equity Curve)`
+              : sortedTrades.length > 0
+              ? `${sortedTrades.length} Trade Points Plotted`
+              : "Summary Performance Curve"}
           </span>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
@@ -178,22 +241,37 @@ export default function EquityCurveChart({ trades, runMetrics = {}, initialCapit
             strokeLinecap="round"
             points={points}
           />
-          {curveData.map((d, i) => {
-            const cx = toX(i);
-            const cy = toY(values[i]);
-            const isWin = (d.trade.profit ?? 0) > 0;
-            return (
-              <circle
-                key={i}
-                cx={cx}
-                cy={cy}
-                r={hoverIndex === i ? 5 : i === 0 ? 3 : 2}
-                fill={i === 0 ? "var(--text-faint)" : isWin ? "var(--green)" : "var(--red)"}
-                stroke="#100F0F"
-                strokeWidth={1}
-              />
-            );
-          })}
+          {/* 2026-11-02: in real-curve mode (400 bar-points) a dot per
+              point is just clutter — only the hovered point gets a
+              marker. Trade-reconstructed mode (far fewer points, each a
+              real win/loss) keeps its per-point win/loss dots. */}
+          {curve && curve.length > 1
+            ? hoverIndex !== null && (
+                <circle
+                  cx={toX(hoverIndex)}
+                  cy={toY(values[hoverIndex])}
+                  r={5}
+                  fill="var(--accent-secondary)"
+                  stroke="#100F0F"
+                  strokeWidth={1}
+                />
+              )
+            : curveData.map((d, i) => {
+                const cx = toX(i);
+                const cy = toY(values[i]);
+                const isWin = (d.trade.profit ?? 0) > 0;
+                return (
+                  <circle
+                    key={i}
+                    cx={cx}
+                    cy={cy}
+                    r={hoverIndex === i ? 5 : i === 0 ? 3 : 2}
+                    fill={i === 0 ? "var(--text-faint)" : isWin ? "var(--green)" : "var(--red)"}
+                    stroke="#100F0F"
+                    strokeWidth={1}
+                  />
+                );
+              })}
           {hoverIndex !== null && (
             <line
               x1={toX(hoverIndex)}

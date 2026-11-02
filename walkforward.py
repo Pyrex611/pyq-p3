@@ -148,10 +148,20 @@ def trades_to_records(all_trades: list, leverage: Optional[float] = None) -> lis
                 pnl_pct = float(signal_math.outcome_pct(side, entry, exit_p, lev))
             except Exception:
                 pnl_pct = None
+        # 2026-11-02: pyquant_backtest_trades.entry_price/side are NOT
+        # NULL — a single trade dict ever missing/NaN'ing either of
+        # these used to make record_backtest_trades()'s executemany()
+        # reject the WHOLE batch (one bad row aborts the statement),
+        # which is the confirmed root cause of runs showing "267 total
+        # trades" in metrics but 0 persisted rows (see RunDetailModal's
+        # "run predates per-trade logging" message firing on runs that
+        # don't actually predate it). Never emit None/NaN for a NOT NULL
+        # column; record_backtest_trades() is also now resilient to any
+        # remaining per-row failure on its own.
         out.append({
             "symbol": str(t.get("symbol") or "BTC"),
-            "side": side,
-            "entry_price": entry,
+            "side": side or "Buy",
+            "entry_price": entry if entry is not None else 0.0,
             "exit_price": exit_p,
             "tp_price": _clean_num(t.get("tp_price")),
             "sl_price": _clean_num(t.get("sl_price")),
@@ -1326,6 +1336,10 @@ def run_walk_forward():
             # record_run()'s own standing treatment just above.
             if new_run_id is not None:
                 state_store.record_backtest_trades(new_run_id, trades_to_records(all_trades, LEVERAGE))
+                # 2026-11-02: see pyquant_state.record_capital_curve()'s
+                # docstring — same non-fatal treatment as the trades call
+                # just above.
+                state_store.record_capital_curve(new_run_id, capital_curve)
         except Exception as e:
             print(f"  (non-fatal) run logging failed: {e}")
 

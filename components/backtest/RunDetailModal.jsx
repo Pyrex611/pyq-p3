@@ -43,7 +43,7 @@ function calculateExecutionDuration(startedAt, finishedAt) {
   }
 }
 
-export default function RunDetailModal({ modal, onClose }) {
+export default function RunDetailModal({ modal, onClose, bounds }) {
   const [modalView, setModalView] = useState("overview"); // 'overview' | 'trades'
   const [alignedTrade, setAlignedTrade] = useState(null);
   const [alignLoading, setAlignLoading] = useState(false);
@@ -82,11 +82,33 @@ export default function RunDetailModal({ modal, onClose }) {
       if (!endDate) endDate = trades[trades.length - 1].exit_ts?.slice(0, 10);
     }
 
+    // 2026-11-02: an explicit start_date with NO end_date means "run
+    // through the latest available data" (BacktestForm.jsx's "Latest
+    // Available" placeholder; walkforward.py resolves END_DATE=None to
+    // the dataset's last bar) — that's a real, resolved end date, not a
+    // missing one. Previously this only ever got filled in from a
+    // persisted trade's exit_ts, so any run where per-trade persistence
+    // failed (see record_backtest_trades's 2026-11-02 fix) showed End
+    // Date AND Test Window blank even though the run itself completed
+    // fine with a real, known end date.
+    if (!endDate && startDate && bounds?.latest_date) {
+      endDate = bounds.latest_date;
+    }
+
     if (!startDate && modal.run.finished_at && durationDays) {
       const finDate = new Date(modal.run.finished_at);
       const stDate = new Date(finDate.getTime() - durationDays * 24 * 3600 * 1000);
       startDate = stDate.toISOString().slice(0, 10);
       endDate = finDate.toISOString().slice(0, 10);
+    }
+
+    // Date-range runs (as opposed to a duration preset) never set
+    // walk_forward_days, so Test Window used to show "—" even once
+    // start/end date were both known — compute it from the resolved
+    // dates instead.
+    if (!durationDays && startDate && endDate) {
+      const days = Math.round((new Date(endDate) - new Date(startDate)) / (24 * 3600 * 1000));
+      if (!isNaN(days) && days > 0) durationDays = days;
     }
 
     const execDuration = calculateExecutionDuration(modal.run.started_at, modal.run.finished_at);
@@ -97,7 +119,7 @@ export default function RunDetailModal({ modal, onClose }) {
       durationDays: durationDays ? `${durationDays} Days` : "—",
       execDuration,
     };
-  }, [modal]);
+  }, [modal, bounds]);
 
   if (!modal) return null;
 
@@ -139,7 +161,14 @@ export default function RunDetailModal({ modal, onClose }) {
           <>
             {modalView === "overview" && (
               <>
-                <EquityCurveChart trades={modal.trades} runMetrics={modal.run.metrics || {}} initialCapital={10.0} />
+                <EquityCurveChart
+                  trades={modal.trades}
+                  curve={modal.curve}
+                  runMetrics={modal.run.metrics || {}}
+                  startDate={runAnalytics.startDate !== "—" ? runAnalytics.startDate : null}
+                  endDate={runAnalytics.endDate !== "—" ? runAnalytics.endDate : null}
+                  initialCapital={10.0}
+                />
 
                 <div className="modal-section" style={{ marginTop: 16 }}>
                   <h4>Backtest Window & Runtime</h4>

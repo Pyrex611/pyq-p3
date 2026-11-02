@@ -35,6 +35,7 @@ see SQL or a connection object.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import threading
@@ -229,6 +230,35 @@ def _bootstrap_postgres(conn) -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
 
+        # 2026-11-02 — the real per-bar capital_curve walkforward.py
+        # computes (one point per hourly bar across the whole walk-forward
+        # window) was previously discarded the same way all_trades used to
+        # be before pyquant_backtest_trades existed: returned from
+        # run_walk_forward() and never written anywhere. The Backtest
+        # page's equity chart had no choice but to reconstruct a curve
+        # from persisted trades, and — when no trades were persisted
+        # either (see record_backtest_trades()'s 2026-11-02 comment) —
+        # fell all the way back to a straight 2-point line from initial
+        # to final capital, which is the "PnL chart is just a straight
+        # upward slope" symptom. One row per run; stored as a JSON array
+        # of floats (a full 365-day run is ~8800 points, a few hundred KB
+        # as JSON — fine for a single-owner tool, not worth a separate
+        # table-per-point design).
+        # TEXT, not JSONB, to match this module's existing convention for
+        # every other JSON-shaped column (pyquant_runs.metrics/params) —
+        # serialized/parsed in Python at the boundary rather than relying
+        # on psycopg2's JSONB adapter, which needs an explicit Json()
+        # wrapper to avoid a "can't adapt type 'list'" error on a plain
+        # %s placeholder.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_backtest_curves (
+                run_id   INTEGER PRIMARY KEY REFERENCES pyquant_runs(id) ON DELETE CASCADE,
+                curve    TEXT NOT NULL
+            )
+            """
+        )
+
         # 2026-10-31 — Signal Diagnostics HISTORY. Before this, pyq_p4.py's
         # _persist_signal_diagnostic() only ever overwrote a single
         # pyquant_kv blob per symbol (GET /api/heartbeat's
@@ -323,6 +353,13 @@ def _sqlite_conn():
             "  entry_ts TEXT, exit_ts TEXT)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS pyquant_backtest_trades_run_id_idx ON pyquant_backtest_trades(run_id)")
+
+        # 2026-11-02 — see the matching Postgres CREATE TABLE above for the
+        # full rationale (real per-bar capital_curve persistence).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_backtest_curves ("
+            "  run_id INTEGER PRIMARY KEY, curve TEXT NOT NULL)"
+        )
 
         # 2026-10-31 — see the matching Postgres CREATE TABLE above for the
         # full rationale (Signal Diagnostics history).
@@ -728,31 +765,55 @@ def _clean_val(v):
     return v
 
 def record_backtest_trades(run_id: int, trades: list) -> int:
+    """Persists per-trade backtest rows. 2026-11-02: previously used a
+    single executemany() call for the whole batch — in Postgres (and
+    sqlite's executemany), one row that violates a constraint (e.g. a
+    NOT NULL column getting None from a malformed trade dict) aborts
+    the ENTIRE statement, silently dropping every other trade in the
+    run too. This is the confirmed root cause of runs whose metrics
+    report real trade counts (e.g. 267) but persist 0 rows, which then
+    made the UI's equity chart fall back to its 2-point
+    straight-line-from-summary rendering and the trades log show the
+    generic "run predates per-trade logging" message on a run that
+    didn't actually predate it. Insert rows individually instead, so
+    one bad row is skipped (and logged) without losing the rest."""
     if not trades:
         return 0
     cols = ["run_id", "symbol", "side", "entry_price", "exit_price", "tp_price",
             "sl_price", "qty", "exit_leg", "profit", "pnl_pct", "entry_ts", "exit_ts"]
     rows = [tuple(_clean_val(run_id if c == "run_id" else t.get(c)) for c in cols) for t in trades]
+    import logging
+    log = logging.getLogger("pyquant.state")
+    inserted = 0
+    failed = 0
     try:
         if _using_postgres():
+            placeholders = ",".join(["%s"] * len(cols))
+            sql = f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})"
             with _pg_conn().cursor() as cur:
-                placeholders = ",".join(["%s"] * len(cols))
-                cur.executemany(
-                    f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})",
-                    rows,
-                )
-            return len(rows)
-        with _lock, _sqlite_conn() as conn:
+                for row in rows:
+                    try:
+                        cur.execute(sql, row)
+                        inserted += 1
+                    except Exception as e:
+                        failed += 1
+                        log.error(f"record_backtest_trades: skipped one row for run {run_id}: {e}")
+        else:
             placeholders = ",".join(["?"] * len(cols))
-            conn.executemany(
-                f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})",
-                rows,
-            )
-            return len(rows)
+            sql = f"INSERT INTO pyquant_backtest_trades ({','.join(cols)}) VALUES ({placeholders})"
+            with _lock, _sqlite_conn() as conn:
+                for row in rows:
+                    try:
+                        conn.execute(sql, row)
+                        inserted += 1
+                    except Exception as e:
+                        failed += 1
+                        log.error(f"record_backtest_trades: skipped one row for run {run_id}: {e}")
     except Exception as e:
-        import logging
-        logging.getLogger("pyquant.state").error(f"record_backtest_trades failed: {e}")
-        return 0
+        log.error(f"record_backtest_trades: failed for run {run_id}: {e}")
+    if failed:
+        log.error(f"record_backtest_trades: run {run_id} persisted {inserted}/{len(rows)} rows ({failed} skipped).")
+    return inserted
 
 def get_backtest_trades(run_id: int) -> list[dict]:
     """Returns every persisted trade for one backtest run, oldest first."""
@@ -773,6 +834,57 @@ def get_backtest_trades(run_id: int) -> list[dict]:
                 f"WHERE run_id = ? ORDER BY id ASC", (run_id,),
             ).fetchall()
             return [_row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) for row in rows]
+    except Exception:
+        return []
+
+
+def record_capital_curve(run_id: int, curve: list) -> bool:
+    """Persists the real per-bar capital_curve walkforward.py computes
+    for one run (2026-11-02) — see pyquant_backtest_curves' CREATE TABLE
+    comment for why. Upserts (a re-run of the same run_id, if that ever
+    happens, replaces rather than duplicates). Best-effort, like every
+    writer in this module: a failure here must never stop a run from
+    being marked completed."""
+    if not curve:
+        return False
+    cleaned = [_clean_val(c) for c in curve]
+    payload = json.dumps(cleaned, default=str)
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pyquant_backtest_curves (run_id, curve) VALUES (%s, %s) "
+                    "ON CONFLICT (run_id) DO UPDATE SET curve = EXCLUDED.curve",
+                    (run_id, payload),
+                )
+            return True
+        with _lock, _sqlite_conn() as conn:
+            conn.execute(
+                "INSERT INTO pyquant_backtest_curves (run_id, curve) VALUES (?, ?) "
+                "ON CONFLICT (run_id) DO UPDATE SET curve = excluded.curve",
+                (run_id, payload),
+            )
+            return True
+    except Exception as e:
+        import logging
+        logging.getLogger("pyquant.state").error(f"record_capital_curve failed for run {run_id}: {e}")
+        return False
+
+
+def get_capital_curve(run_id: int) -> list:
+    """Returns the persisted per-bar capital_curve for one run, or []
+    if none was recorded (older runs, or a non-fatal write failure)."""
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute("SELECT curve FROM pyquant_backtest_curves WHERE run_id = %s", (run_id,))
+                row = cur.fetchone()
+                return json.loads(row[0]) if row else []
+        with _lock, _sqlite_conn() as conn:
+            row = conn.execute(
+                "SELECT curve FROM pyquant_backtest_curves WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return json.loads(row[0]) if row else []
     except Exception:
         return []
 
@@ -908,16 +1020,33 @@ def request_backtest(run_type: str, params: dict, kaggle_ref: Optional[str] = No
 def update_run_status(run_id: int, status: str, metrics: Optional[dict] = None,
                        kaggle_ref: Optional[str] = None, error: Optional[str] = None) -> bool:
     """Moves a queued/running row forward (status='running'|'completed'|
-    'failed'). When metrics is given, also overwrites metrics and bumps
-    finished_at to now() — call this on the terminal transition
-    (completed/failed), not on the queued->running one. Best-effort: never
-    raises, returns False on failure so a caller (the Kaggle notebook, or
-    a status-check endpoint) can log and move on rather than crash."""
+    'failed'). When metrics is given, also overwrites metrics. Bumps
+    finished_at to now() on every terminal transition (status in
+    'completed'/'failed'), not just when metrics is given — call this on
+    the terminal transition, not on the queued->running one.
+
+    2026-11-02: previously finished_at only got bumped when metrics was
+    passed, which every *failure* call site (run_backtest.py,
+    run_backtest_gha.py, p4_orchestra.py, api/index.py's GitHub-dispatch/
+    Kaggle-push error paths) does NOT do — they call
+    update_run_status(run_id, "failed", error=...) with no metrics. That
+    left finished_at stuck at its request_backtest()-time "queued"
+    timestamp for every failed run, so the Backtest Window & Runtime
+    panel's "Finished" column (and anything else reading finished_at) showed
+    queue time, not actual failure time, and a run that failed quickly
+    could look like it ran for ages (or vice versa). Keying the bump off
+    `status` instead of `metrics is not None` fixes every call site at
+    once without touching each one individually.
+
+    Best-effort: never raises, returns False on failure so a caller (the
+    Kaggle notebook, or a status-check endpoint) can log and move on
+    rather than crash."""
     try:
         sets, vals = ["status = " + ("%s" if _using_postgres() else "?")], [status]
         if metrics is not None:
             sets.append("metrics = " + ("%s" if _using_postgres() else "?"))
             vals.append(json.dumps(metrics, default=str))
+        if status in ("completed", "failed"):
             sets.append("finished_at = now()" if _using_postgres() else "finished_at = ?")
             if not _using_postgres():
                 vals.append(datetime.now(timezone.utc).isoformat())
