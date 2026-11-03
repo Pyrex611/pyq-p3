@@ -59,6 +59,10 @@ function PyqInsightsPanel({ rows }) {
   const toneMeta = {
     fired: { color: "var(--green)", label: "Signal fired" },
     waiting_retrace: { color: "var(--amber)", label: "Waiting for retrace" },
+    // matches ClearanceGauge's "NO RETRACE" case below — strict_diff is
+    // already past threshold but the predicted band is on the wrong side
+    // of pred for this trend, so more retrace won't fix it.
+    blocked_band_invalid: { color: "var(--amber)", label: "Band inverted (not a retrace wait)" },
     blocked_vol: { color: "var(--text-muted)", label: "Volatility gate blocked" },
     flat: { color: "var(--text-faint)", label: "Flat / no edge" },
     unknown: { color: "var(--text-faint)", label: "Unclear" },
