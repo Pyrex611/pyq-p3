@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import Layout from "../components/Layout";
-import { apiGet, fmtPrice, fmtTime, diagStageLabel } from "../lib/api";
+import { apiGet, fmtPrice, fmtTime, diagStageLabel, pyqInsight, pyqInsightTone } from "../lib/api";
 
 // 2026-11-02: restores the diagnostics-HISTORY chart (GET
 // /api/diagnostics/history) that this page's rewrite dropped while the
@@ -39,6 +39,48 @@ function DiagHistoryChart({ rows }) {
         <circle key={i} cx={x} cy={PAD} r="3" fill="var(--green)" />
       ))}
     </svg>
+  );
+}
+
+// 2026-11-03 ("PyQ Insights"): the chart above shows raw numbers with no
+// explanation — this translates the latest tick's gate state into plain
+// language (via lib/api.js's pyqInsight()) plus a quick tally of how the
+// recent window broke down (fired / waiting for retrace / blocked at the
+// volatility gate / flat), so the history can be understood at a glance
+// instead of requiring a hover-by-hover read of the chart.
+function PyqInsightsPanel({ rows }) {
+  if (!rows || rows.length === 0) return null;
+  const latest = rows[0]; // diagHistory is newest-first (list_diagnostic_history ORDER BY id DESC)
+  const counts = {};
+  rows.forEach((r) => {
+    const tone = pyqInsightTone(r);
+    counts[tone] = (counts[tone] || 0) + 1;
+  });
+  const toneMeta = {
+    fired: { color: "var(--green)", label: "Signal fired" },
+    waiting_retrace: { color: "var(--amber)", label: "Waiting for retrace" },
+    blocked_vol: { color: "var(--text-muted)", label: "Volatility gate blocked" },
+    flat: { color: "var(--text-faint)", label: "Flat / no edge" },
+    unknown: { color: "var(--text-faint)", label: "Unclear" },
+  };
+
+  return (
+    <div style={{ marginTop: 8, padding: "10px 12px", background: "var(--bg)", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+        <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent-secondary)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+          PyQ Insights — latest tick
+        </span>
+        <span style={{ fontSize: 10, color: "var(--text-faint)" }}>{fmtTime(latest.ts)}</span>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5 }}>{pyqInsight(latest)}</div>
+      <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap" }}>
+        {Object.entries(counts).map(([tone, n]) => (
+          <span key={tone} style={{ fontSize: 10, color: (toneMeta[tone] || toneMeta.unknown).color }}>
+            ● {(toneMeta[tone] || toneMeta.unknown).label}: {n}/{rows.length}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -225,6 +267,7 @@ export default function LiveMonitor() {
               <div key={sym} style={{ marginTop: 10 }}>
                 <div className="stat-label" style={{ marginBottom: 4 }}>{sym} — last {rows.length} tick(s)</div>
                 <DiagHistoryChart rows={rows} />
+                <PyqInsightsPanel rows={rows} />
               </div>
             );
           })

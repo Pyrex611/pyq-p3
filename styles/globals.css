@@ -61,6 +61,28 @@ th {
 td { border-bottom: 1px solid var(--border-soft); color: var(--text-dim); }
 tbody tr:hover td { background: #1A1818; }
 
+/* 2026-11-03: sticky table headers, so a long table's column headers
+   (and any metric tiles in them, e.g. return/drawdown) stay visible
+   while scrolling instead of disappearing off the top. `main` is the
+   normal page-scroll context — `.topbar` is already `position: sticky;
+   top: 0`, so page tables need `top: 64px` (the topbar's own height) to
+   sit just below it. A modal (`.modal-overlay`/`.modal-card`) scrolls
+   its OWN content with no topbar inside that scroll context, so it
+   re-scopes the same variable back to 0 — CSS custom properties cascade
+   by DOM position, not by visual/fixed positioning, so without this
+   override a modal's table headers would inherit `main`'s 64px and sit
+   with an unwanted 64px gap at the top of the modal's own scroll area. */
+main { --sticky-table-top: 64px; }
+.modal-overlay, .modal-card { --sticky-table-top: 0px; }
+
+table thead th {
+  position: sticky;
+  top: var(--sticky-table-top, 0px);
+  background: var(--bg-panel);
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--border);
+}
+
 .app-shell {
   min-height: 100vh; width: 100%; max-width: 1440px; margin: 0 auto;
   display: flex; flex-direction: column; background: var(--bg);

@@ -1,12 +1,150 @@
 import React, { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { apiGet, fmtPct, fmtPrice, fmtTime, pnlClass } from "../lib/api";
+import GateReadout from "../components/GateReadout";
 
 function StatCard({ label, value, cls }) {
   return (
     <div>
       <div className={`stat-value ${cls || ""}`}>{value}</div>
       <div className="stat-label">{label}</div>
+    </div>
+  );
+}
+
+// 2026-11-03: "Model State Comparison" — the owner's explicit ask was to
+// compare both models "for the signal generation hour (volatility,
+// strict entry)", not only for hours that happened to produce an
+// executed trade (most hours don't — that's the normal, waiting-for-
+// retrace case). Hits GET /api/compare/gate-state, the trade-free
+// counterpart to /api/compare/trade-alignment.
+function ModelStateComparison() {
+  const [wfRuns, setWfRuns] = useState(null);
+  const [symbol, setSymbol] = useState("BTC");
+  const [runId, setRunId] = useState("");
+  const [timestamp, setTimestamp] = useState(() => new Date().toISOString());
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet("/runs", { run_type: "walkforward", limit: 30 })
+      .then((d) => {
+        if (cancelled) return;
+        setWfRuns(d.runs || []);
+        const completed = (d.runs || []).find((r) => r.status === "completed");
+        if (completed) setRunId(String(completed.id));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  function setPreset(hoursAgo) {
+    setTimestamp(new Date(Date.now() - hoursAgo * 3600 * 1000).toISOString());
+  }
+
+  async function runCompare() {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = { symbol, timestamp };
+      if (runId) params.run_id = runId;
+      const res = await apiGet("/compare/gate-state", params);
+      setResult(res);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const liveFired = result?.live_diagnostics?.signal_fired;
+  const backtestFired = result?.backtest_diagnostics?.signal_fired;
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+        <h3 style={{ margin: 0 }}>Model State Comparison — Signal Generation Hour</h3>
+        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+          Compares BOTH models&apos; volatility/strict-entry gate state for one hour — including hours with no trade at all
+        </span>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+        <label>
+          Symbol<br />
+          <select className="dropdown-select" value={symbol} onChange={(e) => setSymbol(e.target.value)}>
+            <option value="BTC">BTC</option>
+            <option value="ETH">ETH</option>
+          </select>
+        </label>
+
+        <label style={{ flex: "1 1 260px", minWidth: 220 }}>
+          Hour (ISO, UTC)<br />
+          <input
+            type="text"
+            value={timestamp}
+            onChange={(e) => setTimestamp(e.target.value)}
+            style={{ width: "100%", padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}
+          />
+        </label>
+
+        <div style={{ display: "flex", gap: 4, paddingBottom: 1 }}>
+          {[["Now", 0], ["-1h", 1], ["-6h", 6], ["-24h", 24]].map(([lbl, h]) => (
+            <button key={lbl} type="button" className="btn" style={{ padding: "8px 10px", fontSize: 11 }} onClick={() => setPreset(h)}>
+              {lbl}
+            </button>
+          ))}
+        </div>
+
+        <label>
+          Backtest Run<br />
+          <select className="dropdown-select" value={runId} onChange={(e) => setRunId(e.target.value)}>
+            <option value="">— none (live only) —</option>
+            {wfRuns?.map((r) => (
+              <option key={r.id} value={r.id}>#{r.id} · {fmtTime(r.finished_at)}</option>
+            ))}
+          </select>
+        </label>
+
+        <button type="button" className="btn primary" style={{ padding: "9px 20px" }} onClick={runCompare} disabled={loading}>
+          {loading ? "Comparing…" : "Compare"}
+        </button>
+      </div>
+
+      {error && <div className="banner error">{error}</div>}
+
+      {result && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ background: "var(--bg)", padding: "12px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+              <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 6 }}>
+                Backtest Model {runId ? `— Run #${runId}` : ""}
+              </div>
+              <GateReadout diag={result.backtest_diagnostics} emptyLabel={runId ? "No backtest diagnostic row within 90m of this hour." : "Pick a backtest run above to compare."} />
+            </div>
+            <div style={{ background: "var(--bg)", padding: "12px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+              <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 6 }}>
+                Live Engine
+              </div>
+              <GateReadout diag={result.live_diagnostics} emptyLabel="No live diagnostic row within 90m of this hour." />
+            </div>
+          </div>
+
+          {result.backtest_diagnostics && result.live_diagnostics && (
+            <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--accent-secondary)" }}>
+              {backtestFired && !liveFired
+                ? "Backtest fired here; live did not — the gate readouts above show exactly which gate diverged."
+                : !backtestFired && liveFired
+                ? "Live fired here; the backtest's own params did not clear both gates at this hour."
+                : backtestFired === liveFired
+                ? "Both models agree on this hour's outcome."
+                : null}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -39,6 +177,8 @@ export default function Compare() {
   return (
     <Layout title="Comparative Analytics" footer="Comparison aligns Live signals against Backtest trades by calendar date.">
       {error && <div className="banner error">Connection Notice: {error}</div>}
+
+      <ModelStateComparison />
 
       {/* Aggregate Header Comparison */}
       <div className="grid cols-2" style={{ marginBottom: 16 }}>

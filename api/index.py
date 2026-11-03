@@ -158,6 +158,10 @@ def health():
 
 # ── Status / mode (Dashboard + ApiKeys screens) ─────────────────────────
 
+def _signal_only_mode() -> bool:
+    return os.environ.get("SIGNAL_ONLY_MODE", "false").strip().lower() in ("1", "true", "yes")
+
+
 @app.get("/api/status")
 def get_status():
     """
@@ -167,10 +171,22 @@ def get_status():
     configuration — changing it here does NOT change the orchestra's
     live/paper credentials (see pyquant_state.py's docstring); only
     `trading_enabled` is a real, live-effective control from this API.
+
+    2026-11-03: `mode` can look "stuck on LIVE" from the UI for a purely
+    configuration reason, not a bug — PYQUANT_MODE has to be set in TWO
+    separate places (VERCEL_DEPLOY.md: `vercel env add PYQUANT_MODE` for
+    THIS API process; GITHUB_ACTIONS_SETUP.md Part C: a repo variable for
+    the orchestra process) and defaults to "live" here if this API's own
+    copy was never set, even if the orchestra's copy is "paper". Also
+    surfaces `signal_only_mode` so the UI can say plainly whether ANY
+    Binance call can happen right now regardless of live/paper — see
+    pyq_p4.py's SIGNAL_ONLY_MODE comment: when true, it overrides
+    PYQUANT_MODE/trading_enabled entirely and makes zero exchange calls.
     """
     return {
         "trading_enabled": state_store.is_trading_enabled(),
         "mode": os.environ.get("PYQUANT_MODE", "live").strip().lower(),
+        "signal_only_mode": _signal_only_mode(),
     }
 
 
@@ -180,6 +196,7 @@ def set_status(body: TradingSwitch):
     return {
         "trading_enabled": state_store.is_trading_enabled(),
         "mode": os.environ.get("PYQUANT_MODE", "live").strip().lower(),
+        "signal_only_mode": _signal_only_mode(),
     }
 
 
@@ -360,6 +377,15 @@ def get_run_curve(run_id: int):
     this feature, or the write failed non-fatally), same convention as
     GET /api/runs/{run_id}/trades above."""
     return {"run_id": run_id, "curve": state_store.get_capital_curve(run_id)}
+
+
+@app.get("/api/runs/{run_id}/diagnostics")
+def get_run_diagnostics(run_id: int, symbol: Optional[str] = Query(None, description='"BTC" or "ETH"')):
+    """2026-11-03: per-bar gate diagnostics (vol/strict gate state) for
+    one backtest run — see pyquant_state.record_backtest_diagnostics()'s
+    docstring. Returns an empty list (not a 404) for a run with none
+    persisted, same convention as the trades/curve endpoints above."""
+    return {"run_id": run_id, "diagnostics": state_store.get_backtest_diagnostics(run_id, symbol=symbol)}
 
 
 # ── Backtests (Backtest screen's "Run" button) ──────────────────────────
@@ -808,18 +834,16 @@ def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults 
 # in production. StaticFiles/the `web/` mount this file used to end with
 # is gone along with `web/` itself (moved to `legacy_web/`, unused).
 
-@app.get("/api/compare/trade-alignment")
-def get_trade_alignment(
-    symbol: str = Query(..., description="Asset symbol (e.g. BTCUSDT or BTC/USD)"),
-    timestamp: str = Query(..., description="ISO entry timestamp of the backtest trade"),
-):
-    """
-    Finds the nearest live gate diagnostics and any recorded live signal
-    within a +/- 90 minute window of a backtest trade to perform side-by-side
-    reconciliation of model decisions.
-    """
+def _nearest_gate_states(symbol: str, timestamp: str, run_id: Optional[int]):
+    """Shared core of GET /api/compare/trade-alignment and GET
+    /api/compare/gate-state (2026-11-03 — the latter is the same lookup
+    without requiring an actual backtest trade to anchor it, for the
+    Compare page's hour-level "state of both models" comparison that
+    isn't tied to any specific executed trade). Returns
+    (live_diagnostics, matching_signal, backtest_diagnostics)."""
     clean_sym = "BTCUSDT" if "BTC" in symbol.upper() else "ETHUSDT"
     diag_sym = "BTC/USD" if "BTC" in symbol.upper() else "ETH/USD"
+    bt_sym = "BTC" if "BTC" in symbol.upper() else "ETH"
 
     try:
         target_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
@@ -861,9 +885,61 @@ def get_trade_alignment(
     except Exception:
         pass
 
+    backtest_diagnostics = None
+    if run_id is not None:
+        try:
+            backtest_diagnostics = state_store.get_backtest_diagnostic_at(run_id, bt_sym, timestamp)
+        except Exception:
+            pass
+
+    return diagnostics, matching_signal, backtest_diagnostics
+
+
+@app.get("/api/compare/trade-alignment")
+def get_trade_alignment(
+    symbol: str = Query(..., description="Asset symbol (e.g. BTCUSDT or BTC/USD)"),
+    timestamp: str = Query(..., description="ISO entry timestamp of the backtest trade"),
+    run_id: Optional[int] = Query(
+        None,
+        description="2026-11-03: when given, also returns this run's OWN backtest-side gate "
+                    "diagnostics (vol/strict gate state) at this timestamp, from "
+                    "pyquant_backtest_diagnostics — so the caller can show both models' gate "
+                    "state side by side, not just live's.",
+    ),
+):
+    """
+    Finds the nearest live gate diagnostics and any recorded live signal
+    within a +/- 90 minute window of a backtest trade to perform side-by-side
+    reconciliation of model decisions.
+    """
+    diagnostics, matching_signal, backtest_diagnostics = _nearest_gate_states(symbol, timestamp, run_id)
     return {
         "symbol": symbol,
         "target_ts": timestamp,
         "live_diagnostics": diagnostics,
         "live_signal": matching_signal,
+        "backtest_diagnostics": backtest_diagnostics,
+    }
+
+
+@app.get("/api/compare/gate-state")
+def get_gate_state(
+    symbol: str = Query(..., description="Asset symbol (e.g. BTCUSDT or BTC/USD)"),
+    timestamp: str = Query(..., description="ISO timestamp for the signal-generation hour to inspect"),
+    run_id: Optional[int] = Query(None, description="Backtest run to compare against, if any"),
+):
+    """2026-11-03: the Compare page's "state of both models for this
+    hour" lookup — same nearest-match logic as
+    GET /api/compare/trade-alignment, but for an arbitrary
+    signal-generation hour rather than one anchored to an actual
+    executed backtest trade (most hours never produce a trade at all —
+    that's the normal, waiting-for-retrace case the owner specifically
+    wants visibility into, not just the hours that fired)."""
+    diagnostics, matching_signal, backtest_diagnostics = _nearest_gate_states(symbol, timestamp, run_id)
+    return {
+        "symbol": symbol,
+        "target_ts": timestamp,
+        "live_diagnostics": diagnostics,
+        "live_signal": matching_signal,
+        "backtest_diagnostics": backtest_diagnostics,
     }

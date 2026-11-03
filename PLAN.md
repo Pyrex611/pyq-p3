@@ -824,6 +824,40 @@ here before moving on, even if you also wrote it up elsewhere.
   Kaggle-kernel BACKUP path, which still has no automatic refresh — low
   priority to fix given it's a backup, not the default.
 
+- [ ] **Multi-exchange support — Bybit next (planning only, 2026-11-03;
+  no code changes made toward this yet, per explicit instruction).**
+  Today `p4_utils.py`'s `_create_binance_client()`/`Client(...,
+  testnet=IS_PAPER_MODE)` is the one and only execution venue, and
+  "exchange" means Binance Futures throughout the codebase (env var
+  names, `PositionGuard`'s hedge-mode handling, `pyquant_resilience.py`'s
+  retry/backoff, `BINANCE_GEOBLOCK.md`). Adding Bybit is a real
+  architectural change, not a drop-in client swap — rough shape of the
+  work, to scope properly when it's actually started:
+  - A provider abstraction (order placement, bracket TP/SL, hedge-mode
+    detection, error/retry taxonomy) that `pyq_p4.py`/`PositionGuard`
+    call through, with Binance and Bybit as two implementations —
+    `pyquant_resilience.py`'s retry/backoff logic is Binance-specific
+    (Binance Algo Order error codes) and would need a Bybit counterpart.
+  - Per-symbol or per-strategy-instance exchange selection (new state —
+    `pyquant_signals`/`pyquant_runs` have no "which exchange" column
+    today), plus separate credential sets (`BYBIT_API_KEY`/
+    `BYBIT_SECRET_KEY` alongside the existing `BINANCE_*`/
+    `BINANCE_TESTNET_*` ones) — still only ever held by the orchestra
+    process, never the API (Section 2's trust boundary applies
+    identically to a second exchange).
+  - `walkforward.py`'s cost model (`MAKER_FEE`/`TAKER_FEE`/slippage
+    constants, `MIN_NOTIONAL`, lot-step rounding) is tuned to Binance
+    Futures fee tiers — a Bybit backtest needs its own cost constants,
+    not a shared one, or results will be systematically wrong for that
+    venue.
+  - UI: Dashboard/Settings need an exchange selector wherever they
+    currently assume "the" exchange; Live Monitor's gate table is
+    already symbol-keyed, which should extend cleanly to
+    symbol+exchange.
+  - Geo-blocking (`BINANCE_GEOBLOCK.md`) is Binance-specific — confirm
+    whether Bybit has an equivalent restriction for this deployment's
+    hosting before assuming it's a non-issue.
+
 ## Done (newest first)
 
 - **2026-10-20** — Signal-visibility audit (triggered by owner report:

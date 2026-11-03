@@ -140,7 +140,7 @@ def main() -> None:
         )
 
         print("[run_backtest_gha] Calling walkforward.run_walk_forward()…", flush=True)
-        metrics, all_trades, capital_curve, params_log = walkforward.run_walk_forward()
+        metrics, all_trades, capital_curve, params_log, all_diagnostics = walkforward.run_walk_forward()
         metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
         metrics_dict["trade_count"] = len(all_trades)
 
@@ -163,6 +163,17 @@ def main() -> None:
             print(f"[run_backtest_gha] Capital curve ({len(capital_curve)} points) persisted: {ok}", flush=True)
         except Exception as e:
             print(f"[run_backtest_gha] (non-fatal) capital curve logging failed: {e}", flush=True)
+
+        # 2026-11-03: persist per-bar gate diagnostics (vol/strict gate
+        # state for every bar, not just trade-triggering ones) — see
+        # pyquant_state.record_backtest_diagnostics()'s docstring. This
+        # is what the Compare page's hour-by-hour backtest-vs-live gate
+        # comparison reads from.
+        try:
+            n = state_store.record_backtest_diagnostics(run_id, all_diagnostics)
+            print(f"[run_backtest_gha] Persisted {n}/{len(all_diagnostics)} diagnostic rows for run {run_id}.", flush=True)
+        except Exception as e:
+            print(f"[run_backtest_gha] (non-fatal) diagnostics logging failed: {e}", flush=True)
 
         state_store.update_run_status(run_id, "completed", metrics=metrics_dict)
         print(f"[run_backtest_gha] run {run_id} completed: {metrics_dict}", flush=True)

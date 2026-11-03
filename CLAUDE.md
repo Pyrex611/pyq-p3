@@ -53,6 +53,16 @@ or compromise there cannot place a trade.
   construction, `PositionGuard`.
 - `p4_orchestra.py` — scheduler/entrypoint (`python3 p4_orchestra.py`
   runs it standalone); also owns `daily_optimizer()`.
+- `p4_search.py` — **found 2026-11-03, not previously documented here.**
+  `daily_optimizer()` calls `run_grid_search()` from THIS file, not from
+  `walkforward.py` — it's a complete independent duplicate of the UKF
+  build, cost model, and SL/TP math, plus its own grid/Bayesian search.
+  Its SL/TP constants currently match `pyquant_signal_math.py` exactly
+  (verified by hand), so this isn't an active bug, but it's a standing-
+  rule violation ("shared math only in `pyquant_signal_math.py`") and a
+  latent drift risk: a future shared-math edit will silently NOT reach
+  live's actual optimizer. Not fixed yet — flagging so it isn't
+  rediscovered from scratch. See Section 5's 2026-11-03 entry.
 - `walkforward.py` — the validated backtest, no-argument script (config
   = module constants, reads `btc_back366.csv`/`eth_back366.csv`).
 - `pyquant_signal_math.py` — Phase 0's shared SL/TP/leverage/
@@ -214,6 +224,77 @@ section only orients a new session to where things stand structurally.
   explicit `end_date` (that means "ran to the latest available data",
   a real resolved value — it now falls back to `bounds.latest_date` and
   computes Test Window from the resolved start/end dates).
+- **Added 2026-11-03 — backtest-vs-live gate diagnostics, "PyQ Insights,"
+  mode-toggle clarification, sticky tables, Bybit planning.** Committed
+  together (see git log around this date); not yet confirmed on a live
+  deploy.
+  - **Backtest-vs-live comparison was previously impossible at the gate
+    level**, not because the shared math differs (it's identical — see
+    `pyquant_signal_math.py`) but because backtest's `generate_signal()`
+    only ever recorded a diagnostic trace on bars where a signal fired;
+    every non-firing bar left no trace to compare against live's
+    continuous per-tick diagnostic history. Fixed by adding
+    `diagnose_gates()` to `walkforward.py` (mirrors `generate_signal()`'s
+    gate math, called every bar regardless of outcome) and a new
+    `pyquant_backtest_diagnostics` table/`record_backtest_diagnostics()`/
+    `get_backtest_diagnostics()`/`get_backtest_diagnostic_at()` in
+    `pyquant_state.py` to persist and nearest-match it. Also found during
+    this investigation: live's `daily_optimizer()` actually runs through
+    `p4_search.py`, a separate undocumented duplicate of the optimizer
+    (see Section 3) — numerically identical today, but a standing-rule
+    violation and latent drift risk, not yet fixed.
+  - New UI: Compare page's "Model State Comparison" card
+    (`ModelStateComparison()` in `pages/compare.js`) — pick a
+    symbol/timestamp/backtest run and see both models' gate state
+    side-by-side for any hour, not just at a trade; backed by new
+    `GET /api/compare/gate-state` (shares a `_nearest_gate_states()`
+    helper with the existing trade-alignment endpoint, which also grew a
+    `run_id` param and a `backtest_diagnostics` field).
+    `RunDetailModal.jsx`'s "Compare to Live" drawer now shows the
+    backtest's own gate state next to live's, instead of just backtest
+    price/PnL next to live's gate state.
+  - **"PyQ Insights"**: `lib/api.js`'s `pyqInsight()`/`pyqInsightTone()`
+    translate a raw gate-diagnostic row into a plain-language line
+    ("Volatility threshold CROSSED... strict entry gate has NOT
+    crossed... waiting for retrace", etc). Surfaced via a new shared
+    `components/GateReadout.jsx` (used by both `RunDetailModal.jsx` and
+    `pages/compare.js`) and a new `PyqInsightsPanel` on
+    `pages/live-monitor.js` (latest-tick explanation + tally by tone),
+    replacing the old chart-with-no-explanation Signal Diagnostics
+    History.
+  - **LIVE/PAPER toggle "stuck on LIVE" is a config/doc gap, not a
+    bug**: `PYQUANT_MODE` must be set as both a Vercel env var (API
+    display) AND a separate GitHub Actions repo variable (what the
+    orchestra actually reads) — see `VERCEL_DEPLOY.md`/
+    `GITHUB_ACTIONS_SETUP.md`. The API never holds credentials, so this
+    toggle is informational display only by design, not a live control
+    — confirmed this is the trust boundary (Section 2) working as
+    intended. Confirmed separately: PAPER mode always constructs the
+    Binance client with `testnet=True` and separate testnet credentials
+    (`p4_utils.py`), never touching mainnet. `ModeSwitch.jsx` now shows
+    an explanatory tooltip on both buttons plus a
+    "SIGNAL-ONLY · NO EXCHANGE CALLS" / "EXCHANGE CALLS ENABLED" badge
+    driven by a new `signal_only_mode` field on `GET`/`POST /api/status`.
+  - **Sticky table headers** added globally (`styles/globals.css`) via a
+    `--sticky-table-top` custom property, 64px on page-level tables
+    (below the fixed topbar) and re-scoped to 0px inside
+    `.modal-overlay`/`.modal-card` (a modal scrolls its own content with
+    no topbar in that context). Verified this correctly nests inside
+    `RunDetailModal.jsx`'s Executed Trades table, which has its own
+    `overflowY: auto` scroll box — `position: sticky` sticks to the
+    nearest scrolling ancestor, so inside that box `top: 0` is the
+    already-correct behavior.
+  - **Executed Trades now defaults to most-recent-first** (was
+    oldest-first, the API's raw `ORDER BY id ASC`), with a sort control
+    for Oldest First / Return % (both directions) / Drawdown Risk. A
+    true per-trade "sort by volatility" was requested but not built:
+    volatility is a per-bar diagnostic, not a per-trade field, so
+    sorting trades by it would mean arbitrarily picking one bar (e.g.
+    entry-tick) per trade — the table instead notes this and points at
+    "Compare to Live" / Model State Comparison for actual gate values.
+  - **Bybit/multi-provider**: planning-only backlog entry added to
+    `PLAN.md` per explicit instruction not to start any code changes
+    yet.
 
 ## 6. What's next
 
@@ -236,6 +317,16 @@ are stable enough to live here rather than churn `PLAN.md`:
   Alpaca/Binance directly — a real architectural change, not routine.
 - Smaller candidates (on-demand `daily_optimizer()` trigger, editable
   settings, per-symbol pause): tracked in `PLAN.md`'s backlog.
+- **`p4_search.py` consolidation** (found 2026-11-03, Section 3/5) —
+  either make `daily_optimizer()` call `walkforward.py`'s own search
+  directly, or have `p4_search.py` import its math constants from
+  `pyquant_signal_math.py` instead of redefining them, so the two
+  can't silently drift. Not urgent (constants match today) but should
+  happen before the next shared-math change.
+- **Bybit / multi-provider support** — planning only so far; see
+  `PLAN.md`'s backlog entry for the full scope (provider abstraction,
+  credential separation, per-symbol exchange selection, cost-model
+  constants, geo-block check). No code changes made toward this.
 
 ## 7. Standing rules (apply without being re-asked)
 

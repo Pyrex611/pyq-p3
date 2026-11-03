@@ -175,6 +175,85 @@ def trades_to_records(all_trades: list, leverage: Optional[float] = None) -> lis
     return out
 
 
+def diagnose_gates(price, pred, high_pred, low_pred, symbol, strict, stricts):
+    """2026-11-03: computes the SAME per-bar gate diagnostics
+    p4_utils.py's SignalGenerator.generate_signal() always populates in
+    self.last_diagnostic (trend, the volatility gate's pct_diff/vol vs.
+    its threshold, the strict entry gate's diff vs. its threshold, and
+    whether each passed) — but for EVERY bar, not only ones that already
+    produced a trade signal. generate_signal() above is unchanged and
+    remains the only thing that decides whether a trade actually fires;
+    this is a read-only, additive computation that exists purely so a
+    backtest run's gate state can be compared hour-by-hour against
+    live's own diagnostics_history (see
+    pyquant_state.record_backtest_diagnostics()) — e.g. to see that at
+    a given hour the backtest's optimized strict/stricts cleared both
+    gates while live's currently-deployed optimal_params didn't, which
+    is the single biggest reason live and backtest can diverge even on
+    identical price/prediction data (see PLAN.md's 2026-11-03
+    "backtest vs. live signal generation" note for the fuller picture,
+    including the separate daily-optimizer code path in p4_search.py).
+
+    Mirrors generate_signal()'s/SignalGenerator's gate math exactly —
+    duplicated rather than refactored into pyquant_signal_math.py in
+    this pass (same standing duplication as generate_signal() itself;
+    see that PLAN.md note) because changing the live trading path's
+    SignalGenerator is out of scope for a diagnostics-only feature.
+    strict/stricts argument order matches generate_signal()'s own."""
+    price, pred = float(price), float(pred)
+    high_pred, low_pred = float(high_pred), float(low_pred)
+    diag = {
+        "symbol": symbol, "price": price, "pred": pred,
+        "trend": None, "stage_reached": "flat", "signal_fired": False,
+        "pct_diff": None, "vol": None, "vol_gate_threshold": float(stricts),
+        "vol_gate_passed": None, "strict_diff": None,
+        "strict_threshold": float(strict), "strict_gate_passed": None,
+    }
+
+    if pred > price:
+        trend = "up"
+        pct_diff = abs(1 - pred / price)
+        vol = abs(1 - high_pred / pred) if pred > 0 else 0
+    elif price > pred:
+        trend = "down"
+        pct_diff = abs(1 - price / pred)
+        vol = abs(1 - pred / low_pred) if low_pred > 0 else 0
+    else:
+        diag["stage_reached"] = "flat_pred_eq_price"
+        return diag
+
+    diag["trend"] = trend
+    vol_gate_passed = (pct_diff <= stricts) or (vol >= stricts)
+    diag.update({
+        "stage_reached": "vol_gate", "pct_diff": float(pct_diff), "vol": float(vol),
+        "vol_gate_passed": bool(vol_gate_passed),
+    })
+    if not vol_gate_passed:
+        return diag
+
+    if trend == "up":
+        buy_price = low_pred
+        strict_diff = abs(1 - pred / buy_price) if buy_price > 0 else None
+        strict_passed = bool(
+            buy_price > 0 and pred > buy_price and strict_diff is not None and strict_diff >= strict
+        )
+    else:
+        sell_price = high_pred
+        strict_diff = abs(1 - sell_price / pred) if (sell_price > 0 and pred != 0) else None
+        strict_passed = bool(
+            sell_price > 0 and sell_price > pred and strict_diff is not None and strict_diff >= strict
+        )
+    diag.update({
+        "stage_reached": "strict_gate",
+        "strict_diff": float(strict_diff) if strict_diff is not None else None,
+        "strict_gate_passed": strict_passed,
+    })
+    if strict_passed:
+        diag["stage_reached"] = "signal_fired"
+        diag["signal_fired"] = True
+    return diag
+
+
 USE_ATR_SL            = True    # ATR-adaptive SL is active
 ATR_PERIOD            = 14
 ATR_SL_RANGE          = (1.0, 3.0)
@@ -647,8 +726,10 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
     previous day's bars for day 2+) purely for ATR lookback continuity.
     They are NEVER used for trading decisions — only compute_atr() sees them.
 
-    Returns: (final_equity, trades_list, equity_trace, in_b, pos_b, in_e, pos_e)
-    The last four are the carry-forward state for the next call.
+    Returns: (final_equity, trades_list, equity_trace, in_b, pos_b, in_e,
+    pos_e, diagnostics). in_b/pos_b/in_e/pos_e are the carry-forward
+    state for the next call; diagnostics is one gate-diagnostic dict per
+    bar per symbol (2026-11-03 — see diagnose_gates()).
     """
     pos_b = dict(pos_b) if pos_b else {}
     pos_e = dict(pos_e) if pos_e else {}
@@ -668,6 +749,10 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
 
     trades = []
     equity_trace = []
+    # 2026-11-03: one row per bar per symbol — see diagnose_gates()'s
+    # docstring for why this exists and what it never affects (trading
+    # decisions are unchanged; this only records them).
+    diagnostics = []
 
     for idx in range(len(btc_day)):
         row_b = btc_day.iloc[idx]; row_e = eth_day.iloc[idx]
@@ -773,6 +858,18 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
                                   se, ses, atr=atr_e, atr_mult=atr_mult)
                   if not in_e else None)
 
+        # Gate diagnostics for EVERY bar (not just ones with a fired
+        # signal) — see diagnose_gates()'s docstring. Computed even while
+        # a position is already open (in_b/in_e True), matching live's
+        # SignalGenerator, which also always evaluates and records gate
+        # state regardless of whether a new entry could even be taken.
+        diag_b = diagnose_gates(pb, pred_b, hp_b, lp_b, 'BTC', sb, sbs)
+        diag_b["ts"] = ts
+        diagnostics.append(diag_b)
+        diag_e = diagnose_gates(pe, pred_e, hp_e, lp_e, 'ETH', se, ses)
+        diag_e["ts"] = ts
+        diagnostics.append(diag_e)
+
         # FIX 1 — reject unfillable Limit entries
         if sig_b and not is_fillable(sig_b['entry_price'], lb, hb):
             print(f"  [SKIPPED]    {ts} | BTC {sig_b['order_side']} limit "
@@ -845,7 +942,7 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
 
     # NO EOD FORCE CLOSE (FIX 5). Whatever is open at the end of this day's
     # bars simply carries into the next call via the returned state.
-    return equity, trades, equity_trace, in_b, pos_b, in_e, pos_e
+    return equity, trades, equity_trace, in_b, pos_b, in_e, pos_e, diagnostics
 
 # ════════════════════════════════════════════════════════╗
 # SECTION 9 — METRICS
@@ -1124,11 +1221,12 @@ def run_walk_forward():
     print(f"\n  Total bars: {n_bars} (~{n_bars//24} days) | "
           f"Test window: bars {start_bar}-{n_bars-1}\n")
 
-    capital       = INITIAL_CAPITAL
-    capital_curve = [capital]
-    all_trades    = []
-    params_log    = []
-    prev_params   = None
+    capital        = INITIAL_CAPITAL
+    capital_curve  = [capital]
+    all_trades     = []
+    all_diagnostics = []  # 2026-11-03 — see diagnose_gates()
+    params_log     = []
+    prev_params    = None
 
     # FIX 5 — position state persists across the day loop instead of being
     # force-closed and reset every iteration.
@@ -1231,7 +1329,7 @@ def run_walk_forward():
         # as it was going in) instead of crashing the entire run.
         try:
             (final_cap, day_trades, day_equity_trace,
-             in_b, pos_b, in_e, pos_e) = paper_trade_day(
+             in_b, pos_b, in_e, pos_e, day_diagnostics) = paper_trade_day(
                 btc_test, eth_test, btc_filters, eth_filters,
                 current_params, capital, LEVERAGE,
                 in_b=in_b, pos_b=pos_b, in_e=in_e, pos_e=pos_e,
@@ -1251,6 +1349,7 @@ def run_walk_forward():
             padded = day_equity_trace + [capital] * (bars_per_day - len(day_equity_trace))
             capital_curve.extend(padded[:bars_per_day])
         all_trades.extend(day_trades)
+        all_diagnostics.extend(day_diagnostics)
 
         # Track last known prices for the final force-close after the loop
         last_btc_close = btc_test.iloc[-1]['close']
@@ -1340,6 +1439,9 @@ def run_walk_forward():
                 # docstring — same non-fatal treatment as the trades call
                 # just above.
                 state_store.record_capital_curve(new_run_id, capital_curve)
+                # 2026-11-03: see pyquant_state.record_backtest_diagnostics()
+                # — same non-fatal treatment.
+                state_store.record_backtest_diagnostics(new_run_id, all_diagnostics)
         except Exception as e:
             print(f"  (non-fatal) run logging failed: {e}")
 
@@ -1352,7 +1454,7 @@ def run_walk_forward():
     if ENABLE_PLOTTING:
         plot_results(capital_curve, all_trades, params_log, INITIAL_CAPITAL)
 
-    return metrics, all_trades, capital_curve, params_log
+    return metrics, all_trades, capital_curve, params_log, all_diagnostics
 
 
 if __name__ == '__main__':

@@ -297,6 +297,49 @@ def _bootstrap_postgres(conn) -> None:
             "ON pyquant_diagnostics_history(symbol, ts DESC)"
         )
 
+        # 2026-11-03 — the backtest-side counterpart to
+        # pyquant_diagnostics_history above: one row per bar per symbol
+        # for a given run_id, with the SAME gate-diagnostic columns
+        # (minus `error`, which walkforward.py's diagnose_gates() never
+        # sets), computed by diagnose_gates() for every bar regardless
+        # of whether a trade fired. Lets the Compare page/trade
+        # drill-down show, hour by hour, whether the backtest's
+        # optimized strict/stricts cleared the same gates live's
+        # currently-deployed optimal_params did — the main thing that
+        # explains "why didn't live fire when backtest did" (see
+        # PLAN.md's 2026-11-03 note). `ts` here is the bar's real
+        # historical timestamp (from the CSV), not a write-time
+        # timestamp, so it lines up directly with
+        # pyquant_diagnostics_history.ts for the same historical hour
+        # if live happened to be running then, or just stands on its
+        # own as the backtest's hour-by-hour trace otherwise.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pyquant_backtest_diagnostics (
+                id                  SERIAL PRIMARY KEY,
+                run_id              INTEGER NOT NULL REFERENCES pyquant_runs(id) ON DELETE CASCADE,
+                symbol              TEXT NOT NULL,
+                ts                  TIMESTAMPTZ NOT NULL,
+                stage_reached       TEXT,
+                signal_fired        BOOLEAN,
+                trend               TEXT,
+                price               DOUBLE PRECISION,
+                pred                DOUBLE PRECISION,
+                pct_diff            DOUBLE PRECISION,
+                vol                 DOUBLE PRECISION,
+                vol_gate_threshold  DOUBLE PRECISION,
+                vol_gate_passed     BOOLEAN,
+                strict_diff         DOUBLE PRECISION,
+                strict_threshold    DOUBLE PRECISION,
+                strict_gate_passed  BOOLEAN
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS pyquant_backtest_diagnostics_run_symbol_ts_idx "
+            "ON pyquant_backtest_diagnostics(run_id, symbol, ts)"
+        )
+
 
 @contextmanager
 def _sqlite_conn():
@@ -376,6 +419,22 @@ def _sqlite_conn():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS pyquant_diagnostics_history_symbol_ts_idx "
             "ON pyquant_diagnostics_history(symbol, ts DESC)"
+        )
+
+        # 2026-11-03 — see the matching Postgres CREATE TABLE above for the
+        # full rationale (backtest-side per-bar gate diagnostics).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pyquant_backtest_diagnostics ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  run_id INTEGER NOT NULL, symbol TEXT NOT NULL, ts TEXT NOT NULL,"
+            "  stage_reached TEXT, signal_fired INTEGER, trend TEXT,"
+            "  price REAL, pred REAL, pct_diff REAL, vol REAL,"
+            "  vol_gate_threshold REAL, vol_gate_passed INTEGER,"
+            "  strict_diff REAL, strict_threshold REAL, strict_gate_passed INTEGER)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pyquant_backtest_diagnostics_run_symbol_ts_idx "
+            "ON pyquant_backtest_diagnostics(run_id, symbol, ts)"
         )
         yield conn
         conn.commit()
@@ -887,6 +946,109 @@ def get_capital_curve(run_id: int) -> list:
             return json.loads(row[0]) if row else []
     except Exception:
         return []
+
+
+_BACKTEST_DIAG_COLS = [
+    "symbol", "ts", "stage_reached", "signal_fired", "trend", "price", "pred",
+    "pct_diff", "vol", "vol_gate_threshold", "vol_gate_passed",
+    "strict_diff", "strict_threshold", "strict_gate_passed",
+]
+
+
+def record_backtest_diagnostics(run_id: int, diagnostics: list) -> int:
+    """Persists per-bar gate diagnostics for one backtest run (2026-11-03)
+    — see pyquant_backtest_diagnostics' CREATE TABLE comment. Same
+    per-row-insert resilience as record_backtest_trades() (one bad row
+    skipped and logged, not the whole batch) for the same reason: this
+    can be thousands of rows for a long run, and a single bad one must
+    never silently drop the rest."""
+    if not diagnostics:
+        return 0
+    rows = [
+        tuple(_clean_val(run_id if c == "run_id" else d.get(c)) for c in ["run_id"] + _BACKTEST_DIAG_COLS)
+        for d in diagnostics
+    ]
+    cols = ["run_id"] + _BACKTEST_DIAG_COLS
+    import logging
+    log = logging.getLogger("pyquant.state")
+    inserted = 0
+    try:
+        if _using_postgres():
+            placeholders = ",".join(["%s"] * len(cols))
+            sql = f"INSERT INTO pyquant_backtest_diagnostics ({','.join(cols)}) VALUES ({placeholders})"
+            with _pg_conn().cursor() as cur:
+                for row in rows:
+                    try:
+                        cur.execute(sql, row)
+                        inserted += 1
+                    except Exception as e:
+                        log.error(f"record_backtest_diagnostics: skipped one row for run {run_id}: {e}")
+        else:
+            placeholders = ",".join(["?"] * len(cols))
+            sql = f"INSERT INTO pyquant_backtest_diagnostics ({','.join(cols)}) VALUES ({placeholders})"
+            with _lock, _sqlite_conn() as conn:
+                for row in rows:
+                    try:
+                        conn.execute(sql, row)
+                        inserted += 1
+                    except Exception as e:
+                        log.error(f"record_backtest_diagnostics: skipped one row for run {run_id}: {e}")
+    except Exception as e:
+        log.error(f"record_backtest_diagnostics: failed for run {run_id}: {e}")
+    return inserted
+
+
+def get_backtest_diagnostics(run_id: int, symbol: Optional[str] = None) -> list[dict]:
+    """Returns every persisted gate-diagnostic row for one backtest run,
+    oldest first, optionally filtered to one symbol. Powers the Compare
+    page's / RunDetailModal's backtest-vs-live gate comparison."""
+    cols = ["id", "run_id"] + _BACKTEST_DIAG_COLS
+    where, params = " WHERE run_id = " + ("%s" if _using_postgres() else "?"), [run_id]
+    if symbol:
+        where += " AND symbol = " + ("%s" if _using_postgres() else "?")
+        params.append(symbol)
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(
+                    f"SELECT {','.join(cols)} FROM pyquant_backtest_diagnostics{where} ORDER BY ts ASC",
+                    params,
+                )
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in cur.fetchall()]
+        with _lock, _sqlite_conn() as conn:
+            rows = conn.execute(
+                f"SELECT {','.join(cols)} FROM pyquant_backtest_diagnostics{where} ORDER BY ts ASC",
+                params,
+            ).fetchall()
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in rows]
+    except Exception:
+        return []
+
+
+def get_backtest_diagnostic_at(run_id: int, symbol: str, ts: str, window_seconds: int = 5400) -> Optional[dict]:
+    """Returns the backtest diagnostic row closest to `ts` for one run +
+    symbol, within `window_seconds` (default ±90m, matching
+    compute_comparison_buckets()'s/trade-alignment's existing live-side
+    window) — the backtest-side counterpart that lets a trade
+    drill-down show BOTH models' gate state for the same historical
+    hour, not just live's."""
+    rows = get_backtest_diagnostics(run_id, symbol=symbol)
+    if not rows or not ts:
+        return None
+    try:
+        target = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    best, best_delta = None, None
+    for r in rows:
+        try:
+            rt = datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        delta = abs((rt - target).total_seconds())
+        if delta <= window_seconds and (best_delta is None or delta < best_delta):
+            best, best_delta = r, delta
+    return best
 
 
 _DIAG_HISTORY_COLS = [

@@ -165,7 +165,7 @@ def main() -> None:
         )
 
         print("[run_backtest] Calling walkforward.run_walk_forward()…", flush=True)
-        metrics, all_trades, capital_curve, params_log = walkforward.run_walk_forward()
+        metrics, all_trades, capital_curve, params_log, all_diagnostics = walkforward.run_walk_forward()
         metrics_dict = dict(zip(metrics["Metric"], metrics["Value"])) if not metrics.empty else {}
         metrics_dict["trade_count"] = len(all_trades)
         metrics_dict["source"] = "kaggle_manual" if is_manual_trigger else "kaggle_auto"
@@ -189,6 +189,14 @@ def main() -> None:
             print(f"[run_backtest] Capital curve ({len(capital_curve)} points) persisted: {ok}", flush=True)
         except Exception as e:
             print(f"[run_backtest] (non-fatal) capital curve logging failed: {e}", flush=True)
+
+        # 2026-11-03: see run_backtest_gha.py's matching comment /
+        # pyquant_state.record_backtest_diagnostics()'s docstring.
+        try:
+            n = state_store.record_backtest_diagnostics(run_id, all_diagnostics)
+            print(f"[run_backtest] Persisted {n}/{len(all_diagnostics)} diagnostic rows for run {run_id}.", flush=True)
+        except Exception as e:
+            print(f"[run_backtest] (non-fatal) diagnostics logging failed: {e}", flush=True)
 
         state_store.update_run_status(run_id, "completed", metrics=metrics_dict)
         print(f"[run_backtest] run {run_id} completed: {metrics_dict}", flush=True)

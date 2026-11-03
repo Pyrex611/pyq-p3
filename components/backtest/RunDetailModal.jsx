@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from "react";
 import EquityCurveChart from "../EquityCurveChart";
 import { apiGet, fmtMoney, fmtPct, fmtPrice, fmtTime, pnlClass } from "../../lib/api";
+import GateReadout from "../GateReadout";
 
 function formatHoldDuration(entryTs, exitTs) {
   if (!entryTs || !exitTs) return "—";
@@ -17,16 +18,23 @@ function formatHoldDuration(entryTs, exitTs) {
   }
 }
 
-function calculateTradeDrawdown(tr) {
-  if (!tr.entry_price || !tr.sl_price) return "—";
+// Numeric form of the same calc as calculateTradeDrawdown() below, so the
+// sort control (2026-11-03) can rank trades by drawdown risk without
+// re-parsing the formatted "-X.XX%" string.
+function tradeDrawdownPct(tr) {
+  if (!tr.entry_price || !tr.sl_price) return null;
   try {
     const isBuy = (tr.side || "").toUpperCase().startsWith("B");
     const diff = isBuy ? tr.entry_price - tr.sl_price : tr.sl_price - tr.entry_price;
-    const maxLossRisk = (diff / tr.entry_price) * 100;
-    return `-${Math.abs(maxLossRisk).toFixed(2)}%`;
+    return Math.abs((diff / tr.entry_price) * 100);
   } catch {
-    return "—";
+    return null;
   }
+}
+
+function calculateTradeDrawdown(tr) {
+  const pct = tradeDrawdownPct(tr);
+  return pct === null ? "—" : `-${pct.toFixed(2)}%`;
 }
 
 function calculateExecutionDuration(startedAt, finishedAt) {
@@ -47,6 +55,34 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
   const [modalView, setModalView] = useState("overview"); // 'overview' | 'trades'
   const [alignedTrade, setAlignedTrade] = useState(null);
   const [alignLoading, setAlignLoading] = useState(false);
+  // 2026-11-03: Executed Trades sort control. Defaults to most-recent-first
+  // per explicit request (the API returns rows oldest-first, ORDER BY id ASC,
+  // which is the right order for backtest replay but the wrong one to read).
+  const [tradeSort, setTradeSort] = useState("recent");
+
+  const sortedTrades = useMemo(() => {
+    const trades = modal?.trades || [];
+    const arr = [...trades];
+    switch (tradeSort) {
+      case "oldest":
+        arr.sort((a, b) => new Date(a.entry_ts) - new Date(b.entry_ts));
+        break;
+      case "return_desc":
+        arr.sort((a, b) => (b.pnl_pct ?? -Infinity) - (a.pnl_pct ?? -Infinity));
+        break;
+      case "return_asc":
+        arr.sort((a, b) => (a.pnl_pct ?? Infinity) - (b.pnl_pct ?? Infinity));
+        break;
+      case "drawdown_desc":
+        arr.sort((a, b) => (tradeDrawdownPct(b) ?? -Infinity) - (tradeDrawdownPct(a) ?? -Infinity));
+        break;
+      case "recent":
+      default:
+        arr.sort((a, b) => new Date(b.entry_ts) - new Date(a.entry_ts));
+        break;
+    }
+    return arr;
+  }, [modal?.trades, tradeSort]);
 
   async function compareTradeToLive(tr) {
     if (alignedTrade?.tradeId === tr.id) {
@@ -59,6 +95,7 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
       const res = await apiGet("/compare/trade-alignment", {
         symbol: tr.symbol,
         timestamp: tr.entry_ts,
+        run_id: modal.runId,
       });
       setAlignedTrade({ tradeId: tr.id, loading: false, data: res });
     } catch (err) {
@@ -243,10 +280,35 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
 
             {modalView === "trades" && (
               <div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
                   <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
                     Total Executions: {modal.trades?.length || 0} Trades | Click &quot;Compare to Live&quot; on any trade to inspect model decisions
                   </span>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)" }}>
+                    Sort by
+                    <select
+                      className="dropdown-select"
+                      value={tradeSort}
+                      onChange={(e) => setTradeSort(e.target.value)}
+                      style={{ padding: "4px 8px", fontSize: 12 }}
+                    >
+                      <option value="recent">Most Recent First</option>
+                      <option value="oldest">Oldest First</option>
+                      <option value="return_desc">Return % (High → Low)</option>
+                      <option value="return_asc">Return % (Low → High)</option>
+                      <option value="drawdown_desc">Drawdown Risk (High → Low)</option>
+                    </select>
+                  </label>
+                </div>
+                {/* 2026-11-03: volatility was requested as a filter dimension too, but
+                    it isn't a per-trade field — it's a per-bar diagnostic
+                    (pyquant_backtest_diagnostics), sampled continuously, not just at
+                    entry. Sorting trades by it would mean picking one arbitrary bar
+                    (e.g. entry-tick) per trade, which could be misleading. Use
+                    "Compare to Live" on a trade below, or the Compare page's Model
+                    State Comparison, to see a trade's actual vol/strict gate state. */}
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginBottom: 8 }}>
+                  No volatility column here — volatility is a per-bar gate reading, not a per-trade value. Use &quot;Compare to Live&quot; on a trade to see its vol/strict gate state at entry.
                 </div>
 
                 {modal.trades && modal.trades.length > 0 ? (
@@ -266,7 +328,7 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
                         </tr>
                       </thead>
                       <tbody>
-                        {modal.trades.map((tr, idx) => {
+                        {sortedTrades.map((tr, idx) => {
                           const isSelected = alignedTrade?.tradeId === (tr.id || idx);
                           return (
                             <React.Fragment key={tr.id || idx}>
@@ -313,63 +375,52 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
                                       )}
 
                                       {alignedTrade.data && (
-                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                                          <div>
-                                            <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 4 }}>
-                                              Simulated Backtest Trade
+                                        <>
+                                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+                                            <div>
+                                              <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 4 }}>
+                                                Backtest Model — Executed Trade
+                                              </div>
+                                              <div>Entry Price: <span className="mono">{fmtPrice(tr.entry_price)}</span></div>
+                                              <div>Exit Price: <span className="mono">{fmtPrice(tr.exit_price)}</span></div>
+                                              <div>Stop Loss: <span className="mono">{fmtPrice(tr.sl_price)}</span></div>
+                                              <div>Take Profit: <span className="mono">{fmtPrice(tr.tp_price)}</span></div>
+                                              <div>Realized Return: <span className={`mono ${pnlClass(tr.pnl_pct)}`}>{fmtPct(tr.pnl_pct)}</span></div>
+                                              {/* 2026-11-03: the backtest's OWN gate state at this bar — see
+                                                  pyquant_state.record_backtest_diagnostics(). Previously this
+                                                  column showed nothing but price/PnL, so there was no way to see
+                                                  WHY the backtest fired here beyond "it did" — now it shows the
+                                                  same vol/strict gate numbers live's column does, for a real
+                                                  apples-to-apples comparison. */}
+                                              <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px dashed var(--border)" }}>
+                                                <GateReadout diag={alignedTrade.data.backtest_diagnostics} />
+                                              </div>
                                             </div>
-                                            <div>Entry Price: <span className="mono">{fmtPrice(tr.entry_price)}</span></div>
-                                            <div>Exit Price: <span className="mono">{fmtPrice(tr.exit_price)}</span></div>
-                                            <div>Stop Loss: <span className="mono">{fmtPrice(tr.sl_price)}</span></div>
-                                            <div>Take Profit: <span className="mono">{fmtPrice(tr.tp_price)}</span></div>
-                                            <div>Realized Return: <span className={`mono ${pnlClass(tr.pnl_pct)}`}>{fmtPct(tr.pnl_pct)}</span></div>
+
+                                            <div>
+                                              <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 4 }}>
+                                                Live Engine — Evaluated Tick
+                                              </div>
+                                              <GateReadout diag={alignedTrade.data.live_diagnostics} />
+
+                                              {alignedTrade.data.live_signal && (
+                                                <div style={{ marginTop: 6, borderTop: "1px dashed var(--border)", paddingTop: 4 }}>
+                                                  Matching Live Signal #{alignedTrade.data.live_signal.id}:{" "}
+                                                  <span className="mono">{alignedTrade.data.live_signal.side} @ {fmtPrice(alignedTrade.data.live_signal.entry_price)}</span>{" "}
+                                                  ({fmtPct(alignedTrade.data.live_signal.realized_pnl_pct)})
+                                                </div>
+                                              )}
+                                            </div>
                                           </div>
 
-                                          <div>
-                                            <div style={{ color: "var(--text-faint)", fontSize: 10, textTransform: "uppercase", marginBottom: 4 }}>
-                                              Live Engine Telemetry (Evaluated Tick)
+                                          {alignedTrade.data.backtest_diagnostics && !alignedTrade.data.live_diagnostics?.signal_fired && (
+                                            <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--accent-secondary)" }}>
+                                              {alignedTrade.data.backtest_diagnostics.signal_fired
+                                                ? "The backtest fired here; live's own gate state at this hour did not — the gap above is why."
+                                                : "Neither model's recorded gate state shows a clean fire at this exact tick — the backtest trade may have been decided on an adjacent bar."}
                                             </div>
-                                            {alignedTrade.data.live_diagnostics ? (
-                                              <>
-                                                <div>Trend Decision: <span className="mono">{alignedTrade.data.live_diagnostics.trend?.toUpperCase()}</span></div>
-                                                <div>
-                                                  Vol Gate:{" "}
-                                                  <span style={{ color: alignedTrade.data.live_diagnostics.vol_gate_passed ? "var(--green)" : "var(--amber)" }}>
-                                                    {alignedTrade.data.live_diagnostics.vol_gate_passed ? "PASSED" : "BLOCKED"}
-                                                  </span>{" "}
-                                                  ({((alignedTrade.data.live_diagnostics.pct_diff || 0) * 100).toFixed(3)}% vs{" "}
-                                                  {((alignedTrade.data.live_diagnostics.vol_gate_threshold || 0) * 100).toFixed(3)}%)
-                                                </div>
-                                                <div>
-                                                  Strict Entry Gate:{" "}
-                                                  <span style={{ color: alignedTrade.data.live_diagnostics.strict_gate_passed ? "var(--green)" : "var(--amber)" }}>
-                                                    {alignedTrade.data.live_diagnostics.strict_gate_passed ? "PASSED" : "BLOCKED"}
-                                                  </span>{" "}
-                                                  ({((alignedTrade.data.live_diagnostics.strict_diff || 0) * 100).toFixed(3)}% vs{" "}
-                                                  {((alignedTrade.data.live_diagnostics.strict_threshold || 0) * 100).toFixed(3)}%)
-                                                </div>
-                                                <div>
-                                                  Live Signal Fired:{" "}
-                                                  <span style={{ fontWeight: 600, color: alignedTrade.data.live_diagnostics.signal_fired ? "var(--green)" : "var(--text-faint)" }}>
-                                                    {alignedTrade.data.live_diagnostics.signal_fired ? "YES" : "NO"}
-                                                  </span>
-                                                </div>
-                                              </>
-                                            ) : (
-                                              <div style={{ color: "var(--text-muted)" }}>
-                                                No live diagnostic record within 90m window of this historical trade.
-                                              </div>
-                                            )}
-
-                                            {alignedTrade.data.live_signal && (
-                                              <div style={{ marginTop: 6, borderTop: "1px dashed var(--border)", paddingTop: 4 }}>
-                                                Matching Live Signal #{alignedTrade.data.live_signal.id}:{" "}
-                                                <span className="mono">{alignedTrade.data.live_signal.side} @ {fmtPrice(alignedTrade.data.live_signal.entry_price)}</span>{" "}
-                                                ({fmtPct(alignedTrade.data.live_signal.realized_pnl_pct)})
-                                              </div>
-                                            )}
-                                          </div>
-                                        </div>
+                                          )}
+                                        </>
                                       )}
                                     </div>
                                   </td>
