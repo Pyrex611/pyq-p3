@@ -50,6 +50,9 @@ export default function Settings() {
   const [sigSourceError, setSigSourceError] = useState(null);
   const [sigSourceBusy, setSigSourceBusy] = useState(false);
   const [sigSourceWarning, setSigSourceWarning] = useState(null);
+  const [trigger, setTrigger] = useState(null);
+  const [triggerError, setTriggerError] = useState(null);
+  const [triggerBusy, setTriggerBusy] = useState(false);
 
   useEffect(() => {
     try {
@@ -86,10 +89,21 @@ export default function Settings() {
     }
   }
 
+  async function loadTrigger() {
+    try {
+      const d = await apiGet("/optimizer/trigger");
+      setTrigger(d);
+      setTriggerError(null);
+    } catch (e) {
+      setTriggerError(e.message);
+    }
+  }
+
   useEffect(() => {
     apiGet("/config").then(setCfg).catch((e) => setCfgError(e.message));
     loadBaseline();
     loadSigSource();
+    loadTrigger();
   }, []);
 
   async function updateSigSource(patch) {
@@ -103,6 +117,25 @@ export default function Settings() {
       alert("Could not update signal source settings: " + e.message);
     } finally {
       setSigSourceBusy(false);
+    }
+  }
+
+  async function runOptimizerNow(which) {
+    const label = which === "both" ? "BOTH optimizers" : which.toUpperCase();
+    if (!confirm(
+      `Queue ${label} to run on the next cron tick (within ~5 minutes)?` +
+      (which === "both"
+        ? " They will run on two separate ticks, never together, so this takes up to ~10 minutes total."
+        : "")
+    )) return;
+    setTriggerBusy(true);
+    try {
+      await apiPost("/optimizer/trigger", { which });
+      await loadTrigger();
+    } catch (e) {
+      alert("Could not queue the optimizer run: " + e.message);
+    } finally {
+      setTriggerBusy(false);
     }
   }
 
@@ -218,12 +251,51 @@ export default function Settings() {
             </div>
             <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
               Turning shadow comparison ON makes the daily optimizer also run walkforward.py&apos;s own
-              search every night (own run-guard, own timeout handling — see PLAN.md&apos;s 2026-11-03 note).
-              Until it has completed at least once, switching live trading to WALKFORWARD has no effect —
-              SignalGenerator.load_params() falls back to P4_SEARCH&apos;s params rather than trade on
-              nothing. Both sources&apos; gate readings, once available, show up tagged on the Live
-              Monitor/Compare pages so you can see which one tracks the backtest more closely.
+              search every night, staggered to ~01:30 UTC (30 min after the real optimizer&apos;s own
+              ~01:00 UTC run — own run-guard each, never sharing one GitHub Actions job; see PLAN.md&apos;s
+              2026-11-04 note). Until it has completed at least once, switching live trading to WALKFORWARD
+              has no effect — SignalGenerator.load_params() falls back to P4_SEARCH&apos;s params rather
+              than trade on nothing. Both sources&apos; gate readings, once available, show up tagged on
+              the Live Monitor/Compare pages so you can see which one tracks the backtest more closely.
             </p>
+
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
+              <div className="stat-label" style={{ marginBottom: 8 }}>Run Optimizer Now</div>
+              {triggerError && <div className="banner error">Could not load ({triggerError}).</div>}
+              {trigger && (
+                <>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                    <button type="button" className="btn" disabled={triggerBusy} onClick={() => runOptimizerNow("p4_search")}>
+                      Run P4_SEARCH Now
+                    </button>
+                    <button type="button" className="btn" disabled={triggerBusy} onClick={() => runOptimizerNow("walkforward")}>
+                      Run WALKFORWARD Now
+                    </button>
+                    <button type="button" className="btn" disabled={triggerBusy} onClick={() => runOptimizerNow("both")}>
+                      Run Both Now
+                    </button>
+                  </div>
+                  <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6 }}>
+                    <div>
+                      P4_SEARCH: {trigger.pending?.p4_search ? "queued — runs within ~5 min" :
+                        trigger.last_run?.p4_search ? `last ran ${fmtTime(trigger.last_run.p4_search.finished_at || trigger.last_run.p4_search.started_at)}` :
+                        "no run recorded yet"}
+                    </div>
+                    <div>
+                      WALKFORWARD: {trigger.pending?.walkforward ? "queued — runs within ~5 min" :
+                        trigger.last_run?.walkforward ? `last ran ${fmtTime(trigger.last_run.walkforward.finished_at || trigger.last_run.walkforward.started_at)}` :
+                        "no run recorded yet"}
+                    </div>
+                  </div>
+                </>
+              )}
+              <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
+                Each manual run is an EXTRA run, on top of (not instead of) the normal automatic schedule
+                above — it won&apos;t stop tonight&apos;s scheduled run from also happening. Requesting
+                &quot;Both&quot; queues them one tick apart (~5 min) rather than together, for the same
+                timeout-safety reason the automatic schedule staggers them by 30 minutes.
+              </p>
+            </div>
           </>
         )}
       </div>

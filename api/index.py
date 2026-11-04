@@ -258,6 +258,61 @@ def set_signal_source(body: SignalSourceSettings):
     }
 
 
+class OptimizerTriggerRequest(BaseModel):
+    """2026-11-04 — POST /api/optimizer/trigger body. `which` picks
+    which optimizer(s) to run on the NEXT cron tick (~5 min, GitHub
+    Actions' */5 * * * * schedule — this API never runs the optimizer
+    itself; it only sets a flag the orchestra reads, same pattern as
+    trading_enabled). Requesting 'both' queues both, but
+    p4_orchestra.py's _run_pending_manual_optimizer() runs at most ONE
+    of them per tick — the other follows on the tick after, never
+    back-to-back in the same process (see that function's docstring
+    for the 10-minute-timeout reasoning)."""
+    which: str  # "p4_search" | "walkforward" | "both"
+
+
+@app.get("/api/optimizer/trigger")
+def get_optimizer_trigger():
+    """Current pending manual-trigger flags plus each optimizer's most
+    recent run (any trigger), so the Settings page can show "last ran
+    at X" / "queued, runs within ~5 min" without a second round trip."""
+    pending = state_store.get_json("manual_optimizer_request") or {}
+    p4_runs = state_store.list_runs(run_type="daily_optimizer", limit=1)
+    wf_runs = state_store.list_runs(run_type="shadow_optimizer", limit=1)
+    return {
+        "pending": {
+            "p4_search": bool(pending.get("p4_search")),
+            "walkforward": bool(pending.get("walkforward")),
+        },
+        "last_run": {
+            "p4_search": p4_runs[0] if p4_runs else None,
+            "walkforward": wf_runs[0] if wf_runs else None,
+        },
+    }
+
+
+@app.post("/api/optimizer/trigger")
+def post_optimizer_trigger(body: OptimizerTriggerRequest):
+    if body.which not in ("p4_search", "walkforward", "both"):
+        raise HTTPException(status_code=400, detail="which must be 'p4_search', 'walkforward', or 'both'")
+    pending = state_store.get_json("manual_optimizer_request") or {}
+    if body.which in ("p4_search", "both"):
+        pending["p4_search"] = True
+    if body.which in ("walkforward", "both"):
+        pending["walkforward"] = True
+    state_store.set_json("manual_optimizer_request", pending)
+    return {
+        "queued": body.which,
+        "pending": {
+            "p4_search": bool(pending.get("p4_search")),
+            "walkforward": bool(pending.get("walkforward")),
+        },
+        "note": ("Runs on the next GitHub Actions cron tick (~5 min). If 'both' was "
+                 "requested, they run on two separate ticks, never together — see "
+                 "p4_orchestra.py's _run_pending_manual_optimizer()."),
+    }
+
+
 @app.get("/api/config")
 def get_config():
     """

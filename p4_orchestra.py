@@ -2,7 +2,14 @@
 p4_orchestra.py
 Master scheduler for pyq_p4. Run directly (`python3 p4_orchestra.py`) on a
 continuously-running host (the VPS path — see VPS_SETUP.md), it schedules:
-  - daily_optimizer at 00:03 (data refresh + Bayesian parameter search + UKF re-anchoring)
+  - daily_optimizer at 00:03 — internally: UKF re-anchor fires immediately;
+    the real (p4_search) param search waits until >=01:00 UTC; the
+    optional shadow (walkforward) param search waits until >=01:30 UTC —
+    staggered (2026-11-04) so the two heavy searches never share one
+    process/job (10-minute GitHub Actions timeout risk — see
+    _run_daily_param_search()'s docstring). A pending manual "Run
+    Optimizer Now" request (Settings page) pre-empts this schedule and
+    runs on the very next tick instead, at most one optimizer per tick.
   - hourly_task at :02 past the hour
   - fifteen_minute_task at :00, :15, :30, :45
   - five_minute_task at 5-minute intervals
@@ -64,8 +71,85 @@ def daily_optimizer():
     # show real pass/fail status instead of requiring a GitHub Actions
     # log dig every time this is in doubt.
     _run_daily_ukf_retrain()
-    _run_daily_param_search()
-    _run_shadow_param_search()
+    # 2026-11-04 (manual trigger + staggered scheduling): a pending
+    # "Run Optimizer Now" request from the Settings page (see
+    # _run_pending_manual_optimizer()'s docstring) takes priority over
+    # the normal clock-gated schedule below, and runs AT MOST ONE heavy
+    # optimizer this tick even if both were requested together — never
+    # both back-to-back in the same process/job. When nothing manual is
+    # pending, fall through to the normal automatic schedule, which is
+    # now staggered across separate ticks by clock time rather than
+    # relying on "first finishes, then second starts" within one call:
+    # _run_daily_param_search() only proceeds at/after 01:00 UTC,
+    # _run_shadow_param_search() at/after 01:30 UTC — each gets its own
+    # cron invocation's full 10-minute GitHub Actions budget instead of
+    # sharing one.
+    if not _run_pending_manual_optimizer():
+        _run_daily_param_search()
+        _run_shadow_param_search()
+
+
+def _past_utc_clock(hour: int, minute: int = 0, now: datetime = None) -> bool:
+    """2026-11-04: the staggering gate for the two heavy optimizers
+    below — `now` defaults to the real current time; only ever passed
+    explicitly by a test. Checked BEFORE try_claim_run() so an early
+    tick doesn't consume the day's claim before the clock is actually
+    right; the function just returns and the next tick (5 min later)
+    checks again."""
+    now = now or datetime.now(timezone.utc)
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+def _run_pending_manual_optimizer() -> bool:
+    """2026-11-04 (manual "Run Optimizer Now" trigger) — checks the
+    `manual_optimizer_request` kv flag (set by POST /api/optimizer/
+    trigger, Settings page) and, if anything is pending, runs AT MOST
+    ONE of the two heavy optimizers this tick — p4_search checked
+    first. Returns True if it ran something (the caller then skips the
+    normal automatic schedule entirely for this tick).
+
+    "At most one" is deliberate: a "run both now" click sets both
+    flags at once, and running them back-to-back in the same process
+    would reintroduce exactly the 10-minute GitHub Actions timeout risk
+    the 01:00/01:30 UTC staggering below exists to avoid. The second
+    flag, if any, simply stays pending and fires on the NEXT cron tick
+    (~5 minutes later) instead — still both "now" by any human
+    standard, just not the same process.
+
+    A manual run bypasses BOTH the clock gate and the day-bucket guard
+    (it claims its own unique bucket, via `manual=True` below) and, for
+    the shadow optimizer, the `shadow_comparison_enabled` toggle too —
+    wanting one data point right now is a reasonable thing to ask for
+    even without committing to the standing nightly cadence. It does
+    NOT, however, prevent the normal automatic run from also happening
+    later that day at its own scheduled time — a manual run is treated
+    as an extra one-off, not a substitute for the day's claim."""
+    pending = state_store.get_json("manual_optimizer_request") or {}
+    if pending.get("p4_search"):
+        _clear_manual_optimizer_flag("p4_search")
+        print("[Orchestra] Manual trigger: running p4_search optimizer now…")
+        _run_daily_param_search(manual=True)
+        return True
+    if pending.get("walkforward"):
+        _clear_manual_optimizer_flag("walkforward")
+        print("[Orchestra] Manual trigger: running walkforward (shadow) optimizer now…")
+        _run_shadow_param_search(manual=True)
+        return True
+    return False
+
+
+def _clear_manual_optimizer_flag(which: str) -> None:
+    """Clears `which`'s flag BEFORE running (not after) so a crash
+    mid-search can never leave this tick-locked into retrying the same
+    expensive search every 5 minutes forever — if it fails, the owner
+    sees the failed run (same recorded-failure pattern as the automatic
+    path) and can just click the button again."""
+    try:
+        pending = state_store.get_json("manual_optimizer_request") or {}
+        pending[which] = False
+        state_store.set_json("manual_optimizer_request", pending)
+    except Exception as e:
+        print(f"[Orchestra] Failed to clear manual_optimizer_request[{which}] (non-fatal): {e}")
 
 
 def _run_daily_ukf_retrain():
@@ -90,12 +174,27 @@ def _run_daily_ukf_retrain():
             print(f"[Orchestra] ALSO failed to record the ukf_retrain failure itself: {e2}")
 
 
-def _run_daily_param_search():
-    if not state_store.try_claim_run("daily_optimizer", state_store.current_day_bucket()):
+def _run_daily_param_search(manual: bool = False):
+    """2026-11-04: staggered to fire at/after 01:00 UTC on the normal
+    automatic schedule (was "as soon as a tick lands after midnight") —
+    see _run_pending_manual_optimizer()'s docstring for why: so this and
+    _run_shadow_param_search() below never share a process/job even
+    when both are due the same day. `manual=True` (set only by
+    _run_pending_manual_optimizer(), itself only reachable via the
+    Settings page's "Run Optimizer Now" button) bypasses both the clock
+    gate and the day-bucket guard via a one-off bucket, as an EXTRA run
+    alongside (not instead of) the day's normal claim."""
+    if manual:
+        bucket = f"manual-{state_store.current_minute_bucket()}"
+    else:
+        if not _past_utc_clock(1, 0):
+            return
+        bucket = state_store.current_day_bucket()
+    if not state_store.try_claim_run("daily_optimizer", bucket):
         print("[Orchestra] daily_optimizer already ran (or is running) today. Skipping.")
         return
 
-    print("[Orchestra] Starting daily optimisation…")
+    print(f"[Orchestra] Starting daily optimisation{' (manual trigger)' if manual else ''}…")
     try:
         # 1. Download fresh historical data
         btc_val, eth_val = data_download()
@@ -121,7 +220,7 @@ def _run_daily_param_search():
         try:
             state_store.record_run(
                 run_type="daily_optimizer",
-                metrics={"btc_val": btc_val, "eth_val": eth_val},
+                metrics={"btc_val": btc_val, "eth_val": eth_val, "triggered_by": "manual" if manual else "schedule"},
                 params=best_params,
             )
         except Exception as e:
@@ -144,35 +243,43 @@ def _run_daily_param_search():
             print(f"[Orchestra] ALSO failed to record the daily_optimizer failure itself: {e2}")
 
 
-def _run_shadow_param_search():
+def _run_shadow_param_search(manual: bool = False):
     """2026-11-03 (shadow signal comparison) — runs walkforward.py's OWN
-    optimizer (run_standalone_grid_search()) standalone, on the same
-    daily cadence as the real optimizer above, and stores its output
-    separately (pyquant_kv key "walkforward_optimal_params") so
+    optimizer (run_standalone_grid_search()) standalone, and stores its
+    output separately (pyquant_kv key "walkforward_optimal_params") so
     hourly_task() can record a side-by-side SHADOW diagnostic every
     tick without ever touching what actually trades — see pyq_p4.py's
     SignalGenerator.load_params(), the one place that decides which
     source ("p4_search" or "walkforward", the `live_signal_source` kv
     setting) actually drives real orders.
 
-    Off by default (`shadow_comparison_enabled` kv flag, flip via the
-    Settings page) and placed LAST, after both the UKF retrain and the
-    real param search, deliberately — see _run_daily_param_search()'s
-    2026-10-27 incident note just above: orchestra.yml's job has a
-    10-minute timeout, and a Bayesian search here can itself take
-    several minutes (up to BAYESIAN_TRIALS Optuna trials). Running a
-    SECOND full search back-to-back with the first risks exactly the
-    kind of timeout that incident describes — so this only runs when
-    explicitly enabled, and a timeout here can never prevent the UKF
-    retrain or the real optimizer from completing, since both already
-    ran above by the time this is reached."""
-    if not state_store.get_json("shadow_comparison_enabled", False):
-        return
-    if not state_store.try_claim_run("shadow_optimizer", state_store.current_day_bucket()):
+    Off by default on the automatic schedule (`shadow_comparison_enabled`
+    kv flag, flip via the Settings page) and, when on, staggered to fire
+    at/after 01:30 UTC — 30 minutes after _run_daily_param_search()'s own
+    01:00 UTC gate (2026-11-04; previously both ran back-to-back in the
+    same daily_optimizer() call) — see that function's 2026-10-27
+    incident note: orchestra.yml's job has a 10-minute timeout, and a
+    Bayesian search here can itself take several minutes. Giving each
+    optimizer its OWN cron tick, rather than sharing one, means a
+    timeout in either can never prevent the other from completing.
+
+    `manual=True` (see _run_pending_manual_optimizer()) bypasses the
+    clock gate, the `shadow_comparison_enabled` toggle, and the day-
+    bucket guard (via a one-off bucket) — wanting one data point right
+    now is reasonable even without committing to the nightly cadence."""
+    if manual:
+        bucket = f"manual-{state_store.current_minute_bucket()}"
+    else:
+        if not state_store.get_json("shadow_comparison_enabled", False):
+            return
+        if not _past_utc_clock(1, 30):
+            return
+        bucket = state_store.current_day_bucket()
+    if not state_store.try_claim_run("shadow_optimizer", bucket):
         print("[Orchestra] shadow_optimizer already ran (or is running) today. Skipping.")
         return
 
-    print("[Orchestra] Starting shadow (walkforward) optimisation…")
+    print(f"[Orchestra] Starting shadow (walkforward) optimisation{' (manual trigger)' if manual else ''}…")
     try:
         import walkforward  # imported here, not at module top, so a
         # failure to import walkforward.py's heavier dependency set
@@ -186,7 +293,7 @@ def _run_shadow_param_search():
         try:
             state_store.record_run(
                 run_type="shadow_optimizer",
-                metrics={},
+                metrics={"triggered_by": "manual" if manual else "schedule"},
                 params=best_params,
             )
         except Exception as e:

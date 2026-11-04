@@ -860,6 +860,39 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-04 — manual optimizer trigger + staggered automatic
+  schedule.** Owner follow-up on the shadow-comparison work below:
+  wanted a button to run an optimizer on demand, and noted the two
+  optimizers don't have to run at the same time (suggested either
+  "first finishes, then second starts" or fixed, separated clock
+  times). Went with the safer of the two: fixed, separated clock
+  times, each getting its own cron tick/GitHub-Actions-job budget.
+  - `_run_daily_param_search()` now gated to >=01:00 UTC (was: fires
+    on the first tick after midnight); `_run_shadow_param_search()` to
+    >=01:30 UTC. Never share a process/job, directly addressing the
+    2026-10-27 timeout incident's root pattern instead of just
+    ordering around it.
+  - New `manual_optimizer_request` kv flag + `GET`/`POST
+    /api/optimizer/trigger` + Settings page buttons ("Run P4_SEARCH
+    Now" / "Run WALKFORWARD Now" / "Run Both Now"). Same
+    flag-the-orchestra-reads trust-boundary pattern as
+    `trading_enabled` — the API never executes the optimizer, only
+    flags it for the next ~5-minute cron tick.
+    `p4_orchestra._run_pending_manual_optimizer()` runs at most ONE
+    pending manual request per tick (p4_search prioritized) even when
+    "Both" was requested together, so a manual trigger can't
+    reintroduce the same-process timeout risk the clock staggering
+    above exists to prevent.
+  - A manual run is an EXTRA run (own `manual-<minute>` try_claim_run
+    bucket) — it does not consume or skip the day's normal automatic
+    slot, which still fires on schedule regardless.
+  - Code-complete, syntax-checked; the manual-trigger control flow
+    was traced by hand and its clock-gate helper unit-tested in
+    isolation (full-module import test wasn't possible in the dev
+    sandbox — pyq_p4.py's live-trading dependency chain, e.g.
+    `nest_asyncio`/alpaca-py/python-binance/pybit/python-telegram-bot,
+    isn't installed there; real exercise happens on the next GitHub
+    Actions tick after push). Not yet pushed.
 - **2026-11-03, second pass — shadow signal comparison + exact-hour
   match fix.** Owner follow-up after reviewing a real backtest-vs-live
   gate comparison (the one from the first 2026-11-03 pass below) that

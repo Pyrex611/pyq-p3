@@ -353,6 +353,40 @@ section only orients a new session to where things stand structurally.
     and a `daily_optimizer()` cycle completes. Until then, switching
     `live_signal_source` to `walkforward` is a no-op (falls back to
     `p4_search`'s params, by design — see above).
+- **Added 2026-11-04 — manual optimizer trigger + staggered automatic
+  schedule.** Owner follow-up: a button to run either optimizer on
+  demand, and confirmation that the two heavy optimizers don't have to
+  (and, per the 2026-10-27 timeout incident, really shouldn't) run in
+  the same process.
+  - **Automatic schedule now staggered by clock time, not just order**:
+    `_run_daily_param_search()` (p4_search) only proceeds at/after
+    01:00 UTC; `_run_shadow_param_search()` (walkforward) at/after
+    01:30 UTC — each gets its OWN GitHub Actions cron tick/10-minute
+    budget instead of sharing `daily_optimizer()`'s single call. The
+    cheap UKF re-anchor is unaffected (still fires immediately after
+    midnight). This is a real timing change from "ASAP after
+    midnight" to "01:00 UTC" for the primary optimizer — deliberate,
+    not a regression, done specifically to end the back-to-back-in-
+    one-process pattern the 2026-10-27 incident warned about.
+  - **`manual_optimizer_request` kv flag** (`p4_search`/`walkforward`
+    booleans) + new `GET`/`POST /api/optimizer/trigger` — Settings
+    page's "Run Optimizer Now" buttons (P4_SEARCH / WALKFORWARD /
+    Both). Same trust-boundary pattern as `trading_enabled`: the API
+    only sets a flag, never runs the optimizer itself — the next
+    GitHub Actions cron tick (~5 min) is what actually executes it, via
+    `p4_orchestra.py`'s new `_run_pending_manual_optimizer()`.
+  - **At most one optimizer runs per tick, even for manual triggers**:
+    requesting "Both" queues both flags, but
+    `_run_pending_manual_optimizer()` only honors one per tick
+    (p4_search first) — the other stays queued for the next tick
+    (~5 min later), preserving the same never-share-a-process
+    invariant the automatic schedule's 01:00/01:30 split relies on.
+  - A manual run bypasses the clock gate, the day-bucket guard (via a
+    one-off `manual-<minute>` bucket — `try_claim_run()`'s existing
+    primitive, no schema change), and (for walkforward) the
+    `shadow_comparison_enabled` toggle — but does NOT consume the
+    day's automatic slot, so it's purely an extra one-off run, never a
+    substitute for the scheduled one.
 
 ## 6. What's next
 
