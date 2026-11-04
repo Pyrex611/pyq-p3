@@ -46,6 +46,10 @@ export default function Settings() {
   const [baseline, setBaseline] = useState(undefined); // undefined = loading, null = no baseline, string = set
   const [baselineError, setBaselineError] = useState(null);
   const [leverageInput, setLeverageInput] = useState("");
+  const [sigSource, setSigSource] = useState(null);
+  const [sigSourceError, setSigSourceError] = useState(null);
+  const [sigSourceBusy, setSigSourceBusy] = useState(false);
+  const [sigSourceWarning, setSigSourceWarning] = useState(null);
 
   useEffect(() => {
     try {
@@ -72,10 +76,35 @@ export default function Settings() {
     }
   }
 
+  async function loadSigSource() {
+    try {
+      const d = await apiGet("/signal-source");
+      setSigSource(d);
+      setSigSourceError(null);
+    } catch (e) {
+      setSigSourceError(e.message);
+    }
+  }
+
   useEffect(() => {
     apiGet("/config").then(setCfg).catch((e) => setCfgError(e.message));
     loadBaseline();
+    loadSigSource();
   }, []);
+
+  async function updateSigSource(patch) {
+    setSigSourceBusy(true);
+    setSigSourceWarning(null);
+    try {
+      const d = await apiPost("/signal-source", patch);
+      if (d.warning) setSigSourceWarning(d.warning);
+      await loadSigSource();
+    } catch (e) {
+      alert("Could not update signal source settings: " + e.message);
+    } finally {
+      setSigSourceBusy(false);
+    }
+  }
 
   async function resetBaseline() {
     if (!confirm("Dashboard figures will only count signals opened from this moment on. Continue?")) return;
@@ -120,6 +149,83 @@ export default function Settings() {
         <button type="button" className="btn" style={{ marginLeft: 8 }} onClick={() => updateLeverageInput("")}>
           Reset to system default
         </button>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <h3>Signal Generation Source &amp; Shadow Comparison</h3>
+        <p className="hint" style={{ marginTop: -4 }}>
+          Live trading can source its strict/volatility parameters from either optimizer. The gate math
+          itself (generate_signal()/diagnose_gates()) is identical either way — only WHICH strict/stricts
+          values feed it differs. <strong>Walkforward</strong> is the same optimizer walkforward.py&apos;s own
+          backtests use; <strong>P4_SEARCH</strong> is today&apos;s existing production source, a separate,
+          independently-maintained duplicate. Switching sources changes what real orders are sized/fired
+          on — not a cosmetic setting.
+        </p>
+        {sigSourceError && <div className="banner error">Could not load ({sigSourceError}).</div>}
+        {sigSourceWarning && <div className="banner warn">{sigSourceWarning}</div>}
+        {sigSource && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)", minWidth: 170 }}>
+                Live trading uses:
+              </span>
+              <div className="mode-switch">
+                <button
+                  type="button"
+                  className={sigSource.live_signal_source === "p4_search" ? "active" : ""}
+                  disabled={sigSourceBusy}
+                  onClick={() => updateSigSource({ live_signal_source: "p4_search" })}
+                >
+                  P4_SEARCH
+                </button>
+                <button
+                  type="button"
+                  className={sigSource.live_signal_source === "walkforward" ? "active" : ""}
+                  disabled={sigSourceBusy}
+                  onClick={() => updateSigSource({ live_signal_source: "walkforward" })}
+                >
+                  WALKFORWARD
+                </button>
+              </div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 13, color: "var(--text-muted)", minWidth: 170 }}>
+                Shadow comparison (both run, non-selected one recorded only):
+              </span>
+              <div className="mode-switch">
+                <button
+                  type="button"
+                  className={!sigSource.shadow_comparison_enabled ? "active off" : ""}
+                  disabled={sigSourceBusy}
+                  onClick={() => updateSigSource({ shadow_comparison_enabled: false })}
+                >
+                  OFF
+                </button>
+                <button
+                  type="button"
+                  className={sigSource.shadow_comparison_enabled ? "active" : ""}
+                  disabled={sigSourceBusy}
+                  onClick={() => updateSigSource({ shadow_comparison_enabled: true })}
+                >
+                  ON
+                </button>
+              </div>
+            </div>
+            <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>
+              walkforward_optimal_params: {sigSource.walkforward_params_available
+                ? "available (shadow optimizer has run at least once)"
+                : "not yet available — the shadow optimizer hasn't completed a run"}
+            </div>
+            <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
+              Turning shadow comparison ON makes the daily optimizer also run walkforward.py&apos;s own
+              search every night (own run-guard, own timeout handling — see PLAN.md&apos;s 2026-11-03 note).
+              Until it has completed at least once, switching live trading to WALKFORWARD has no effect —
+              SignalGenerator.load_params() falls back to P4_SEARCH&apos;s params rather than trade on
+              nothing. Both sources&apos; gate readings, once available, show up tagged on the Live
+              Monitor/Compare pages so you can see which one tracks the backtest more closely.
+            </p>
+          </>
+        )}
       </div>
 
       <div className="grid cols-2">

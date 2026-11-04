@@ -690,6 +690,77 @@ def run_grid_search(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage)
     return best_params
 
 
+def run_standalone_grid_search(backtest_days: Optional[int] = None,
+                               initial_capital: Optional[float] = None,
+                               leverage: Optional[float] = None,
+                               prev_params: Optional[dict] = None) -> dict:
+    """2026-11-03 (shadow signal comparison) — a self-contained, few-arg
+    entrypoint around THIS module's own optimizer (run_bayesian_search()/
+    run_grid_search() above — the same functions run_walk_forward() uses
+    internally, nested inside its day-by-day loop), exposed standalone
+    with the SAME calling convention as p4_search.py's run_grid_search()
+    (reads btc_back366.csv/eth_back366.csv directly, trains its own
+    UKFs via build_ukfs()/step_ukf() above, needs no external preds/
+    bars) — so p4_orchestra.py can run either optimizer on identical
+    input data and compare what each one decides. This is walkforward's
+    real optimizer, not a re-implementation of it.
+
+    See PLAN.md's 2026-11-03 "shadow signal comparison" entry: the
+    owner's own `generate_signal()`/diagnose_gates() gate math is
+    already provably identical between live (p4_utils.py) and backtest
+    (this module) — the thing that actually differs is WHICH strict/
+    stricts PARAMETERS feed that math, because live's daily_optimizer()
+    currently runs p4_search.py's separate, duplicate optimizer instead
+    of this one. Calling this function lets the orchestra compute what
+    THIS module's optimizer would have picked, for a side-by-side
+    comparison (or, if the owner flips the `live_signal_source` setting,
+    to actually drive live trading instead of p4_search.py's output —
+    see pyq_p4.py's SignalGenerator.load_params())."""
+    days = backtest_days or GRID_SEARCH_DAYS
+    cap = initial_capital if initial_capital is not None else INITIAL_CAPITAL
+    lev = leverage or LEVERAGE
+    length = days * 24
+    train_len = UKF_TRAIN_DAYS * 24
+
+    btc_valid = pd.read_csv("btc_back366.csv")
+    eth_valid = pd.read_csv("eth_back366.csv")
+    train_start = max(0, len(btc_valid) - train_len - length)
+    btc_train = btc_valid.iloc[train_start: len(btc_valid) - length].reset_index(drop=True)
+    eth_train = eth_valid.iloc[train_start: len(eth_valid) - length].reset_index(drop=True)
+    btc_opt   = btc_valid.iloc[len(btc_valid) - length:].reset_index(drop=True)
+    eth_opt   = eth_valid.iloc[len(eth_valid) - length:].reset_index(drop=True)
+
+    btc_ukf, btc_high_ukf, btc_low_ukf = build_ukfs(btc_train, 'BTC')
+    eth_ukf, eth_high_ukf, eth_low_ukf = build_ukfs(eth_train, 'ETH')
+
+    btc_preds = [step_ukf(btc_ukf, btc_high_ukf, btc_low_ukf, btc_opt.iloc[i])
+                 for i in range(len(btc_opt))]
+    eth_preds = [step_ukf(eth_ukf, eth_high_ukf, eth_low_ukf, eth_opt.iloc[i])
+                 for i in range(len(eth_opt))]
+
+    result = None
+    if USE_BAYESIAN and OPTUNA_AVAILABLE:
+        try:
+            result = run_bayesian_search(btc_preds, eth_preds, btc_opt, eth_opt,
+                                         cap, lev, warm_start=prev_params)
+        except Exception as e:
+            print(f"[walkforward.run_standalone_grid_search] Bayesian search failed: "
+                  f"{e} — using grid fallback.")
+
+    if result is None:
+        result = run_grid_search(btc_preds, eth_preds, btc_opt, eth_opt, cap, lev)
+
+    if result is None:
+        print("[walkforward.run_standalone_grid_search] WARNING: no profitable "
+              "combo found. Using defaults.")
+        result = {
+            "strict_btc": 0.0025, "stricts_btc": 0.005,
+            "strict_eth": 0.0035, "stricts_eth": 0.0075,
+            "atr_mult": ATR_SL_MULTIPLIER, "best_returns": 0.0,
+        }
+    return smooth_params(result, prev_params)
+
+
 def smooth_params(new_params: dict, prev_params: dict,
                   alpha: float = PARAM_SMOOTHING_ALPHA) -> dict:
     """Blends today's optimal params with yesterday's to dampen regime noise."""

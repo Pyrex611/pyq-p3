@@ -129,6 +129,8 @@ export default function LiveMonitor() {
   const [live, setLive] = useState(null);
   const [error, setError] = useState(null);
   const [diagHistory, setDiagHistory] = useState(null);
+  const [shadowHistory, setShadowHistory] = useState(null);
+  const [sigSource, setSigSource] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,9 +140,37 @@ export default function LiveMonitor() {
     apiGet("/signals/open")
       .then((d) => !cancelled && setLive(d))
       .catch((e) => !cancelled && setError(e.message));
-    apiGet("/diagnostics/history", { limit: 300 })
-      .then((d) => !cancelled && setDiagHistory(d.history))
-      .catch(() => {}); // non-fatal — the latest-tick table above still works without it
+    apiGet("/signal-source")
+      .then((d) => {
+        if (cancelled) return;
+        setSigSource(d);
+        const liveSrc = d.live_signal_source || "p4_search";
+        // 2026-11-03 (shadow signal comparison): fetch each source
+        // SEPARATELY rather than one unfiltered call — two optimizers'
+        // readings interleaved in one array would zig-zag the chart
+        // below as if it were one continuous series. The live source
+        // drives the main chart/PyQ Insights; the other (if shadow
+        // comparison is on) gets its own, clearly-labeled panel.
+        apiGet("/diagnostics/history", { limit: 300, source: liveSrc })
+          .then((hd) => !cancelled && setDiagHistory(hd.history))
+          .catch(() => {});
+        if (d.shadow_comparison_enabled) {
+          const shadowSrc = liveSrc === "p4_search" ? "walkforward" : "p4_search";
+          apiGet("/diagnostics/history", { limit: 300, source: shadowSrc })
+            .then((hd) => !cancelled && setShadowHistory(hd.history))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {
+        // signal-source unreachable — fall back to the old unfiltered
+        // fetch rather than showing nothing (matches pre-2026-11-03
+        // behavior when shadow comparison doesn't exist/isn't reachable).
+        if (!cancelled) {
+          apiGet("/diagnostics/history", { limit: 300 })
+            .then((hd) => !cancelled && setDiagHistory(hd.history))
+            .catch(() => {});
+        }
+      });
     return () => { cancelled = true; };
   }, []);
 
@@ -260,18 +290,38 @@ export default function LiveMonitor() {
           latest, so a quiet stretch (strategy correctly waiting) reads
           as a trend rather than a single opaque snapshot. */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <h3>Signal Diagnostics History</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <h3 style={{ margin: 0 }}>Signal Diagnostics History</h3>
+          {sigSource && (
+            <span className="mono" style={{ fontSize: 10, color: "var(--text-faint)" }}>
+              Live source: <strong style={{ color: "var(--accent-secondary)" }}>
+                {(sigSource.live_signal_source || "p4_search").toUpperCase()}
+              </strong>
+              {sigSource.shadow_comparison_enabled ? " · shadow comparison ON" : ""}
+            </span>
+          )}
+        </div>
         {diagHistory && diagHistory.length === 0 && (
           <div className="empty-state">No diagnostics history yet — it accumulates from this point forward.</div>
         )}
         {diagHistory && diagHistory.length > 0 && (
           [...new Set(diagHistory.map((r) => r.symbol))].map((sym) => {
             const rows = diagHistory.filter((r) => r.symbol === sym);
+            const shadowRows = (shadowHistory || []).filter((r) => r.symbol === sym);
             return (
               <div key={sym} style={{ marginTop: 10 }}>
                 <div className="stat-label" style={{ marginBottom: 4 }}>{sym} — last {rows.length} tick(s)</div>
                 <DiagHistoryChart rows={rows} />
                 <PyqInsightsPanel rows={rows} />
+                {shadowRows.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div className="stat-label" style={{ marginBottom: 4, color: "var(--text-faint)" }}>
+                      Shadow ({(sigSource.live_signal_source === "p4_search" ? "walkforward" : "p4_search").toUpperCase()}) —
+                      recorded only, never drives a real order
+                    </div>
+                    <PyqInsightsPanel rows={shadowRows} />
+                  </div>
+                )}
               </div>
             );
           })

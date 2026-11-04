@@ -296,6 +296,14 @@ def _bootstrap_postgres(conn) -> None:
             "CREATE INDEX IF NOT EXISTS pyquant_diagnostics_history_symbol_ts_idx "
             "ON pyquant_diagnostics_history(symbol, ts DESC)"
         )
+        # 2026-11-03 — tags which optimizer's parameters a given
+        # diagnostic row was evaluated against ('p4_search' = today's
+        # actual live-trading source by default, or 'walkforward' = the
+        # shadow comparison source — see hourly_task()'s 2026-11-03
+        # comment in pyq_p4.py for the full shadow-comparison design).
+        # Defaults to 'p4_search' so every row written before this
+        # column existed reads correctly as what it always was.
+        cur.execute("ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'p4_search'")
 
         # 2026-11-03 — the backtest-side counterpart to
         # pyquant_diagnostics_history above: one row per bar per symbol
@@ -420,6 +428,10 @@ def _sqlite_conn():
             "CREATE INDEX IF NOT EXISTS pyquant_diagnostics_history_symbol_ts_idx "
             "ON pyquant_diagnostics_history(symbol, ts DESC)"
         )
+        try:
+            conn.execute("ALTER TABLE pyquant_diagnostics_history ADD COLUMN source TEXT NOT NULL DEFAULT 'p4_search'")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
         # 2026-11-03 — see the matching Postgres CREATE TABLE above for the
         # full rationale (backtest-side per-bar gate diagnostics).
@@ -1026,26 +1038,45 @@ def get_backtest_diagnostics(run_id: int, symbol: Optional[str] = None) -> list[
 
 
 def get_backtest_diagnostic_at(run_id: int, symbol: str, ts: str, window_seconds: int = 5400) -> Optional[dict]:
-    """Returns the backtest diagnostic row closest to `ts` for one run +
-    symbol, within `window_seconds` (default ±90m, matching
-    compute_comparison_buckets()'s/trade-alignment's existing live-side
-    window) — the backtest-side counterpart that lets a trade
-    drill-down show BOTH models' gate state for the same historical
-    hour, not just live's."""
+    """Returns the backtest diagnostic row for one run + symbol that
+    falls in the SAME calendar hour (UTC) as `ts`.
+
+    2026-11-03: tightened from a plain ±90-minute nearest-match to an
+    exact same-hour match. Both sides of this comparison are
+    fundamentally hourly — walkforward.py's bars and live's
+    hourly_task() (itself run-guarded to at most once per hour) both
+    key off an hour boundary — so "nearest within 90 minutes" was
+    needlessly loose and could pair a backtest bar with a DIFFERENT
+    live hour's reading. That's exactly how a real trend-disagreement
+    in the UI (backtest UP, live DOWN for "the same" timestamp) could
+    actually just be a matching bug instead of a genuine model
+    divergence. `window_seconds` is now only a tiebreak distance cap
+    used if more than one row lands in the same hour (e.g. from a
+    run-guard incident producing duplicate hourly rows), not the
+    primary match criterion."""
     rows = get_backtest_diagnostics(run_id, symbol=symbol)
     if not rows or not ts:
         return None
     try:
         target = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+    target_u = target.astimezone(timezone.utc)
+    target_bucket = (target_u.year, target_u.month, target_u.day, target_u.hour)
     best, best_delta = None, None
     for r in rows:
         try:
             rt = datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00"))
+            if rt.tzinfo is None:
+                rt = rt.replace(tzinfo=timezone.utc)
         except Exception:
             continue
-        delta = abs((rt - target).total_seconds())
+        rt_u = rt.astimezone(timezone.utc)
+        if (rt_u.year, rt_u.month, rt_u.day, rt_u.hour) != target_bucket:
+            continue
+        delta = abs((rt_u - target_u).total_seconds())
         if delta <= window_seconds and (best_delta is None or delta < best_delta):
             best, best_delta = r, delta
     return best
@@ -1058,43 +1089,57 @@ _DIAG_HISTORY_COLS = [
 ]
 
 
-def record_diagnostic_history(symbol: str, diag: dict) -> None:
+def record_diagnostic_history(symbol: str, diag: dict, source: str = "p4_search") -> None:
     """Appends one Signal Diagnostics row (2026-10-31) — see this
     module's pyquant_diagnostics_history CREATE TABLE comment for why
     this exists alongside (not instead of) the single-latest-snapshot
     pyquant_kv blob pyq_p4.py also still writes. Best-effort/non-fatal,
     like every write this module makes from the trading engine's own
-    path — never raises into the caller."""
+    path — never raises into the caller.
+
+    2026-11-03 (shadow signal comparison): `source` tags which
+    optimizer's parameters this diagnostic was evaluated against —
+    'p4_search' (default; today's actual live-trading optimizer) or
+    'walkforward' (the shadow comparison optimizer, run read-only
+    alongside it — see pyq_p4.py's hourly_task() and PLAN.md's
+    2026-11-03 "shadow signal comparison" entry). hourly_task() now
+    calls this once per source per tick instead of once total."""
     try:
-        row = tuple(diag.get(c) for c in _DIAG_HISTORY_COLS)
+        cols = _DIAG_HISTORY_COLS + ["source"]
+        row = tuple(diag.get(c) for c in _DIAG_HISTORY_COLS) + (source,)
         if _using_postgres():
             with _pg_conn().cursor() as cur:
                 cur.execute(
-                    f"INSERT INTO pyquant_diagnostics_history ({','.join(_DIAG_HISTORY_COLS)}, ts) "
-                    f"VALUES ({','.join(['%s'] * len(_DIAG_HISTORY_COLS))}, now())",
+                    f"INSERT INTO pyquant_diagnostics_history ({','.join(cols)}, ts) "
+                    f"VALUES ({','.join(['%s'] * len(cols))}, now())",
                     row,
                 )
             return
         with _lock, _sqlite_conn() as conn:
             now = datetime.now(timezone.utc).isoformat()
             conn.execute(
-                f"INSERT INTO pyquant_diagnostics_history ({','.join(_DIAG_HISTORY_COLS)}, ts) "
-                f"VALUES ({','.join(['?'] * len(_DIAG_HISTORY_COLS))}, ?)",
+                f"INSERT INTO pyquant_diagnostics_history ({','.join(cols)}, ts) "
+                f"VALUES ({','.join(['?'] * len(cols))}, ?)",
                 row + (now,),
             )
     except Exception:
         pass  # diagnostics logging is best-effort, never lets a trading tick fail
 
 
-def list_diagnostic_history(symbol: Optional[str] = None, limit: int = 300) -> list[dict]:
+def list_diagnostic_history(symbol: Optional[str] = None, limit: int = 300, source: Optional[str] = None) -> list[dict]:
     """Returns recent Signal Diagnostics history rows, newest first,
-    optionally filtered to one symbol. Powers the Live Monitor page's
-    history chart/table (2026-10-31) — see record_diagnostic_history()."""
-    cols = ["id", "symbol", "ts"] + _DIAG_HISTORY_COLS[1:]
-    where, params = "", []
+    optionally filtered to one symbol and/or one `source` ('p4_search'
+    or 'walkforward' — see record_diagnostic_history()). Powers the
+    Live Monitor page's history chart/table (2026-10-31)."""
+    cols = ["id", "symbol", "ts"] + _DIAG_HISTORY_COLS[1:] + ["source"]
+    clauses, params = [], []
     if symbol:
-        where = " WHERE symbol = %s" if _using_postgres() else " WHERE symbol = ?"
+        clauses.append("symbol = %s" if _using_postgres() else "symbol = ?")
         params.append(symbol)
+    if source:
+        clauses.append("source = %s" if _using_postgres() else "source = ?")
+        params.append(source)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     try:
         if _using_postgres():
             with _pg_conn().cursor() as cur:

@@ -552,9 +552,38 @@ class SignalGenerator:
         # PositionGuard's monitored_orders — optimal_params.json on local
         # disk doesn't survive a stateless Vercel invocation, and the
         # daily optimizer (p4_orchestra.py) now writes to the DB too.
-        db_params = state_store.get_json("optimal_params")
+        #
+        # 2026-11-03 (shadow signal comparison): this is called fresh on
+        # EVERY generate_signal() tick (never cached), so the
+        # `live_signal_source` kv setting below takes effect on the very
+        # next tick after it's changed, no restart/redeploy needed. It
+        # decides which optimizer's output actually sizes/fires real
+        # trades — 'p4_search' (default; unchanged behavior, today's
+        # production source) or 'walkforward' (p4_orchestra.py's
+        # _run_shadow_param_search(), the SAME optimizer walkforward.py's
+        # own backtests use). The one NOT selected here still gets
+        # computed and recorded every hour as a read-only shadow
+        # diagnostic — see hourly_task()'s 2026-11-03 comment — it just
+        # never reaches this function's return value, so it can never
+        # affect a real order.
+        source = state_store.get_json("live_signal_source", "p4_search")
+        key = "walkforward_optimal_params" if source == "walkforward" else "optimal_params"
+        db_params = state_store.get_json(key)
         if db_params is not None:
             return db_params
+        if key != "optimal_params":
+            # walkforward_optimal_params has no legacy on-disk file and
+            # no run yet (e.g. shadow_comparison_enabled was just turned
+            # on and the next daily_optimizer() hasn't fired yet) — fall
+            # back to today's known-good source rather than trading on
+            # defaults/garbage thresholds.
+            print("[SignalGenerator] live_signal_source='walkforward' but no "
+                  "walkforward_optimal_params exist yet — falling back to "
+                  "'optimal_params' (p4_search) until the shadow optimizer "
+                  "has run at least once.")
+            db_params = state_store.get_json("optimal_params")
+            if db_params is not None:
+                return db_params
         try:
             with open("optimal_params.json", "r") as f:
                 params = json.load(f)

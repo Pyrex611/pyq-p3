@@ -200,6 +200,64 @@ def set_status(body: TradingSwitch):
     }
 
 
+class SignalSourceSettings(BaseModel):
+    """2026-11-03 (shadow signal comparison) — see PLAN.md's 2026-11-03
+    entry and pyq_p4.py's SignalGenerator.load_params()/hourly_task()
+    for the full design. Both fields are stored as plain pyquant_kv
+    flags (`live_signal_source`, `shadow_comparison_enabled`) that the
+    orchestra (the only credential holder) reads fresh every tick —
+    this API never gains the ability to place a trade itself, exactly
+    like the existing trading_enabled off-switch; it only flips a flag
+    the orchestra decides how to act on."""
+    live_signal_source: Optional[str] = None       # "p4_search" | "walkforward"
+    shadow_comparison_enabled: Optional[bool] = None
+
+
+@app.get("/api/signal-source")
+def get_signal_source():
+    """Current live-trading parameter source and shadow-comparison
+    toggle. `live_signal_source` decides which optimizer's params
+    actually size/fire real orders (default 'p4_search', today's
+    unchanged production behavior); `shadow_comparison_enabled`
+    decides whether the OTHER source also gets computed and recorded
+    every hour, read-only, for comparison (default False — off, since
+    it roughly doubles the nightly optimizer's runtime; see
+    p4_orchestra.py's _run_shadow_param_search() for the timeout risk
+    this guards against)."""
+    return {
+        "live_signal_source": state_store.get_json("live_signal_source", "p4_search"),
+        "shadow_comparison_enabled": bool(state_store.get_json("shadow_comparison_enabled", False)),
+        "walkforward_params_available": state_store.get_json("walkforward_optimal_params") is not None,
+    }
+
+
+@app.post("/api/signal-source")
+def set_signal_source(body: SignalSourceSettings):
+    if body.live_signal_source is not None:
+        if body.live_signal_source not in ("p4_search", "walkforward"):
+            raise HTTPException(status_code=400, detail="live_signal_source must be 'p4_search' or 'walkforward'")
+        if body.live_signal_source == "walkforward" and state_store.get_json("walkforward_optimal_params") is None:
+            # Not blocked outright — SignalGenerator.load_params() already
+            # falls back to 'p4_search' safely if this is empty — but the
+            # UI should know the switch won't actually take effect yet.
+            state_store.set_json("live_signal_source", body.live_signal_source)
+            return {
+                "live_signal_source": body.live_signal_source,
+                "shadow_comparison_enabled": bool(state_store.get_json("shadow_comparison_enabled", False)),
+                "warning": ("No walkforward_optimal_params exist yet (the shadow optimizer hasn't "
+                            "completed a run) — live trading will keep using p4_search's params "
+                            "until it has. Enable shadow_comparison_enabled and wait for the next "
+                            "daily_optimizer() run, or trigger one manually."),
+            }
+        state_store.set_json("live_signal_source", body.live_signal_source)
+    if body.shadow_comparison_enabled is not None:
+        state_store.set_json("shadow_comparison_enabled", bool(body.shadow_comparison_enabled))
+    return {
+        "live_signal_source": state_store.get_json("live_signal_source", "p4_search"),
+        "shadow_comparison_enabled": bool(state_store.get_json("shadow_comparison_enabled", False)),
+    }
+
+
 @app.get("/api/config")
 def get_config():
     """
@@ -321,8 +379,14 @@ def get_heartbeat():
 def get_diagnostics_history(
     symbol: Optional[str] = Query(None),
     limit: int = Query(300, ge=1, le=2000),
+    source: Optional[str] = Query(
+        None, description="'p4_search' or 'walkforward' — see record_diagnostic_history(). "
+                           "Omit to get both sources interleaved (fine for an all-sources table; "
+                           "pass this when charting ONE source's trend, so a shadow row never "
+                           "shows up mixed into a chart of the other optimizer's readings)."
+    ),
 ):
-    return {"history": state_store.list_diagnostic_history(symbol=symbol, limit=limit)}
+    return {"history": state_store.list_diagnostic_history(symbol=symbol, limit=limit, source=source)}
 
 
 # ── Runs (Backtest screen) ───────────────────────────────────────────────
@@ -834,13 +898,29 @@ def get_compare_daily(run_id: Optional[int] = Query(None, description="Defaults 
 # in production. StaticFiles/the `web/` mount this file used to end with
 # is gone along with `web/` itself (moved to `legacy_web/`, unused).
 
+def _same_utc_hour(a: datetime, b: datetime) -> bool:
+    """2026-11-03: the match criterion every lookup in
+    _nearest_gate_states()/get_backtest_diagnostic_at() uses. Both sides
+    of this comparison are fundamentally hourly — walkforward.py's bars
+    and live's hourly_task() (run-guarded to at most once per hour) both
+    key off an hour boundary — so a plain ±90-minute "nearest" match was
+    needlessly loose and could pair two DIFFERENT hours' readings,
+    producing a trend-disagreement in the UI that looked like a real
+    model divergence but was actually just a matching bug."""
+    au, bu = a.astimezone(timezone.utc), b.astimezone(timezone.utc)
+    return (au.year, au.month, au.day, au.hour) == (bu.year, bu.month, bu.day, bu.hour)
+
+
 def _nearest_gate_states(symbol: str, timestamp: str, run_id: Optional[int]):
     """Shared core of GET /api/compare/trade-alignment and GET
     /api/compare/gate-state (2026-11-03 — the latter is the same lookup
     without requiring an actual backtest trade to anchor it, for the
     Compare page's hour-level "state of both models" comparison that
     isn't tied to any specific executed trade). Returns
-    (live_diagnostics, matching_signal, backtest_diagnostics)."""
+    (live_diagnostics, matching_signal, backtest_diagnostics).
+
+    2026-11-03: tightened from ±90-minute nearest-match to an exact
+    same-UTC-hour match — see _same_utc_hour()'s docstring."""
     clean_sym = "BTCUSDT" if "BTC" in symbol.upper() else "ETHUSDT"
     diag_sym = "BTC/USD" if "BTC" in symbol.upper() else "ETH/USD"
     bt_sym = "BTC" if "BTC" in symbol.upper() else "ETH"
@@ -860,8 +940,12 @@ def _nearest_gate_states(symbol: str, timestamp: str, run_id: Optional[int]):
         for h in history:
             try:
                 h_dt = datetime.fromisoformat(h["ts"].replace("Z", "+00:00"))
+                if h_dt.tzinfo is None:
+                    h_dt = h_dt.replace(tzinfo=timezone.utc)
+                if not _same_utc_hour(h_dt, target_dt):
+                    continue
                 delta = abs((h_dt - target_dt).total_seconds())
-                if delta <= 5400 and delta < min_delta:
+                if delta < min_delta:
                     min_delta = delta
                     closest = h
             except Exception:
@@ -873,13 +957,18 @@ def _nearest_gate_states(symbol: str, timestamp: str, run_id: Optional[int]):
     matching_signal = None
     try:
         signals = state_store.list_signals(symbol=clean_sym, limit=300)
+        best_s_delta = float("inf")
         for s in signals:
             try:
                 s_dt = datetime.fromisoformat(s["opened_at"].replace("Z", "+00:00"))
+                if s_dt.tzinfo is None:
+                    s_dt = s_dt.replace(tzinfo=timezone.utc)
+                if not _same_utc_hour(s_dt, target_dt):
+                    continue
                 delta = abs((s_dt - target_dt).total_seconds())
-                if delta <= 5400:
+                if delta < best_s_delta:
+                    best_s_delta = delta
                     matching_signal = s
-                    break
             except Exception:
                 continue
     except Exception:

@@ -65,6 +65,7 @@ def daily_optimizer():
     # log dig every time this is in doubt.
     _run_daily_ukf_retrain()
     _run_daily_param_search()
+    _run_shadow_param_search()
 
 
 def _run_daily_ukf_retrain():
@@ -141,6 +142,64 @@ def _run_daily_param_search():
                 state_store.update_run_status(rid, "failed", error=str(e))
         except Exception as e2:
             print(f"[Orchestra] ALSO failed to record the daily_optimizer failure itself: {e2}")
+
+
+def _run_shadow_param_search():
+    """2026-11-03 (shadow signal comparison) — runs walkforward.py's OWN
+    optimizer (run_standalone_grid_search()) standalone, on the same
+    daily cadence as the real optimizer above, and stores its output
+    separately (pyquant_kv key "walkforward_optimal_params") so
+    hourly_task() can record a side-by-side SHADOW diagnostic every
+    tick without ever touching what actually trades — see pyq_p4.py's
+    SignalGenerator.load_params(), the one place that decides which
+    source ("p4_search" or "walkforward", the `live_signal_source` kv
+    setting) actually drives real orders.
+
+    Off by default (`shadow_comparison_enabled` kv flag, flip via the
+    Settings page) and placed LAST, after both the UKF retrain and the
+    real param search, deliberately — see _run_daily_param_search()'s
+    2026-10-27 incident note just above: orchestra.yml's job has a
+    10-minute timeout, and a Bayesian search here can itself take
+    several minutes (up to BAYESIAN_TRIALS Optuna trials). Running a
+    SECOND full search back-to-back with the first risks exactly the
+    kind of timeout that incident describes — so this only runs when
+    explicitly enabled, and a timeout here can never prevent the UKF
+    retrain or the real optimizer from completing, since both already
+    ran above by the time this is reached."""
+    if not state_store.get_json("shadow_comparison_enabled", False):
+        return
+    if not state_store.try_claim_run("shadow_optimizer", state_store.current_day_bucket()):
+        print("[Orchestra] shadow_optimizer already ran (or is running) today. Skipping.")
+        return
+
+    print("[Orchestra] Starting shadow (walkforward) optimisation…")
+    try:
+        import walkforward  # imported here, not at module top, so a
+        # failure to import walkforward.py's heavier dependency set
+        # (matplotlib/filterpy/optuna — all already in requirements.txt,
+        # but kept lazy in case that ever changes) can never block
+        # daily_optimizer()'s two calls above from running.
+        prev_params = state_store.get_json("walkforward_optimal_params")
+        best_params = walkforward.run_standalone_grid_search(prev_params=prev_params)
+        state_store.set_json("walkforward_optimal_params", best_params)
+        print(f"[Orchestra] Shadow optimisation complete. Params: {best_params}")
+        try:
+            state_store.record_run(
+                run_type="shadow_optimizer",
+                metrics={},
+                params=best_params,
+            )
+        except Exception as e:
+            print(f"[Orchestra] shadow run logging failed (non-fatal): {e}")
+    except Exception as e:
+        err = f"{e}\n{traceback.format_exc()}"
+        print(f"[Orchestra] shadow_optimizer error: {err}")
+        try:
+            rid = state_store.request_backtest(run_type="shadow_optimizer", params={}, symbol="BTC+ETH")
+            if rid is not None:
+                state_store.update_run_status(rid, "failed", error=str(e))
+        except Exception as e2:
+            print(f"[Orchestra] ALSO failed to record the shadow_optimizer failure itself: {e2}")
 
 
 # Guarded behind __main__ (added during the GitHub Actions cron migration)

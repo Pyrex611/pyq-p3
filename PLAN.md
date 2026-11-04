@@ -860,6 +860,49 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-03, second pass — shadow signal comparison + exact-hour
+  match fix.** Owner follow-up after reviewing a real backtest-vs-live
+  gate comparison (the one from the first 2026-11-03 pass below) that
+  showed a trend disagreement (backtest UP, live DOWN for "the same"
+  hour) and a confusing "strict gate BLOCKED despite diff >> threshold"
+  reading.
+  - Fixed the actual matching bug behind the trend disagreement:
+    `_nearest_gate_states()` (api/index.py) and
+    `get_backtest_diagnostic_at()` (pyquant_state.py) now require the
+    SAME UTC calendar hour, not just "within 90 minutes" — a plain
+    nearest-match could pair a backtest bar with a different live
+    hour's reading.
+  - New `walkforward.run_standalone_grid_search()`: a self-contained
+    entrypoint around walkforward.py's own optimizer (the one
+    `run_walk_forward()` already uses internally), with the same
+    zero/few-arg calling convention as `p4_search.run_grid_search()` —
+    lets the orchestra run either optimizer on identical data.
+  - New `live_signal_source` kv setting (`p4_search` default |
+    `walkforward`), read fresh every tick by
+    `SignalGenerator.load_params()` — the ONLY thing this changes is
+    which params dict feeds the (unchanged) gate/order math. Falls
+    back safely to `p4_search` if `walkforward`'s params don't exist
+    yet.
+  - New `shadow_comparison_enabled` kv setting (default OFF — doubles
+    the nightly optimizer's runtime, risking the 2026-10-27 GitHub
+    Actions timeout incident) — when on, both optimizers run nightly
+    and both sources' gate diagnostics get recorded every hour
+    (`pyquant_diagnostics_history` gained a `source` column), with the
+    non-selected one strictly read-only (walkforward.diagnose_gates()
+    never builds a tradeable signal, so it can never place an order).
+  - New `GET`/`POST /api/signal-source`; Settings page card to flip
+    both settings, with an explicit warning that `live_signal_source`
+    changes what real orders are sized/fired on; Live Monitor now
+    fetches the live-selected source for its main chart and, when
+    shadow comparison is on, the other source separately for a
+    labeled "Shadow" panel (previously one unfiltered fetch would have
+    interleaved both optimizers' readings into one misleading chart).
+  - Not yet run in production — `walkforward_optimal_params` won't
+    exist until shadow comparison is turned on and a `daily_optimizer()`
+    cycle completes; until then `live_signal_source=walkforward` is a
+    safe no-op. Code-complete, syntax/unit-tested standalone
+    (SQLite round-trip for the new `source` column + exact-hour
+    matching), not yet pushed.
 - **2026-10-20** — Signal-visibility audit (triggered by owner report:
   "no signal logged in hours, UI shows nothing but API-key confirmation",
   cron log attached). Confirmed the pooler fix is genuinely live (no DB

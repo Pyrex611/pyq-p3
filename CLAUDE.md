@@ -295,6 +295,64 @@ section only orients a new session to where things stand structurally.
   - **Bybit/multi-provider**: planning-only backlog entry added to
     `PLAN.md` per explicit instruction not to start any code changes
     yet.
+- **Added 2026-11-03, second pass — shadow signal comparison + exact-
+  hour matching fix.** Owner's own follow-up after reviewing the gate
+  comparison above: fix the comparison tool's timestamp matching, and
+  let live trading optionally run on walkforward.py's own optimizer
+  instead of (or alongside, as a non-trading shadow) `p4_search.py`'s.
+  - **Exact-hour matching**: `_nearest_gate_states()` (api/index.py)
+    and `get_backtest_diagnostic_at()` (pyquant_state.py) now require
+    the candidate row to fall in the SAME UTC calendar hour as the
+    target timestamp, not just "within 90 minutes" — a plain nearest-
+    match could (and, in a real example, did) pair a backtest bar with
+    a DIFFERENT live hour's reading, showing up as a false "trend
+    disagreement" that looked like a model divergence but was actually
+    a matching bug. See `_same_utc_hour()`'s docstring in api/index.py.
+  - **`walkforward.run_standalone_grid_search()`** (new): a self-
+    contained entrypoint around walkforward.py's OWN optimizer (the
+    same one `run_walk_forward()` already uses internally), exposed
+    with the same zero/few-arg calling convention as
+    `p4_search.run_grid_search()` — reads the CSVs, trains its own
+    UKFs, needs nothing external. This is what makes "run either
+    optimizer and compare" possible without duplicating more math.
+  - **`live_signal_source` kv setting** (`p4_search` default |
+    `walkforward`) — read fresh on every `generate_signal()` call via
+    `SignalGenerator.load_params()` (p4_utils.py), so flipping it takes
+    effect on the very next tick. This is the ONLY thing that changes:
+    the gate/order-construction math in `generate_signal()` is
+    unchanged either way — only which stored params dict it loads
+    differs. Falls back to `p4_search`'s params if `walkforward`'s
+    don't exist yet (never trades on empty/garbage thresholds).
+  - **`shadow_comparison_enabled` kv setting** (default **off**) — when
+    on, `p4_orchestra.py`'s nightly `daily_optimizer()` ALSO runs
+    `run_standalone_grid_search()` (own run-guard, `shadow_optimizer`
+    bucket, stores to kv key `walkforward_optimal_params`), and
+    `pyq_p4.py`'s `hourly_task()` ALSO computes a read-only diagnostic
+    for the non-selected source every tick via
+    `walkforward.diagnose_gates()` (never builds a tradeable signal, so
+    it can never place an order). Off by default because it roughly
+    doubles the nightly optimizer's runtime — see
+    `_run_shadow_param_search()`'s docstring for the 2026-10-27 GitHub
+    Actions 10-minute-timeout incident this guards against.
+  - **`pyquant_diagnostics_history` gained a `source` column**
+    (`p4_search` default | `walkforward`) so both sources' rows can
+    coexist without corrupting each other's trend charts —
+    `GET /api/diagnostics/history` takes an optional `source` filter;
+    Live Monitor fetches the live-selected source for the main chart
+    and, when shadow comparison is on, the other source separately for
+    a clearly-labeled "Shadow" panel, rather than one unfiltered call
+    that would zig-zag two optimizers' readings together.
+  - **New `GET`/`POST /api/signal-source`** — reads/writes both kv
+    settings; still never gives the API itself the ability to place a
+    trade (same one-flag-the-orchestra-reads pattern as
+    `trading_enabled`). Settings page gained a card for this with an
+    explicit warning that switching `live_signal_source` changes what
+    real orders are sized/fired on.
+  - **Not yet done**: this hasn't run in production — `walkforward_
+    optimal_params` won't exist until shadow comparison is turned on
+    and a `daily_optimizer()` cycle completes. Until then, switching
+    `live_signal_source` to `walkforward` is a no-op (falls back to
+    `p4_search`'s params, by design — see above).
 
 ## 6. What's next
 

@@ -294,7 +294,8 @@ _restore_ukf_state()
 _SIGNAL_DIAG_KEY = "pyq_p4_signal_diagnostics"
 
 
-def _persist_signal_diagnostic(symbol: str, diag: dict) -> None:
+def _persist_signal_diagnostic(symbol: str, diag: dict, source: str = "p4_search",
+                                update_heartbeat: bool = True) -> None:
     """Best-effort merge of this symbol's latest signal-generation
     diagnostic into the shared state store, keyed by symbol. A failure here
     never affects trading logic — it only means the UI's diagnostic panel
@@ -307,17 +308,27 @@ def _persist_signal_diagnostic(symbol: str, diag: dict) -> None:
     was generated this turn" with no way to see a trend. Both writes are
     kept: the KV blob is still the cheap "last tick" read GET
     /api/heartbeat already serves, the history table is the new append-
-    only log GET /api/diagnostics/history reads."""
+    only log GET /api/diagnostics/history reads.
+
+    2026-11-03 (shadow signal comparison): `source` tags the history row
+    ('p4_search' or 'walkforward' — see record_diagnostic_history()).
+    `update_heartbeat=False` skips the KV-blob write entirely — used for
+    the shadow (non-selected) source's diagnostic so a comparison run
+    can NEVER overwrite GET /api/heartbeat's "latest tick" snapshot,
+    which must always reflect whichever source is actually driving real
+    trades (see hourly_task()'s call site and
+    SignalGenerator.load_params())."""
+    if update_heartbeat:
+        try:
+            existing = state_store.get_json(_SIGNAL_DIAG_KEY) or {}
+            entry = dict(diag)
+            entry["ts"] = datetime.now(timezone.utc).isoformat()
+            existing[symbol] = entry
+            state_store.set_json(_SIGNAL_DIAG_KEY, existing)
+        except Exception as e:
+            logger.warning(f"Signal diagnostic persist failed (non-fatal): {e}")
     try:
-        existing = state_store.get_json(_SIGNAL_DIAG_KEY) or {}
-        entry = dict(diag)
-        entry["ts"] = datetime.now(timezone.utc).isoformat()
-        existing[symbol] = entry
-        state_store.set_json(_SIGNAL_DIAG_KEY, existing)
-    except Exception as e:
-        logger.warning(f"Signal diagnostic persist failed (non-fatal): {e}")
-    try:
-        state_store.record_diagnostic_history(symbol, diag)
+        state_store.record_diagnostic_history(symbol, diag, source=source)
     except Exception as e:
         logger.warning(f"Signal diagnostic history append failed (non-fatal): {e}")
 
@@ -1424,7 +1435,45 @@ def hourly_task():
                         price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance,
                         atr=atr_val, atr_mult=atr_mult
                     )
-                    _persist_signal_diagnostic(symbol, signal_generator.last_diagnostic)
+                    # 2026-11-03 (shadow signal comparison): generate_signal()
+                    # above already picked which optimizer's params actually
+                    # decided my_signal (SignalGenerator.load_params() reads
+                    # the live_signal_source kv setting) — this just tags
+                    # that SAME diagnostic with which source it was so the
+                    # history table/Compare page can tell.
+                    live_source = state_store.get_json("live_signal_source", "p4_search")
+                    _persist_signal_diagnostic(symbol, signal_generator.last_diagnostic, source=live_source)
+
+                    # Shadow comparison — read-only. Computes what the OTHER
+                    # optimizer's params would have decided at this exact
+                    # tick (same price/pred/high_pred/low_pred already in
+                    # hand, zero extra data fetch) via walkforward.py's own
+                    # diagnose_gates(), which mirrors generate_signal()'s
+                    # gate math exactly but never builds/returns a tradeable
+                    # signal — so this can NEVER affect my_signal, an order,
+                    # or a Binance call, regardless of what it computes or
+                    # whether it raises. See PLAN.md's 2026-11-03 "shadow
+                    # signal comparison" entry for the full design.
+                    try:
+                        if state_store.get_json("shadow_comparison_enabled", False):
+                            shadow_source = "walkforward" if live_source == "p4_search" else "p4_search"
+                            shadow_key = ("walkforward_optimal_params" if shadow_source == "walkforward"
+                                          else "optimal_params")
+                            shadow_params = state_store.get_json(shadow_key)
+                            if shadow_params:
+                                import walkforward  # lazy — see _run_shadow_param_search()'s
+                                                     # docstring for why (heavier dep set, kept
+                                                     # from ever blocking the real trading path)
+                                sp = signal_generator._get_symbol_params(symbol, shadow_params)
+                                shadow_diag = walkforward.diagnose_gates(
+                                    price, pred, high_pred, low_pred, symbol,
+                                    sp["strict"], sp["pct_diff_and_vol_strict"],
+                                )
+                                _persist_signal_diagnostic(
+                                    symbol, shadow_diag, source=shadow_source, update_heartbeat=False
+                                )
+                    except Exception as e:
+                        print(f"Shadow diagnostic error for {symbol} (non-fatal): {e}")
                 except Exception as e:
                     print(f"Signal generation error for {symbol}: {e}")
                     _persist_signal_diagnostic(symbol, {"stage_reached": "exception", "error": str(e)})
