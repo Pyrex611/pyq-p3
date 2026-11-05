@@ -1392,17 +1392,28 @@ def hourly_task():
                     continue
 
             ddata = None
-            while ddata is None:
+            _dl_attempts = 0
+            while ddata is None and _dl_attempts < 5:
+                _dl_attempts += 1
                 try:
                     downloaded_data = data_download("1H", symbol)
                     if downloaded_data is not None:
                         ddata = downloaded_data.iloc[-1]
                     else:
-                        print(f"Data None for {symbol} (1H). Retrying…")
+                        print(f"Data None for {symbol} (1H). Retrying… ({_dl_attempts}/5)")
                         time.sleep(2)
                 except Exception as e:
-                    print(f"Error downloading {symbol} 1H: {e}")
+                    print(f"Error downloading {symbol} 1H: {e}  ({_dl_attempts}/5)")
                     time.sleep(2)
+            if ddata is None:
+                # 2026-11-05: retry cap (see data_download()'s docstring for
+                # the incident this guards against) — give up on this
+                # symbol for this tick rather than retrying forever and
+                # burning the whole GitHub Actions job's time budget, which
+                # would otherwise block five_minute_task/fifteen_minute_task/
+                # hourly_task/daily_optimizer from ever running.
+                print(f"Giving up on {symbol} 1H data this tick after 5 attempts.")
+                continue
 
             price = float(ddata["close"])
 
@@ -1703,7 +1714,9 @@ def fifteen_minute_task():
         for i in symbols_list:
             the_symbol = i
             fift_data  = None
-            while fift_data is None:
+            _dl_attempts = 0
+            while fift_data is None and _dl_attempts < 5:
+                _dl_attempts += 1
                 try:
                     downloaded_data = data_download("1T", i)
                     if downloaded_data is not None:
@@ -1711,11 +1724,15 @@ def fifteen_minute_task():
                         agg.dropna(inplace=True)
                         fift_data = agg.iloc[-1]
                     else:
-                        print(f"15M data None for {i}. Retrying…")
+                        print(f"15M data None for {i}. Retrying… ({_dl_attempts}/5)")
                         time.sleep(2)
                 except Exception as e:
-                    print(f"Error downloading 15M data for {i}: {e}")
+                    print(f"Error downloading 15M data for {i}: {e}  ({_dl_attempts}/5)")
                     time.sleep(2)
+            if fift_data is None:
+                # 2026-11-05: retry cap — see data_download()'s docstring.
+                print(f"Giving up on {i} 15M data this tick after 5 attempts.")
+                continue
 
             print(f"{i}: Open:{fift_data['open']}  High:{fift_data['high']}  Low:{fift_data['low']}")
 
@@ -1744,18 +1761,24 @@ def five_minute_task():
     try:
         for i in symbols_list:
             five_data = None
-            while five_data is None:
+            _dl_attempts = 0
+            while five_data is None and _dl_attempts < 5:
+                _dl_attempts += 1
                 try:
                     downloaded_data = data_download("1T", i)
                     if downloaded_data is not None:
                         agg       = aggregate_ohlcv_data(downloaded_data.copy(), aggregation_minutes=5)
                         five_data = agg.iloc[-1]
                     else:
-                        print(f"5M data None for {i}. Retrying…")
+                        print(f"5M data None for {i}. Retrying… ({_dl_attempts}/5)")
                         time.sleep(2)
                 except Exception as e:
-                    print(f"Error downloading 5M data for {i}: {e}")
+                    print(f"Error downloading 5M data for {i}: {e}  ({_dl_attempts}/5)")
                     time.sleep(2)
+            if five_data is None:
+                # 2026-11-05: retry cap — see data_download()'s docstring.
+                print(f"Giving up on {i} 5M data this tick after 5 attempts.")
+                continue
 
             print(f"{i}: O:{five_data['open']}  H:{five_data['high']}  "
                   f"L:{five_data['low']}  C:{five_data['close']}")
@@ -1840,18 +1863,29 @@ def one_minute_task():
 
         for i in symbols_list:
             data = None
-            while data is None:
+            _dl_attempts = 0
+            while data is None and _dl_attempts < 5:
+                _dl_attempts += 1
                 try:
                     downloaded_data = data_download("1T", i)
                     if downloaded_data is not None:
                         data     = downloaded_data
                         one_data = data.iloc[-1]
                     else:
-                        print(f"1M data None for {i}. Retrying…")
+                        print(f"1M data None for {i}. Retrying… ({_dl_attempts}/5)")
                         time.sleep(2)
                 except Exception as e:
-                    print(f"Error downloading 1M data for {i}: {e}")
+                    print(f"Error downloading 1M data for {i}: {e}  ({_dl_attempts}/5)")
                     time.sleep(2)
+            if data is None:
+                # 2026-11-05: retry cap (see data_download()'s docstring in
+                # p4_utils.py for the incident this guards against — this
+                # exact loop, with no cap, is what let a guaranteed-to-fail
+                # data_download() call block one_minute_task() forever,
+                # which in turn blocked every task after it in
+                # cron_runner.py's per-tick list for over two weeks).
+                print(f"Giving up on {i} 1M data this tick after 5 attempts.")
+                continue
 
             price = float(one_data["close"])
             llow  = float(one_data["low"])

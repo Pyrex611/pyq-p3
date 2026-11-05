@@ -33,7 +33,7 @@ import alpaca_trade_api as tradeapi
 from alpaca_trade_api.stream import Stream
 from alpaca_trade_api.common import URL
 from alpaca.trading.client import TradingClient
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
@@ -241,10 +241,29 @@ def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int):
 
 
 def data_download(timeframe: str, or_symbols):
+    """2026-11-05 FIX: the "15T"/"5T" entries used to build
+    `TimeFrame(15, TimeFrame.Minute)` / `TimeFrame(5, TimeFrame.Minute)` —
+    passing the `TimeFrame.Minute` PRESET (itself a TimeFrame instance,
+    amount=1) as the `unit` argument, where alpaca-py requires a
+    TimeFrameUnit enum member. Because this dict is a literal, ALL of its
+    values are evaluated unconditionally on every call, regardless of
+    which `timeframe` key was actually requested — so this raised
+    `ValueError: Unit must be a TimeFrameUnit value, not a TimeFrame...`
+    on every single call to data_download(), for every timeframe
+    including "1H"/"1T", not just "15T"/"5T". Introduced in b0e588d
+    (2026-10-20) and never caught locally (no alpaca-py in this sandbox).
+    Real-world impact: pyq_p4.py's one_minute_task() calls this first in
+    cron_runner.py's per-tick task list, inside a `while data is None`
+    retry loop with no retry cap — so every GitHub Actions tick has been
+    retrying this same guaranteed-to-fail call every 2s until the job's
+    own timeout killed it, meaning five_minute_task/fifteen_minute_task/
+    hourly_task/daily_optimizer never ran at all since 2026-10-20. See
+    the retry caps added to pyq_p4.py's four affected loops the same day
+    as a second line of defense against this exact failure mode."""
     tf_map = {
         "1H":  TimeFrame.Hour,
-        "15T": TimeFrame(15, TimeFrame.Minute),
-        "5T":  TimeFrame(5,  TimeFrame.Minute),
+        "15T": TimeFrame(15, TimeFrameUnit.Minute),
+        "5T":  TimeFrame(5,  TimeFrameUnit.Minute),
         "1T":  TimeFrame.Minute,
     }
     tf = tf_map.get(timeframe)

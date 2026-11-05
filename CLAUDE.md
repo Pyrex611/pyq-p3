@@ -387,6 +387,47 @@ section only orients a new session to where things stand structurally.
     `shadow_comparison_enabled` toggle — but does NOT consume the
     day's automatic slot, so it's purely an extra one-off run, never a
     substitute for the scheduled one.
+- **FIXED 2026-11-05 — MAJOR incident: the entire cron pipeline has been
+  silently dead since 2026-10-20.** `p4_utils.py`'s `data_download()`
+  built its `tf_map` dict with `"15T": TimeFrame(15, TimeFrame.Minute)`
+  and `"5T": TimeFrame(5, TimeFrame.Minute)` — passing the
+  `TimeFrame.Minute` PRESET (itself a `TimeFrame` instance, amount=1) as
+  the `unit` argument, where alpaca-py requires a `TimeFrameUnit` enum
+  member. Confirmed against the real installed library: this raises
+  `TypeError: Unit must be a TimeFrameUnit value, not a TimeFrame...`
+  immediately. Because `tf_map` is a dict **literal**, every value is
+  evaluated unconditionally on every call — so `data_download()` raised
+  this on EVERY call, for EVERY timeframe (including plain "1H"/"1T"),
+  not only when "15T"/"5T" were actually requested. Introduced directly
+  by the owner in `b0e588d` ("Attempt", 2026-10-20) — not something
+  introduced by Claude in any session since. Never caught locally
+  because alpaca-py isn't installed in the dev sandbox (now confirmed
+  by installing it fresh and reproducing the exact error string).
+  **Real-world blast radius**: `cron_runner.py` calls
+  `one_minute_task()` FIRST, every single GitHub Actions tick, which
+  calls `data_download("1T", ...)` inside a `while data is None:`
+  retry loop with **no retry cap** — so every tick has been retrying
+  this guaranteed-to-fail call every 2s until GitHub Actions' own job
+  timeout killed the process, meaning `five_minute_task`/
+  `fifteen_minute_task`/`hourly_task`/`daily_optimizer` **never ran at
+  all** for roughly two and a half weeks (no signals generated, no
+  optimizer runs, no UKF retrains, nothing past `one_minute_task()`'s
+  first symbol). This is very likely the real explanation for several
+  "not yet done"/"hasn't run in production" items logged in this file
+  and `PLAN.md` across that whole window — they weren't stalled on
+  design or config, the scheduler was wedged on tick one. Fixed by: (1)
+  importing `TimeFrameUnit` and using `TimeFrame(15, TimeFrameUnit.Minute)`
+  / `TimeFrame(5, TimeFrameUnit.Minute)`; (2) adding a 5-attempt retry
+  cap (with `continue` to the next symbol/tick on exhaustion) to all
+  four `while ... is None:` download loops in `pyq_p4.py`
+  (`hourly_task`'s 1H loop, `fifteen_minute_task`'s, `five_minute_task`'s,
+  and `one_minute_task`'s) — a second line of defense so a future
+  data-download failure degrades to "this tick skips a symbol" instead
+  of "the whole pipeline silently stops for weeks." Verified by
+  installing alpaca-py fresh in the dev sandbox and reproducing both
+  the exact failure (old code) and the fix (new code) directly against
+  the real library — the one incident in this project where that
+  dependency gap could be closed rather than worked around.
 
 ## 6. What's next
 
