@@ -425,6 +425,15 @@ are stable enough to live here rather than churn `PLAN.md`:
 - **Zip deliveries:** only new/modified files, full unabridged content,
   never a whole-repo re-zip (explicit standing feedback). Matters more
   now that the owner applies/pushes these by hand.
+- **Push-failure safety net (2026-11-04):** if `git push` fails on its
+  first attempt for any reason, zip all modified files for that commit
+  and send them to the owner via `SendUserFile` BEFORE any subsequent
+  or parallel retry of that push — so the owner always has local access
+  to the pending work regardless of git's state. Only after the zip is
+  sent, retry the push. Applies to every future push in this project,
+  not just the incident that prompted it (a transient GitHub "Internal
+  Server Error" on commit `2ebbe0e`, which succeeded on the next retry
+  after the zip was sent).
 - **"Testing deferred to integration"** means the live trading engine
   specifically (`pyq_p4.py`/`p4_orchestra.py` against a real exchange).
   Ordinary software testing of non-trading infrastructure (state-store
