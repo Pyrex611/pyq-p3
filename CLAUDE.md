@@ -387,47 +387,56 @@ section only orients a new session to where things stand structurally.
     `shadow_comparison_enabled` toggle — but does NOT consume the
     day's automatic slot, so it's purely an extra one-off run, never a
     substitute for the scheduled one.
-- **FIXED 2026-11-05 — MAJOR incident: the entire cron pipeline has been
-  silently dead since 2026-10-20.** `p4_utils.py`'s `data_download()`
-  built its `tf_map` dict with `"15T": TimeFrame(15, TimeFrame.Minute)`
-  and `"5T": TimeFrame(5, TimeFrame.Minute)` — passing the
-  `TimeFrame.Minute` PRESET (itself a `TimeFrame` instance, amount=1) as
-  the `unit` argument, where alpaca-py requires a `TimeFrameUnit` enum
-  member. Confirmed against the real installed library: this raises
-  `TypeError: Unit must be a TimeFrameUnit value, not a TimeFrame...`
-  immediately. Because `tf_map` is a dict **literal**, every value is
-  evaluated unconditionally on every call — so `data_download()` raised
-  this on EVERY call, for EVERY timeframe (including plain "1H"/"1T"),
-  not only when "15T"/"5T" were actually requested. Introduced directly
-  by the owner in `b0e588d` ("Attempt", 2026-10-20) — not something
-  introduced by Claude in any session since. Never caught locally
-  because alpaca-py isn't installed in the dev sandbox (now confirmed
-  by installing it fresh and reproducing the exact error string).
-  **Real-world blast radius**: `cron_runner.py` calls
-  `one_minute_task()` FIRST, every single GitHub Actions tick, which
-  calls `data_download("1T", ...)` inside a `while data is None:`
-  retry loop with **no retry cap** — so every tick has been retrying
-  this guaranteed-to-fail call every 2s until GitHub Actions' own job
-  timeout killed the process, meaning `five_minute_task`/
-  `fifteen_minute_task`/`hourly_task`/`daily_optimizer` **never ran at
-  all** for roughly two and a half weeks (no signals generated, no
-  optimizer runs, no UKF retrains, nothing past `one_minute_task()`'s
-  first symbol). This is very likely the real explanation for several
-  "not yet done"/"hasn't run in production" items logged in this file
-  and `PLAN.md` across that whole window — they weren't stalled on
-  design or config, the scheduler was wedged on tick one. Fixed by: (1)
-  importing `TimeFrameUnit` and using `TimeFrame(15, TimeFrameUnit.Minute)`
-  / `TimeFrame(5, TimeFrameUnit.Minute)`; (2) adding a 5-attempt retry
-  cap (with `continue` to the next symbol/tick on exhaustion) to all
-  four `while ... is None:` download loops in `pyq_p4.py`
-  (`hourly_task`'s 1H loop, `fifteen_minute_task`'s, `five_minute_task`'s,
-  and `one_minute_task`'s) — a second line of defense so a future
-  data-download failure degrades to "this tick skips a symbol" instead
-  of "the whole pipeline silently stops for weeks." Verified by
-  installing alpaca-py fresh in the dev sandbox and reproducing both
-  the exact failure (old code) and the fix (new code) directly against
-  the real library — the one incident in this project where that
-  dependency gap could be closed rather than worked around.
+- **FIXED 2026-11-05 — `data_download()` TimeFrame crash, real outage
+  window ~3 hours (CORRECTED 2026-11-06 — see note at the end).**
+  `p4_utils.py`'s `data_download()` built its `tf_map` dict with
+  `"15T": TimeFrame(15, TimeFrame.Minute)` and `"5T": TimeFrame(5,
+  TimeFrame.Minute)` — passing the `TimeFrame.Minute` PRESET (itself a
+  `TimeFrame` instance, amount=1) as the `unit` argument, where
+  alpaca-py requires a `TimeFrameUnit` enum member. Because `tf_map` is
+  a dict literal, every value is evaluated unconditionally on every
+  call — so once triggered, `data_download()` raised on EVERY call, for
+  EVERY timeframe, not only "15T"/"5T". The line itself dates to
+  `b0e588d` (owner, 2026-10-20), but **it was latent, not active, from
+  2026-10-20 to 2026-11-05**: `requirements.txt` pins `alpaca-py>=0.20.0`
+  (open-ended), so each GitHub Actions run does a fresh `pip install`
+  that floats to whatever's newest on PyPI. Confirmed via actual run
+  logs (`gh run view --log` across Oct 20–Nov 4): every tick in that
+  window installed **alpaca-py 0.44.0**, which did not validate
+  `unit` strictly, so the bad line was harmless — `one_minute_task()`
+  logs show it downloading real ETH/USD and BTC/USD bars successfully
+  throughout. The crash only started when a run picked up **alpaca-py
+  0.45.0** (confirmed first appearing in a run's install log on
+  2026-11-05), which added the strict check that turns this into
+  `TypeError: Unit must be a TimeFrameUnit value, not a TimeFrame...`.
+  **Real blast radius, confirmed from GitHub Actions' own run history**:
+  a run-level `concurrency` group (queue depth 1, no cancel-in-progress)
+  meant `one_minute_task()`'s uncapped `while data is None:` retry loop
+  held each run "in progress" far longer than the 5-minute cadence, so
+  every subsequent queued tick got superseded/cancelled — a visible
+  streak of ~38 "cancelled" runs from **2026-11-05 19:00 UTC to 22:10
+  UTC** (confirmed via the GitHub API), ending at the first "success"
+  run at **22:15 UTC**, 10 minutes after this fix was pushed (22:05:19
+  UTC). So the real outage was **about 3 hours**, not weeks. Fixed by:
+  (1) importing `TimeFrameUnit` and using `TimeFrame(15,
+  TimeFrameUnit.Minute)` / `TimeFrame(5, TimeFrameUnit.Minute)`; (2)
+  adding a 5-attempt retry cap (`continue` to the next symbol/tick on
+  exhaustion) to all four `while ... is None:` download loops in
+  `pyq_p4.py` — defense in depth so a future transient failure degrades
+  to "skip a symbol this tick" instead of queuing/cancelling ticks for
+  hours. Verified by installing alpaca-py fresh in the dev sandbox and
+  reproducing both the exact failure (old code) and the fix (new code)
+  against the real library.
+  **CORRECTION NOTE (2026-11-06):** the original version of this entry
+  claimed the whole cron pipeline had been "silently dead since
+  2026-10-20" / "~2.5 weeks of total scheduler paralysis," reasoning
+  from the code alone (an uncapped retry loop hitting a
+  deterministic-looking crash) without checking the actual GitHub
+  Actions run history first. That was wrong, as the real run logs
+  above show — flagging this as a reminder to check `gh run list`/
+  `gh run view --log` against the real history before writing an
+  incident's blast-radius into this file, not just reasoning from
+  reading the code.
 
 ## 6. What's next
 

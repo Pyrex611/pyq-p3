@@ -860,30 +860,32 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
-- **2026-11-05 — FIXED a major incident: cron pipeline dead since
-  2026-10-20.** `p4_utils.py`'s `data_download()` built its `tf_map`
-  dict with `TimeFrame(15, TimeFrame.Minute)`/`TimeFrame(5,
-  TimeFrame.Minute)` — passing the `TimeFrame.Minute` preset (a
-  `TimeFrame` instance) as `unit`, where alpaca-py requires a
-  `TimeFrameUnit` member. Since the dict is a literal, every value is
-  built on every call, so this raised
-  `TypeError: Unit must be a TimeFrameUnit value, not a TimeFrame...`
-  on EVERY call to `data_download()`, any timeframe, not just
-  "15T"/"5T" — introduced by the owner directly in `b0e588d`
-  (2026-10-20). `cron_runner.py` calls `one_minute_task()` first every
-  tick, which hit this inside a retry loop with no cap, so every
-  GitHub Actions run has spent its whole budget retrying a
-  guaranteed-to-fail call and dying before `five_minute_task`/
-  `fifteen_minute_task`/`hourly_task`/`daily_optimizer` ever ran — ~2.5
-  weeks of total scheduler paralysis. See `CLAUDE.md` Section 5's
-  2026-11-05 entry for the full incident writeup. Fixed: `TimeFrameUnit`
-  import + corrected constructor calls; added a 5-attempt retry cap
-  (skip-and-continue on exhaustion) to all four affected download loops
-  in `pyq_p4.py` as defense in depth. Verified by installing alpaca-py
-  fresh in the dev sandbox and reproducing the exact error against the
-  real library, then confirming the fix constructs correctly — the one
-  incident this session where the usual "alpaca-py not available
-  locally" testing gap could actually be closed.
+- **2026-11-05 — FIXED `data_download()` TimeFrame crash; real outage
+  was ~3 hours, not weeks (see 2026-11-06 correction below).**
+  `p4_utils.py`'s `data_download()` built its `tf_map` dict with
+  `TimeFrame(15, TimeFrame.Minute)`/`TimeFrame(5, TimeFrame.Minute)` —
+  passing the `TimeFrame.Minute` preset (a `TimeFrame` instance) as
+  `unit`, where alpaca-py requires a `TimeFrameUnit` member. The line
+  dates to the owner's `b0e588d` (2026-10-20) but was **latent, not
+  active**, until a transitive dependency bump: `requirements.txt`
+  pins `alpaca-py>=0.20.0` (open-ended), so every GH Actions run
+  `pip install`s whatever's newest. Confirmed via `gh run view --log`:
+  every run from Oct 20–Nov 4 installed alpaca-py 0.44.0, which didn't
+  validate strictly, so `one_minute_task()` downloaded real bars fine
+  the whole time. A run on 2026-11-05 picked up alpaca-py 0.45.0, which
+  added the strict check, turning this into
+  `TypeError: Unit must be a TimeFrameUnit value, not a TimeFrame...`.
+  Confirmed real blast radius from GitHub's own run history: a
+  concurrency-group queue + the uncapped retry loop produced a streak
+  of ~38 cancelled runs from 19:00–22:10 UTC on 2026-11-05, ending 10
+  minutes after this fix was pushed (22:05:19 UTC) — about 3 hours,
+  not the "~2.5 weeks since Oct 20" originally written here and in
+  `CLAUDE.md` (corrected 2026-11-06 after actually checking
+  `gh run list`/`gh run view --log` instead of reasoning from the code
+  alone). Fixed: `TimeFrameUnit` import + corrected constructor calls;
+  added a 5-attempt retry cap (skip-and-continue) to all four affected
+  download loops in `pyq_p4.py` as defense in depth. See `CLAUDE.md`
+  Section 5's entry for the full writeup and correction note.
 - **2026-11-04 — manual optimizer trigger + staggered automatic
   schedule.** Owner follow-up on the shadow-comparison work below:
   wanted a button to run an optimizer on demand, and noted the two
