@@ -860,6 +860,25 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-06 — expanded Compare page's live-vs-backtest comparison
+  to full raw values + training window + a variance column**, and
+  scrutinized the direction-extraction code for a swap/sign-flip bug
+  (found none — see `CLAUDE.md`'s 2026-11-06 entry for the full
+  writeup). `diagnose_gates()` (walkforward.py) now captures high_pred/
+  low_pred/buy_price/sell_price, matching `generate_signal()`; both
+  live (`retrain_daily_ukfs()`) and backtest (`run_walk_forward()`'s
+  per-day loop) now capture and persist the actual training-window
+  start/end/bar-count their UKF was re-anchored on, so a divergence can
+  be checked against "were these two models even trained on comparable
+  windows" rather than guessed at. New shared
+  `components/FullComparisonTable.jsx` (Field | Backtest | Live |
+  Diff, >5% numeric or any text mismatch flagged) used by both
+  `pages/compare.js`'s Model State Comparison card and
+  `RunDetailModal.jsx`'s "Compare to Live" drawer. 7 new nullable
+  columns on both diagnostics tables; `api/index.py` needed no changes
+  since the new fields ride along automatically. Verified via a real
+  SQLite round-trip of every new field and a clean `npm run build`;
+  not yet confirmed on a live deploy.
 - **2026-11-05 — FIXED `data_download()` TimeFrame crash; real outage
   was ~3 hours, not weeks (see 2026-11-06 correction below).**
   `p4_utils.py`'s `data_download()` built its `tf_map` dict with

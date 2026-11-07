@@ -328,7 +328,17 @@ def _persist_signal_diagnostic(symbol: str, diag: dict, source: str = "p4_search
         except Exception as e:
             logger.warning(f"Signal diagnostic persist failed (non-fatal): {e}")
     try:
-        state_store.record_diagnostic_history(symbol, diag, source=source)
+        diag_with_meta = dict(diag)
+        try:
+            symb_short = "BTC" if "BTC" in symbol else "ETH"
+            retrain_meta = (state_store.get_json(_UKF_RETRAIN_META_KEY) or {}).get(symb_short)
+            if retrain_meta:
+                diag_with_meta["train_window_start"] = retrain_meta.get("start")
+                diag_with_meta["train_window_end"]   = retrain_meta.get("end")
+                diag_with_meta["train_bar_count"]    = retrain_meta.get("bar_count")
+        except Exception as e:
+            logger.warning(f"Train-window metadata lookup failed (non-fatal): {e}")
+        state_store.record_diagnostic_history(symbol, diag_with_meta, source=source)
     except Exception as e:
         logger.warning(f"Signal diagnostic history append failed (non-fatal): {e}")
 
@@ -618,6 +628,9 @@ LAST_RUN_FILE   = "last_execution_timestamp.txt"   # unused as of Phase 1 — ke
 MINUTE_RUN_FILE = "minute_execution_timestamp.txt"  # old deployment's leftover file is harmless
 
 
+_UKF_RETRAIN_META_KEY = "pyq_p4_ukf_retrain_meta"  # {"BTC": {...}, "ETH": {...}} — see retrain_daily_ukfs()
+
+
 def retrain_daily_ukfs():
     """Re-anchors 1H UKFs on trailing 30 days of data once daily (matches walkforward.py)."""
     global btc_ukf, btc_high_ukf, btc_low_ukf
@@ -637,9 +650,22 @@ def retrain_daily_ukfs():
             if isinstance(bars.index, pd.MultiIndex):
                 bars = bars.xs(symbol_alpaca, level="symbol")
             
-            bars = bars.sort_index().tail(hours_needed).reset_index(drop=True)
+            bars = bars.sort_index().tail(hours_needed)
+            # 2026-11-06: capture the actual training window BEFORE the
+            # reset_index(drop=True) below discards the DatetimeIndex —
+            # persisted to kv so the Compare page can show what data this
+            # symbol's UKF was really trained on, alongside backtest's own
+            # train_window_start/end (see walkforward.py's paper_trade_day()
+            # btc_train_meta/eth_train_meta). Purely descriptive.
+            train_meta = {
+                "start": str(bars.index[0]) if len(bars) else None,
+                "end": str(bars.index[-1]) if len(bars) else None,
+                "bar_count": int(len(bars)),
+                "retrained_at": datetime.now(timezone.utc).isoformat(),
+            }
+            bars = bars.reset_index(drop=True)
             symb_short = "BTC" if "BTC" in symbol_alpaca else "ETH"
-            
+
             ukf_c, ukf_h, ukf_l = build_ukfs(bars, symb_short)
             if symb_short == "BTC":
                 btc_ukf, btc_high_ukf, btc_low_ukf = ukf_c, ukf_h, ukf_l
@@ -647,6 +673,13 @@ def retrain_daily_ukfs():
             else:
                 eth_ukf, eth_high_ukf, eth_low_ukf = ukf_c, ukf_h, ukf_l
                 ukf_mapping["ETH/USD"] = {"ukf": eth_ukf, "high_ukf": eth_high_ukf, "low_ukf": eth_low_ukf}
+
+            try:
+                all_meta = state_store.get_json(_UKF_RETRAIN_META_KEY) or {}
+                all_meta[symb_short] = train_meta
+                state_store.set_json(_UKF_RETRAIN_META_KEY, all_meta)
+            except Exception as e:
+                logger.error(f"[UKF Retrain] Failed to persist train-window metadata for {symb_short} (non-fatal): {e}")
 
             logger.info(f"[UKF Retrain] Successfully re-anchored 1H UKF for {symb_short} on {len(bars)} bars.")
         except Exception as e:

@@ -204,6 +204,7 @@ def diagnose_gates(price, pred, high_pred, low_pred, symbol, strict, stricts):
     high_pred, low_pred = float(high_pred), float(low_pred)
     diag = {
         "symbol": symbol, "price": price, "pred": pred,
+        "high_pred": high_pred, "low_pred": low_pred,
         "trend": None, "stage_reached": "flat", "signal_fired": False,
         "pct_diff": None, "vol": None, "vol_gate_threshold": float(stricts),
         "vol_gate_passed": None, "strict_diff": None,
@@ -237,12 +238,14 @@ def diagnose_gates(price, pred, high_pred, low_pred, symbol, strict, stricts):
         strict_passed = bool(
             buy_price > 0 and pred > buy_price and strict_diff is not None and strict_diff >= strict
         )
+        diag["buy_price"] = buy_price
     else:
         sell_price = high_pred
         strict_diff = abs(1 - sell_price / pred) if (sell_price > 0 and pred != 0) else None
         strict_passed = bool(
             sell_price > 0 and sell_price > pred and strict_diff is not None and strict_diff >= strict
         )
+        diag["sell_price"] = sell_price
     diag.update({
         "stage_reached": "strict_gate",
         "strict_diff": float(strict_diff) if strict_diff is not None else None,
@@ -780,7 +783,8 @@ def smooth_params(new_params: dict, prev_params: dict,
 def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
                     params, equity, leverage,
                     in_b=False, pos_b=None, in_e=False, pos_e=None,
-                    btc_atr_warmup=None, eth_atr_warmup=None):
+                    btc_atr_warmup=None, eth_atr_warmup=None,
+                    btc_train_meta=None, eth_train_meta=None):
     """
     Simulates one day of live trading, bar by bar, with full verbose logging.
     Advances UKF state in-place.
@@ -801,6 +805,15 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
     pos_e, diagnostics). in_b/pos_b/in_e/pos_e are the carry-forward
     state for the next call; diagnostics is one gate-diagnostic dict per
     bar per symbol (2026-11-03 — see diagnose_gates()).
+
+    btc_train_meta/eth_train_meta (2026-11-06, optional): {"start": iso,
+    "end": iso, "bar_count": int} describing the UKF training window that
+    produced btc_filters/eth_filters for THIS day — stamped onto every
+    diagnostic row below as train_window_start/train_window_end/
+    train_bar_count so a live-vs-backtest comparison can show not just
+    the predictions but what data each model was actually trained on when
+    it produced them. Purely descriptive — never read back into any
+    trading decision.
     """
     pos_b = dict(pos_b) if pos_b else {}
     pos_e = dict(pos_e) if pos_e else {}
@@ -936,9 +949,17 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
         # state regardless of whether a new entry could even be taken.
         diag_b = diagnose_gates(pb, pred_b, hp_b, lp_b, 'BTC', sb, sbs)
         diag_b["ts"] = ts
+        if btc_train_meta:
+            diag_b["train_window_start"] = btc_train_meta.get("start")
+            diag_b["train_window_end"]   = btc_train_meta.get("end")
+            diag_b["train_bar_count"]    = btc_train_meta.get("bar_count")
         diagnostics.append(diag_b)
         diag_e = diagnose_gates(pe, pred_e, hp_e, lp_e, 'ETH', se, ses)
         diag_e["ts"] = ts
+        if eth_train_meta:
+            diag_e["train_window_start"] = eth_train_meta.get("start")
+            diag_e["train_window_end"]   = eth_train_meta.get("end")
+            diag_e["train_bar_count"]    = eth_train_meta.get("bar_count")
         diagnostics.append(diag_e)
 
         # FIX 1 — reject unfillable Limit entries
@@ -1329,6 +1350,21 @@ def run_walk_forward():
         btc_test  = btc_full.iloc[test_start:test_end].reset_index(drop=True)
         eth_test  = eth_full.iloc[test_start:test_end].reset_index(drop=True)
 
+        # 2026-11-06: capture what each symbol's UKF was actually trained
+        # on for this day, so it can ride along on every diagnostic row
+        # below (see paper_trade_day()'s btc_train_meta/eth_train_meta) —
+        # purely descriptive, read by the Compare page only.
+        def _train_meta(train_df):
+            if train_df is None or len(train_df) == 0:
+                return None
+            return {
+                "start": str(train_df.index[0]),
+                "end": str(train_df.index[-1]),
+                "bar_count": int(len(train_df)),
+            }
+        btc_train_meta = _train_meta(btc_train)
+        eth_train_meta = _train_meta(eth_train)
+
         try:
             btc_filters = build_ukfs(btc_train, 'BTC')
             eth_filters = build_ukfs(eth_train, 'ETH')
@@ -1404,7 +1440,8 @@ def run_walk_forward():
                 btc_test, eth_test, btc_filters, eth_filters,
                 current_params, capital, LEVERAGE,
                 in_b=in_b, pos_b=pos_b, in_e=in_e, pos_e=pos_e,
-                btc_atr_warmup=btc_atr_warmup, eth_atr_warmup=eth_atr_warmup)
+                btc_atr_warmup=btc_atr_warmup, eth_atr_warmup=eth_atr_warmup,
+                btc_train_meta=btc_train_meta, eth_train_meta=eth_train_meta)
         except Exception as e:
             print(f"  ✗  paper_trade_day failed: {e} — day skipped, "
                   f"capital and open positions unchanged.")

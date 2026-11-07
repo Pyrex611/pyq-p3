@@ -348,6 +348,27 @@ def _bootstrap_postgres(conn) -> None:
             "ON pyquant_backtest_diagnostics(run_id, symbol, ts)"
         )
 
+        # 2026-11-06 — expanded live-vs-backtest comparison: the raw band
+        # values (high_pred/low_pred/buy_price/sell_price) and what data
+        # window the UKF that produced this row was actually trained on
+        # (train_window_start/end/bar_count). Previously only the gate
+        # PASS/FAIL verdicts were persisted; a real comparison review
+        # (2026-11-05/06) needed the underlying numbers and training
+        # windows side by side, not just the verdicts, to tell a genuine
+        # model divergence from a borderline/noise difference. Placed
+        # AFTER both tables' own CREATE TABLE above (not before — see
+        # the 2026-11-02 Postgres migration-ordering mistake this file
+        # already warns about). Nullable — rows written before this
+        # column existed simply read back as NULL.
+        for _col, _type in (
+            ("high_pred", "DOUBLE PRECISION"), ("low_pred", "DOUBLE PRECISION"),
+            ("buy_price", "DOUBLE PRECISION"), ("sell_price", "DOUBLE PRECISION"),
+            ("train_window_start", "TIMESTAMPTZ"), ("train_window_end", "TIMESTAMPTZ"),
+            ("train_bar_count", "INTEGER"),
+        ):
+            cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
+            cur.execute(f"ALTER TABLE pyquant_backtest_diagnostics ADD COLUMN IF NOT EXISTS {_col} {_type}")
+
 
 @contextmanager
 def _sqlite_conn():
@@ -448,6 +469,17 @@ def _sqlite_conn():
             "CREATE INDEX IF NOT EXISTS pyquant_backtest_diagnostics_run_symbol_ts_idx "
             "ON pyquant_backtest_diagnostics(run_id, symbol, ts)"
         )
+        # 2026-11-06 — see the matching Postgres ALTER block above for the
+        # full rationale. SQLite has no ADD COLUMN IF NOT EXISTS, so each
+        # is tried once per connection and "duplicate column" swallowed.
+        for _tbl in ("pyquant_diagnostics_history", "pyquant_backtest_diagnostics"):
+            for _col in ("high_pred REAL", "low_pred REAL", "buy_price REAL",
+                         "sell_price REAL", "train_window_start TEXT",
+                         "train_window_end TEXT", "train_bar_count INTEGER"):
+                try:
+                    conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col}")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
         yield conn
         conn.commit()
     finally:
@@ -964,6 +996,10 @@ _BACKTEST_DIAG_COLS = [
     "symbol", "ts", "stage_reached", "signal_fired", "trend", "price", "pred",
     "pct_diff", "vol", "vol_gate_threshold", "vol_gate_passed",
     "strict_diff", "strict_threshold", "strict_gate_passed",
+    # 2026-11-06 — see the matching CREATE TABLE/ALTER comment for why
+    # these were added (expanded live-vs-backtest comparison).
+    "high_pred", "low_pred", "buy_price", "sell_price",
+    "train_window_start", "train_window_end", "train_bar_count",
 ]
 
 
@@ -1026,13 +1062,13 @@ def get_backtest_diagnostics(run_id: int, symbol: Optional[str] = None) -> list[
                     f"SELECT {','.join(cols)} FROM pyquant_backtest_diagnostics{where} ORDER BY ts ASC",
                     params,
                 )
-                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in cur.fetchall()]
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts", "train_window_start", "train_window_end")) for row in cur.fetchall()]
         with _lock, _sqlite_conn() as conn:
             rows = conn.execute(
                 f"SELECT {','.join(cols)} FROM pyquant_backtest_diagnostics{where} ORDER BY ts ASC",
                 params,
             ).fetchall()
-            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in rows]
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts", "train_window_start", "train_window_end")) for row in rows]
     except Exception:
         return []
 
@@ -1086,6 +1122,10 @@ _DIAG_HISTORY_COLS = [
     "symbol", "stage_reached", "signal_fired", "trend", "price", "pred",
     "pct_diff", "vol", "vol_gate_threshold", "vol_gate_passed",
     "strict_diff", "strict_threshold", "strict_gate_passed", "error",
+    # 2026-11-06 — see the matching CREATE TABLE/ALTER comment for why
+    # these were added (expanded live-vs-backtest comparison).
+    "high_pred", "low_pred", "buy_price", "sell_price",
+    "train_window_start", "train_window_end", "train_bar_count",
 ]
 
 
@@ -1147,13 +1187,13 @@ def list_diagnostic_history(symbol: Optional[str] = None, limit: int = 300, sour
                     f"SELECT {','.join(cols)} FROM pyquant_diagnostics_history{where} "
                     f"ORDER BY id DESC LIMIT %s", (*params, limit),
                 )
-                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in cur.fetchall()]
+                return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts", "train_window_start", "train_window_end")) for row in cur.fetchall()]
         with _lock, _sqlite_conn() as conn:
             rows = conn.execute(
                 f"SELECT {','.join(cols)} FROM pyquant_diagnostics_history{where} "
                 f"ORDER BY id DESC LIMIT ?", (*params, limit),
             ).fetchall()
-            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts",)) for row in rows]
+            return [_row_timestamps_to_iso(dict(zip(cols, row)), ("ts", "train_window_start", "train_window_end")) for row in rows]
     except Exception:
         return []
 

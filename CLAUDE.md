@@ -437,8 +437,67 @@ section only orients a new session to where things stand structurally.
   `gh run view --log` against the real history before writing an
   incident's blast-radius into this file, not just reasoning from
   reading the code.
-
-## 6. What's next
+- **Added 2026-11-06 — expanded live-vs-backtest comparison to full raw
+  values + a training-window + variance column.** Owner follow-up to
+  the Compare page's gate comparison: the existing cards only showed
+  gate PASS/FAIL verdicts (via `GateReadout`), not the underlying
+  numbers, so there was no way to tell a genuine model divergence from
+  ordinary UKF-state noise at a borderline gate reading. Also: an
+  explicit scrutiny pass over the direction/trend-extraction code
+  (`generate_signal()` vs `diagnose_gates()`, UKF argument ordering
+  through `step_ukf()`/`ukf_handler()`/`ukf_mapping`/
+  `_persist_ukf_state()`/`_restore_ukf_state()`) found **no swap or
+  sign-flip bug** — every call site is internally consistent
+  (close/high/low ordering never crossed). What WAS missing, confirmed
+  by reading `diagnose_gates()` next to `generate_signal()`'s
+  `last_diagnostic`: backtest's diagnostic dict never captured
+  `high_pred`/`low_pred`/`buy_price`/`sell_price` at all — only the
+  derived gate verdicts — so a true side-by-side of the raw band values
+  was never possible from stored data, independent of any UI.
+  - **`walkforward.py`'s `diagnose_gates()`** now sets `high_pred`/
+    `low_pred` in its base dict and `buy_price`/`sell_price` in the
+    up/down branches, mirroring `generate_signal()` exactly.
+  - **Training-window metadata, both sides** — new, previously never
+    captured anywhere: `walkforward.py`'s `paper_trade_day()` takes
+    optional `btc_train_meta`/`eth_train_meta` (`{start, end,
+    bar_count}`, computed from `btc_train`/`eth_train`'s index in
+    `run_walk_forward()`'s per-day loop) and stamps
+    `train_window_start`/`train_window_end`/`train_bar_count` onto
+    every diagnostic row. `pyq_p4.py`'s `retrain_daily_ukfs()` captures
+    the same three values from `bars.index` **before** the
+    `reset_index(drop=True)` that was already there (which would
+    otherwise discard the DatetimeIndex) and persists them to a new kv
+    key (`pyq_p4_ukf_retrain_meta`, by symbol); `_persist_signal_diagnostic()`
+    reads that kv and stamps the same three fields onto every live
+    diagnostic row. Purely descriptive — never read back into any
+    trading decision, and if a given hour's values don't line up
+    between live and backtest, that's the signal the rest of that
+    row's differences are expected, not a bug.
+  - **Schema**: both `pyquant_diagnostics_history` and
+    `pyquant_backtest_diagnostics` gained 7 nullable columns
+    (`high_pred`, `low_pred`, `buy_price`, `sell_price`,
+    `train_window_start`, `train_window_end`, `train_bar_count`) via
+    `ALTER TABLE ADD COLUMN IF NOT EXISTS` (Postgres) / try-except
+    `ALTER TABLE` (SQLite) — placed AFTER both tables' own `CREATE
+    TABLE` (the 2026-11-02 ordering mistake this file already warns
+    about, not repeated here). `_DIAG_HISTORY_COLS`/`_BACKTEST_DIAG_COLS`
+    drive both the INSERT and SELECT column lists, so `api/index.py`'s
+    `_nearest_gate_states()` needed **no changes** — the new fields
+    just ride along in the same dicts it already returns.
+  - **New shared `components/FullComparisonTable.jsx`**: a Field |
+    Backtest | Live | Diff table — every numeric field gets an absolute
+    AND relative (%) diff (flagged in red past 5%), every text/bool
+    field gets a MATCH/DIFFER verdict. Used by both `pages/compare.js`'s
+    `ModelStateComparison` (below the existing `GateReadout` pair) and
+    `components/backtest/RunDetailModal.jsx`'s "Compare to Live" drawer
+    (below its existing trade/gate panels) — the same two places that
+    already shared `GateReadout`, same pattern.
+  - **Verified**: `diagnose_gates()`'s new fields directly; a full
+    SQLite round-trip of both `record_diagnostic_history()`/
+    `record_backtest_diagnostics()` through `list_diagnostic_history()`/
+    `get_backtest_diagnostic_at()` with every new field populated; the
+    `bars.index` capture snippet in isolation; `npm run build` (clean,
+    all 8 pages). Not yet confirmed on a live deploy.
 
 Granular, current backlog: `PLAN.md`. Bigger architecture options below
 are stable enough to live here rather than churn `PLAN.md`:

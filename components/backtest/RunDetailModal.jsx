@@ -2,6 +2,7 @@ import React, { useState, useMemo } from "react";
 import EquityCurveChart from "../EquityCurveChart";
 import { apiGet, fmtMoney, fmtPct, fmtPrice, fmtTime, pnlClass } from "../../lib/api";
 import GateReadout from "../GateReadout";
+import FullComparisonTable from "../FullComparisonTable";
 
 function formatHoldDuration(entryTs, exitTs) {
   if (!entryTs || !exitTs) return "—";
@@ -412,6 +413,15 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
                                               )}
                                             </div>
                                           </div>
+
+                                          {/* 2026-11-06: full field-by-field comparison with a variance
+                                              column — the panels above only show gate PASS/FAIL; this is
+                                              for actually pinpointing a divergence (every raw price/pred/
+                                              band value and each model's training window, side by side). */}
+                                          <FullComparisonTable
+                                            backtest={alignedTrade.data.backtest_diagnostics}
+                                            live={alignedTrade.data.live_diagnostics}
+                                          />
 
                                           {alignedTrade.data.backtest_diagnostics && !alignedTrade.data.live_diagnostics?.signal_fired && (
                                             <div style={{ marginTop: 10, paddingTop: 8, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--accent-secondary)" }}>

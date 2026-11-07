@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import Layout from "../components/Layout";
 import { apiGet, fmtPct, fmtPrice, fmtTime, pnlClass } from "../lib/api";
 import GateReadout from "../components/GateReadout";
+import FullComparisonTable from "../components/FullComparisonTable";
 
 function StatCard({ label, value, cls }) {
   return (
@@ -143,6 +144,14 @@ function ModelStateComparison() {
                 : null}
             </div>
           )}
+
+          {/* 2026-11-06: full field-by-field comparison with a variance
+              column — the summary readouts above only show gate PASS/FAIL;
+              this table is for actually pinpointing a divergence: every
+              raw number and training window each model used, side by
+              side, so a discrepancy (or its absence) is visible directly
+              rather than inferred from gate outcomes alone. */}
+          <FullComparisonTable backtest={result.backtest_diagnostics} live={result.live_diagnostics} />
         </>
       )}
     </div>
