@@ -858,6 +858,59 @@ here before moving on, even if you also wrote it up elsewhere.
     whether Bybit has an equivalent restriction for this deployment's
     hosting before assuming it's a non-issue.
 
+- [ ] **V5 signal generation — brainstorm only, 2026-11-07, not scoped,
+  no code started.** Owner's framing: live signals have all been
+  *accurate* so far but too rare — this isn't "the model is wrong," it's
+  "the entry condition is too strict/too rarely satisfied." Two ideas
+  raised together, resolved into one direction:
+  - **Idea 1 ("run the backtest hourly, feed its signal to live") is a
+    dead end as literally stated** — `diagnose_gates()` (backtest) and
+    `generate_signal()` (live) are already proven math-identical
+    (2026-11-06 entry above), so re-running backtest at the top of the
+    hour would just recompute the exact same one-snapshot decision live
+    already makes every tick from the same fixed hourly UKF band. It
+    would not add information or fix anything.
+  - **The real mechanism behind "live disagrees with backtest's hour"**:
+    backtest only ever evaluates ONE pred/price pair per hour (the
+    hour's close bar); live re-evaluates `generate_signal()` every tick
+    against that SAME fixed hourly band as spot price moves through the
+    hour — so live's trend call legitimately differs at different points
+    within the hour even though the math and the band are identical.
+    This is a timing/granularity artifact, not a bug — confirmed via the
+    2026-11-06 direction-extraction scrutiny finding no swap/sign-flip.
+  - **Idea 2 (the actual V5 core idea, worth real design work): make
+    direction *adaptive/confirmed* instead of *pre-committed*.** Today's
+    `trend` is decided from a single static comparison (`pred > price` →
+    up, `price > pred` → down) and the entry is a limit order sitting at
+    the opposite band edge (`low_pred` for up, `high_pred` for down) —
+    i.e. already a "buy near the predicted low / sell near the predicted
+    high" design, just direction-first. V5's idea flips the order:
+    *wait for a confirmed touch of one band edge, let that touch pick
+    the direction* (touch near `low_pred` → bet on reversion toward
+    `high_pred`; touch near `high_pred` → bet toward `low_pred`), rather
+    than asserting direction from a single noisy snapshot that can flip
+    tick-to-tick within the hour.
+  - Open design questions before this is buildable: a numeric tolerance
+    for "touched" the edge (exact touch is unlikely); a time-within-hour
+    filter (a touch with 2 minutes left in the hour is a different bet
+    than one with 55 minutes left — the UKF band only refreshes once/
+    hour); a band-invalidation rule (price punching through the touched
+    edge by more than some margin should cancel the setup, not still bet
+    on reversion); and an entry-timing tradeoff (fire immediately at the
+    touch vs. wait 1-2 ticks for confirmed movement back toward the
+    other edge — better odds, worse entry price).
+  - **Testing implication**: this is inherently an intra-hour-path
+    strategy, so it cannot be validated against `walkforward.py`'s
+    existing 1H-bar backtest — that aggregation discards exactly the
+    intra-hour path the edge depends on. Needs a new backtest harness
+    walking 1-min/5-min Alpaca bars (already pulled live by
+    `one_minute_task()`/`five_minute_task()` in `pyq_p4.py`, so the data
+    path already exists) within each UKF-retrain hour, reusing
+    `pyquant_signal_math.py`'s cost/SL/TP constants — as a new file (not
+    a change to the validated `walkforward.py`), same three-tier
+    progression as V4 (no-capital backtest → paper/testnet → live)
+    before touching the live engine.
+
 ## Done (newest first)
 
 - **2026-11-06 — expanded Compare page's live-vs-backtest comparison
