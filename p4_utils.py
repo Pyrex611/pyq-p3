@@ -240,6 +240,25 @@ def aggregate_ohlcv_data(df: pd.DataFrame, aggregation_minutes: int):
         return None
 
 
+_BAR_MINUTES = {"1H": 60, "15T": 15, "5T": 5, "1T": 1}  # P4.1 — see below
+
+
+def _closed_bar_cutoff(timeframe: str, now: Optional[datetime] = None) -> datetime:
+    """P4.1 (2026-11-07): returns an `end=` bound that falls strictly
+    INSIDE the most recently fully-closed bar of `timeframe`, never
+    inside the still-forming current one. `now` is injectable for tests;
+    defaults to the real current UTC time. See data_download()'s
+    docstring for why this matters."""
+    now = now or datetime.now(timezone.utc)
+    bar_minutes = _BAR_MINUTES[timeframe]
+    if bar_minutes == 60:
+        bar_start = now.replace(minute=0, second=0, microsecond=0)
+    else:
+        floored_minute = (now.minute // bar_minutes) * bar_minutes
+        bar_start = now.replace(minute=floored_minute, second=0, microsecond=0)
+    return bar_start - timedelta(seconds=1)
+
+
 def data_download(timeframe: str, or_symbols):
     """2026-11-05 FIX: the "15T"/"5T" entries used to build
     `TimeFrame(15, TimeFrame.Minute)` / `TimeFrame(5, TimeFrame.Minute)` —
@@ -259,7 +278,32 @@ def data_download(timeframe: str, or_symbols):
     own timeout killed it, meaning five_minute_task/fifteen_minute_task/
     hourly_task/daily_optimizer never ran at all since 2026-10-20. See
     the retry caps added to pyq_p4.py's four affected loops the same day
-    as a second line of defense against this exact failure mode."""
+    as a second line of defense against this exact failure mode.
+
+    2026-11-07 FIX (P4.1): added an explicit `end=` bound pinned to the
+    most recently FULLY CLOSED bar for `timeframe` (via
+    _closed_bar_cutoff()), instead of leaving `end` to
+    CryptoBarsRequest's own default — alpaca-py's docstring confirms
+    `end` "Defaults to now." Crypto aggregates continuously, 24/7, with
+    no session close, so the previous behavior almost certainly handed
+    every caller the still-forming, partially-accumulated CURRENT bar
+    as `.iloc[-1]` — at every cadence this function serves (1H/15T/5T/
+    1T alike), not just "1H". Every UKF this project steps assumes one
+    full bar's worth of elapsed time per update()/predict() call (the
+    `dt=1` baked into `_make_ukf()`'s `fx`) — handing it a bar that only
+    reflects a few minutes of real price action, labeled as if it were
+    a complete period, understates that bar's true range (corrupting
+    the high/low filters' sense of band width) and misestimates the
+    close filter's rate-of-change term, and that error compounds on
+    every subsequent incremental step since these filters are never
+    fully reset except once a day (retrain_daily_ukfs()). Pinning `end`
+    this way makes every cadence's `.iloc[-1]` a genuinely closed bar,
+    matching what walkforward.py's historical bars always are by
+    construction (see PLAN.md's P4.1 entry / CLAUDE.md Section 5). This
+    fix lives in the one shared function, so it also protects the
+    currently-dormant 15T/5T UKFs (`btc_fift_ukf`/`btc_five_ukf` etc.,
+    stepped every tick in pyq_p4.py but not yet consumed) the same way,
+    and whatever 30T cadence P5 adds later — see P5_PLAN.md."""
     tf_map = {
         "1H":  TimeFrame.Hour,
         "15T": TimeFrame(15, TimeFrameUnit.Minute),
@@ -269,7 +313,10 @@ def data_download(timeframe: str, or_symbols):
     tf = tf_map.get(timeframe)
     if tf is None:
         raise ValueError(f"data_download: unsupported timeframe '{timeframe}'")
-    request_params = CryptoBarsRequest(symbol_or_symbols=or_symbols, timeframe=tf)
+    request_params = CryptoBarsRequest(
+        symbol_or_symbols=or_symbols, timeframe=tf,
+        end=_closed_bar_cutoff(timeframe),
+    )
     bars = crypto_client.get_crypto_bars(request_params)
     return bars.df
 

@@ -135,6 +135,14 @@ section only orients a new session to where things stand structurally.
   Supabase Postgres, GitHub Actions cron (`.github/workflows/
   orchestra.yml`, every 5 min), `SIGNAL_ONLY_MODE` (live on
   `origin/main`).
+- **Added 2026-11-07 — P4.1 (`data_download()` now only returns fully
+  closed bars, every cadence) and `P5_PLAN.md`** (full V5/P5 design:
+  touch-confirmed adaptive direction, multi-timeframe confluence,
+  market-data/diagnostic persistence schemas, build plan). P4.1 is
+  implemented and verified at the mechanism level, not yet confirmed
+  against a live GitHub Actions run. P5 itself is brainstorm/design
+  status only — see `PLAN.md`'s Backlog pointer and `P5_PLAN.md`'s own
+  readiness checklist for what's next.
 - **Known-broken right now, both config-only fixes, no code needed:**
   (1) `DATABASE_URL` was set to Supabase's Direct connection string,
   which is IPv6-only — GitHub Actions has no IPv6 egress, so every
@@ -594,6 +602,10 @@ are stable enough to live here rather than churn `PLAN.md`:
   root-cause writeup.
 - **`KAGGLE.md`** — backtest-from-UI: why Kaggle, one-time setup,
   testing, known limitations.
+- **`P5_PLAN.md`** — P5/V5 signal generation (touch-confirmed, adaptive
+  direction, multi-timeframe confluence): full design, market-data/
+  diagnostic persistence schemas, build and progression plan. Brainstorm
+  status except P4.1 (done — see Section 5), not yet built.
 - **Claude Docs plan doc** (`https://claude.ai/code/artifact/2a54f458-6ebe-423b-b4c8-e2deac599d7c`)
   — original strategy/performance deep-dive, dev-plan level only;
   `CLAUDE.md`/`PLAN.md` are the current source for status.

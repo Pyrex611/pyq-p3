@@ -858,139 +858,41 @@ here before moving on, even if you also wrote it up elsewhere.
     whether Bybit has an equivalent restriction for this deployment's
     hosting before assuming it's a non-issue.
 
-- [ ] **V5 signal generation — brainstorm only, 2026-11-07, not scoped,
-  no code started.** Owner's framing: live signals have all been
-  *accurate* so far but too rare — this isn't "the model is wrong," it's
-  "the entry condition is too strict/too rarely satisfied." Two ideas
-  raised together, resolved into one direction:
-  - **Idea 1 ("run the backtest hourly, feed its signal to live") is a
-    dead end as literally stated** — `diagnose_gates()` (backtest) and
-    `generate_signal()` (live) are already proven math-identical
-    (2026-11-06 entry above), so re-running backtest at the top of the
-    hour would just recompute the exact same one-snapshot decision live
-    already makes every tick from the same fixed hourly UKF band. It
-    would not add information or fix anything.
-  - **The real mechanism behind "live disagrees with backtest's hour"**:
-    backtest only ever evaluates ONE pred/price pair per hour (the
-    hour's close bar); live re-evaluates `generate_signal()` every tick
-    against that SAME fixed hourly band as spot price moves through the
-    hour — so live's trend call legitimately differs at different points
-    within the hour even though the math and the band are identical.
-    This is a timing/granularity artifact, not a bug — confirmed via the
-    2026-11-06 direction-extraction scrutiny finding no swap/sign-flip.
-  - **Idea 2 (the actual V5 core idea, worth real design work): make
-    direction *adaptive/confirmed* instead of *pre-committed*.** Today's
-    `trend` is decided from a single static comparison (`pred > price` →
-    up, `price > pred` → down) and the entry is a limit order sitting at
-    the opposite band edge (`low_pred` for up, `high_pred` for down) —
-    i.e. already a "buy near the predicted low / sell near the predicted
-    high" design, just direction-first. V5's idea flips the order:
-    *wait for a confirmed touch of one band edge, let that touch pick
-    the direction* (touch near `low_pred` → bet on reversion toward
-    `high_pred`; touch near `high_pred` → bet toward `low_pred`), rather
-    than asserting direction from a single noisy snapshot that can flip
-    tick-to-tick within the hour.
-  - Open design questions before this is buildable: a numeric tolerance
-    for "touched" the edge (exact touch is unlikely); a time-within-hour
-    filter (a touch with 2 minutes left in the hour is a different bet
-    than one with 55 minutes left — the UKF band only refreshes once/
-    hour); a band-invalidation rule (price punching through the touched
-    edge by more than some margin should cancel the setup, not still bet
-    on reversion); and an entry-timing tradeoff (fire immediately at the
-    touch vs. wait 1-2 ticks for confirmed movement back toward the
-    other edge — better odds, worse entry price).
-  - **Testing implication**: this is inherently an intra-hour-path
-    strategy, so it cannot be validated against `walkforward.py`'s
-    existing 1H-bar backtest — that aggregation discards exactly the
-    intra-hour path the edge depends on. Needs a new backtest harness
-    walking 1-min/5-min Alpaca bars (already pulled live by
-    `one_minute_task()`/`five_minute_task()` in `pyq_p4.py`, so the data
-    path already exists) within each UKF-retrain hour, reusing
-    `pyquant_signal_math.py`'s cost/SL/TP constants — as a new file (not
-    a change to the validated `walkforward.py`), same three-tier
-    progression as V4 (no-capital backtest → paper/testnet → live)
-    before touching the live engine.
-
-- [ ] **V5 refined design, 2026-11-07 (second pass) — still brainstorm
-  status, no code started.** Owner follow-up resolving the open
-  questions above into a concrete architecture:
-  - **Touch tolerance is a bootstrap, not a circular dependency**: seed
-    it with a simple heuristic (fraction of ATR or of band width) just
-    to get a touch detector running; once the minute-bar harness (above)
-    exists, run it over history and record, bucketed by volatility
-    (ATR/vol), how close price actually got to the touched edge and
-    whether it then reached the opposite edge — that table becomes the
-    real tolerance function (keyed by volatility regime, not a
-    constant), fed back into the detector before shadow/live use.
-  - **15-minute predictor already exists, just unwired**: found while
-    investigating this — `fifteen_minute_task()` (`pyq_p4.py`) already
-    downloads 1-min bars, aggregates to 15-min, and steps
-    `btc_fift_ukf`/`eth_fift_ukf` (+ high/low) every 15 minutes via
-    `UKFModel.ukf_handler()` — their state is even persisted/restored
-    across restarts (`_UKF_NAMES`) — but the returned pred/high/low is
-    discarded, never captured or used anywhere. "Reintroducing" the 15m
-    predictor is therefore mostly a wiring task. A **30-minute**
-    predictor doesn't exist in any version (checked `pyq_p4.py` and
-    legacy `pyq_p3.py`) and needs building fresh — trivial in principle,
-    same `make_ukf_shell`/`create_ukf_models`/`aggregate_ohlcv_data`
-    pattern with `mins=30` and its own run-guard bucket
-    (`current_30min_bucket()`, paralleling `current_15min_bucket()` in
-    `pyquant_state.py`).
-  - **Multi-timeframe confluence resolves late/punched-through touches**:
-    on a clean, on-time 1H-band touch, proceed as designed. On a late
-    touch or a punch-through (price breaches the touched edge instead of
-    reversing), compare against the 15m/30m models' own current
-    pred/high/low and resolve to one of three actions: place the order
-    anyway (finer timeframe still agrees — the 1H touch was just slow),
-    adjust TP/SL to the finer timeframe's own predicted edge (agrees on
-    direction, disagrees on magnitude), or abandon the signal (finer
-    timeframe disagrees on direction — real continuation, not noise).
-  - **Entry timing (at-touch vs. wait-for-confirmed-reversal) is a
-    backtested, regime-keyed parameter**, not a global choice — sweep
-    both variants per volatility bucket on the minute-bar harness
-    (slots in as another optimizer dimension, same as `strict`/
-    `pct_diff_and_vol_strict` today) rather than hardcoding one.
-  - **Build as a true side-by-side extension**, reusing the existing
-    2026-11-03 shadow-comparison architecture rather than inventing a
-    new one: new isolated module (e.g. `pyquant_v5.py`, kept off
-    `walkforward.py`/`p4_utils.py`'s validated V4 math entirely) housing
-    the touch detector + tolerance lookup + confluence resolver, exposed
-    as a `diagnose_v5_touch()` that returns a diagnostic dict and never
-    a tradeable signal (same hard guarantee the existing shadow code
-    already has); a new `"v5_touch"` `source` value in
-    `pyquant_diagnostics_history` behind its own `v5_shadow_enabled` kv
-    flag (default off, same pattern as `shadow_comparison_enabled`); the
-    Compare/Live Monitor pages' existing per-source filtering just needs
-    `v5_touch` added as a selectable source — no new UI plumbing.
-  - **Progression gate unchanged from V4's discipline**: no-capital
-    minute-bar backtest (tolerance calibration + entry-timing sweep) →
-    shadow mode on the live system (zero trading impact, accumulating
-    real samples) → paper/testnet → live. Nothing places a real order
-    until shadow data says this is actually better than V4.
-
-- [ ] **P4.1 — pin `data_download("1H", ...)` to the last fully-closed
-  hour, 2026-11-07 (brainstorm/investigation, not started).** Owner
-  question: does live's hourly signal see only-completed data the way
-  `walkforward.py`'s historical bars always are? Checked both sides —
-  the UKF step/compare mechanics are identical on both sides (same row
-  fed into `step_ukf()` and compared against, no off-by-one or
-  look-ahead bug). The one real difference: `data_download("1H", ...)`
-  is called with no `start`/`end` bound at all, so its last row is most
-  likely the **currently-forming, still-updating hour** (crypto
-  aggregates continuously, 24/7) rather than a closed one, unlike
-  backtest's historical rows which are always closed by construction —
-  not confirmed with certainty from Alpaca's docs alone; verify
-  empirically (log the bar's timestamp vs. wall-clock across two ticks
-  in the same hour and see if its OHLC changes) before fixing. The fix
-  itself is small and low-risk: add an explicit `end=` bound pinned to
-  the most recent closed-hour boundary. **Does not conflict with V5** —
-  P4.1 only changes what the existing V4 hourly decision is allowed to
-  see; V5's touch/confluence logic deliberately needs the partial
-  intra-hour data P4.1 would exclude, so the two operate at different
-  layers and can both proceed. Worth doing independently of V5 since
-  it's small and correct on its own merits.
+- [ ] **P5 (V5) signal generation — see `P5_PLAN.md` for the full
+  design.** Isolated out of this file 2026-11-07 (was getting too large
+  for PLAN.md's checklist-level scope — see "How to use this file").
+  Status: architecture, data-collection schemas (market-bar persistence
+  + P5 diagnostic/calibration data), and the build/progression plan are
+  all written up and considered ready to start; P4.1 (the shared
+  closed-bar-only data fix both P5 and the current V4 hourly signal
+  depend on) is DONE — see the Done log below. Market-data persistence
+  and the P5 shadow-diagnostics collection are the next concrete steps,
+  not yet started.
 
 ## Done (newest first)
+
+- **2026-11-07 — P4.1: `data_download()` now only ever returns fully
+  closed bars**, for every cadence it serves (1H/15T/5T/1T), not just
+  the hourly one. Added `_closed_bar_cutoff()` (`p4_utils.py`) and
+  passed it as `CryptoBarsRequest`'s `end=` — previously no `end=` was
+  given at all, and alpaca-py's own docs confirm `end` "Defaults to
+  now," so crypto's continuous 24/7 aggregation meant every call's
+  `.iloc[-1]` was very likely the still-forming current bar, not a
+  closed one, at every cadence. This matters beyond just the 1H signal:
+  every UKF this project steps assumes a full bar's worth of elapsed
+  time per `update()`/`predict()` (the `dt=1` in `_make_ukf()`'s `fx`),
+  so feeding it a partial bar understates that bar's true range and
+  misestimates the close filter's rate-of-change — an error that
+  compounds on every subsequent incremental step since these filters
+  are only fully reset once a day. The fix lives in the one shared
+  `data_download()`, so it also protects the currently-dormant 15T/5T
+  UKFs (stepped every tick, output not yet consumed — see `P5_PLAN.md`)
+  and whatever 30T cadence P5 adds. Verified the boundary math directly
+  (`_closed_bar_cutoff()` against several wall-clock times, including
+  the exactly-on-the-boundary edge case) and that `CryptoBarsRequest`
+  accepts the resulting `end=` value, using the real installed
+  `alpaca-py` 0.45.0. Not yet confirmed against a live GitHub Actions
+  run (no network access to Alpaca from this sandbox).
 
 - **2026-11-06 — expanded Compare page's live-vs-backtest comparison
   to full raw values + training window + a variance column**, and
