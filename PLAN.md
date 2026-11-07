@@ -911,6 +911,85 @@ here before moving on, even if you also wrote it up elsewhere.
     progression as V4 (no-capital backtest → paper/testnet → live)
     before touching the live engine.
 
+- [ ] **V5 refined design, 2026-11-07 (second pass) — still brainstorm
+  status, no code started.** Owner follow-up resolving the open
+  questions above into a concrete architecture:
+  - **Touch tolerance is a bootstrap, not a circular dependency**: seed
+    it with a simple heuristic (fraction of ATR or of band width) just
+    to get a touch detector running; once the minute-bar harness (above)
+    exists, run it over history and record, bucketed by volatility
+    (ATR/vol), how close price actually got to the touched edge and
+    whether it then reached the opposite edge — that table becomes the
+    real tolerance function (keyed by volatility regime, not a
+    constant), fed back into the detector before shadow/live use.
+  - **15-minute predictor already exists, just unwired**: found while
+    investigating this — `fifteen_minute_task()` (`pyq_p4.py`) already
+    downloads 1-min bars, aggregates to 15-min, and steps
+    `btc_fift_ukf`/`eth_fift_ukf` (+ high/low) every 15 minutes via
+    `UKFModel.ukf_handler()` — their state is even persisted/restored
+    across restarts (`_UKF_NAMES`) — but the returned pred/high/low is
+    discarded, never captured or used anywhere. "Reintroducing" the 15m
+    predictor is therefore mostly a wiring task. A **30-minute**
+    predictor doesn't exist in any version (checked `pyq_p4.py` and
+    legacy `pyq_p3.py`) and needs building fresh — trivial in principle,
+    same `make_ukf_shell`/`create_ukf_models`/`aggregate_ohlcv_data`
+    pattern with `mins=30` and its own run-guard bucket
+    (`current_30min_bucket()`, paralleling `current_15min_bucket()` in
+    `pyquant_state.py`).
+  - **Multi-timeframe confluence resolves late/punched-through touches**:
+    on a clean, on-time 1H-band touch, proceed as designed. On a late
+    touch or a punch-through (price breaches the touched edge instead of
+    reversing), compare against the 15m/30m models' own current
+    pred/high/low and resolve to one of three actions: place the order
+    anyway (finer timeframe still agrees — the 1H touch was just slow),
+    adjust TP/SL to the finer timeframe's own predicted edge (agrees on
+    direction, disagrees on magnitude), or abandon the signal (finer
+    timeframe disagrees on direction — real continuation, not noise).
+  - **Entry timing (at-touch vs. wait-for-confirmed-reversal) is a
+    backtested, regime-keyed parameter**, not a global choice — sweep
+    both variants per volatility bucket on the minute-bar harness
+    (slots in as another optimizer dimension, same as `strict`/
+    `pct_diff_and_vol_strict` today) rather than hardcoding one.
+  - **Build as a true side-by-side extension**, reusing the existing
+    2026-11-03 shadow-comparison architecture rather than inventing a
+    new one: new isolated module (e.g. `pyquant_v5.py`, kept off
+    `walkforward.py`/`p4_utils.py`'s validated V4 math entirely) housing
+    the touch detector + tolerance lookup + confluence resolver, exposed
+    as a `diagnose_v5_touch()` that returns a diagnostic dict and never
+    a tradeable signal (same hard guarantee the existing shadow code
+    already has); a new `"v5_touch"` `source` value in
+    `pyquant_diagnostics_history` behind its own `v5_shadow_enabled` kv
+    flag (default off, same pattern as `shadow_comparison_enabled`); the
+    Compare/Live Monitor pages' existing per-source filtering just needs
+    `v5_touch` added as a selectable source — no new UI plumbing.
+  - **Progression gate unchanged from V4's discipline**: no-capital
+    minute-bar backtest (tolerance calibration + entry-timing sweep) →
+    shadow mode on the live system (zero trading impact, accumulating
+    real samples) → paper/testnet → live. Nothing places a real order
+    until shadow data says this is actually better than V4.
+
+- [ ] **P4.1 — pin `data_download("1H", ...)` to the last fully-closed
+  hour, 2026-11-07 (brainstorm/investigation, not started).** Owner
+  question: does live's hourly signal see only-completed data the way
+  `walkforward.py`'s historical bars always are? Checked both sides —
+  the UKF step/compare mechanics are identical on both sides (same row
+  fed into `step_ukf()` and compared against, no off-by-one or
+  look-ahead bug). The one real difference: `data_download("1H", ...)`
+  is called with no `start`/`end` bound at all, so its last row is most
+  likely the **currently-forming, still-updating hour** (crypto
+  aggregates continuously, 24/7) rather than a closed one, unlike
+  backtest's historical rows which are always closed by construction —
+  not confirmed with certainty from Alpaca's docs alone; verify
+  empirically (log the bar's timestamp vs. wall-clock across two ticks
+  in the same hour and see if its OHLC changes) before fixing. The fix
+  itself is small and low-risk: add an explicit `end=` bound pinned to
+  the most recent closed-hour boundary. **Does not conflict with V5** —
+  P4.1 only changes what the existing V4 hourly decision is allowed to
+  see; V5's touch/confluence logic deliberately needs the partial
+  intra-hour data P4.1 would exclude, so the two operate at different
+  layers and can both proceed. Worth doing independently of V5 since
+  it's small and correct on its own merits.
+
 ## Done (newest first)
 
 - **2026-11-06 — expanded Compare page's live-vs-backtest comparison
