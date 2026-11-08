@@ -871,6 +871,45 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-08 — Backtest Run Detail's "End Date" was understating how
+  fresh the data actually was; fixed, display-only bug, no backtest-
+  math change.** Owner noticed Run #68 (finished 2026-11-07, triggered
+  by a fresh `data_download.py` call with no `end=` bound — so it always
+  pulls through "now") displayed **End Date: 2026-11-06**, a full day
+  behind. Root cause, confirmed by reading both sides: for a duration-
+  preset run (`walk_forward_days`, no explicit `start_date`/`end_date`),
+  `RunDetailModal.jsx`'s `runAnalytics` had no access to the backtest's
+  real data boundaries at all — it inferred Start/End Date from the
+  **first/last TRADE's** `entry_ts`/`exit_ts`. The backtest itself
+  always walks the actual freshly-downloaded data through to its true
+  end; but if the tail of that window had no trade that fired/closed
+  (this project's own recurring theme — signals are rare), the last
+  trade's `exit_ts` lags behind the window's real end, making End Date
+  look stale even though the data behind it wasn't. Owner's own
+  hypothesis ("won't say it included the data if no signals were
+  generated that day") was correct in substance — refined to: it's not
+  "no signal fired that day," it's specifically "no trade **closed**
+  on/after the window's final day(s)."
+  - **Fix**: `walkforward.py`'s `run_walk_forward()` now captures the
+    TRUE test-window boundaries directly from the data walked — the
+    first day's first bar (new `first_btc_ts`, set once at `day_idx==0`)
+    and the last day's last bar (already-existing `last_btc_ts`) — and
+    appends them to the returned `metrics` DataFrame as
+    `resolved_start_date`/`resolved_end_date` rows. Both existing call
+    sites (`walkforward.py`'s own CLI `record_run()` path and
+    `kaggle_backtest/run_backtest_gha.py`'s GH-Actions path) already
+    convert `metrics` via `dict(zip(metrics["Metric"], metrics["Value"]))`,
+    so both picked this up with **no other code change** at either call
+    site. `RunDetailModal.jsx`'s `runAnalytics` now prefers
+    `modal.run.metrics.resolved_start_date`/`resolved_end_date` over
+    the trade-timestamp inference (which still exists as a fallback for
+    older runs recorded before this fix).
+  - **Verified**: the `pd.concat`/empty-DataFrame merge logic in
+    isolation (both the zero-trades and has-trades cases); a real
+    SQLite round-trip of `record_run()`→`update_run_status()`→`get_run()`
+    with the two new metrics keys; a clean `npm run build`. Not yet
+    confirmed on a live deploy/real backtest run.
+
 - **2026-11-07 — P4.1: `data_download()` now only ever returns fully
   closed bars**, for every cadence it serves (1H/15T/5T/1T), not just
   the hourly one. Added `_closed_bar_cutoff()` (`p4_utils.py`) and

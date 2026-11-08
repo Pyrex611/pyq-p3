@@ -1329,6 +1329,10 @@ def run_walk_forward():
     # to close against, and so a failed/skipped day doesn't lose this reference.
     last_btc_close, last_btc_ts = None, None
     last_eth_close, last_eth_ts = None, None
+    # 2026-11-08: the TRUE test-window start, captured once from the
+    # first day's first bar — see the resolved_start_date/end_date note
+    # near compute_metrics() below for why this exists.
+    first_btc_ts, first_eth_ts = None, None
 
     default_params = dict(strict_btc=0.0025, stricts_btc=0.005,
                            strict_eth=0.0035, stricts_eth=0.0075,
@@ -1349,6 +1353,10 @@ def run_walk_forward():
         eth_train = eth_full.iloc[max(0, test_start - train_bars):test_start]
         btc_test  = btc_full.iloc[test_start:test_end].reset_index(drop=True)
         eth_test  = eth_full.iloc[test_start:test_end].reset_index(drop=True)
+
+        if day_idx == 0 and len(btc_test):
+            first_btc_ts = str(btc_test.iloc[0].get('timestamp', btc_test.index[0]))
+            first_eth_ts = str(eth_test.iloc[0].get('timestamp', eth_test.index[0]))
 
         # 2026-11-06: capture what each symbol's UKF was actually trained
         # on for this day, so it can ride along on every diagnostic row
@@ -1513,6 +1521,32 @@ def run_walk_forward():
     print("  FINAL PERFORMANCE SUMMARY")
     print("=" * 80)
     metrics = compute_metrics(all_trades, capital_curve, INITIAL_CAPITAL)
+
+    # 2026-11-08: the backtest ALWAYS walks the actual downloaded data
+    # through to its real end (data_download.py refetches fresh from
+    # Alpaca on every run, no end= bound) — but the UI previously had no
+    # way to know that, and inferred "End Date" from the LAST TRADE's
+    # exit_ts (RunDetailModal.jsx's runAnalytics, for a duration-preset
+    # run with no explicit start_date/end_date param). That understates
+    # how recent the data actually was whenever the tail of the test
+    # window had no closing trade — e.g. a run finishing 2026-11-07
+    # showed "End Date: 2026-11-06" simply because the last trade that
+    # fired happened to exit on the 6th, even though fresh data through
+    # the 7th was walked and found no reason to trade on it. Persisting
+    # the TRUE first/last bar of the test window here (BTC's — ETH's can
+    # differ by at most one bar and isn't separately surfaced) lets the
+    # frontend prefer real data over trade-boundary inference. Added as
+    # extra (Metric, Value) rows so both existing call sites'
+    # `dict(zip(metrics["Metric"], metrics["Value"]))` pattern picks
+    # them up with no other change needed at either call site.
+    _resolved_rows = pd.DataFrame([
+        {"Metric": "resolved_start_date",
+         "Value": pd.Timestamp(first_btc_ts).strftime('%Y-%m-%d') if first_btc_ts else None},
+        {"Metric": "resolved_end_date",
+         "Value": pd.Timestamp(last_btc_ts).strftime('%Y-%m-%d') if last_btc_ts else None},
+    ])
+    metrics = pd.concat([metrics, _resolved_rows], ignore_index=True) if not metrics.empty else _resolved_rows
+
     print(metrics.to_string(index=False))
 
     # Phase 2: log this run for the UI's "Backtest" screen. Purely

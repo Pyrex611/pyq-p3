@@ -115,6 +115,19 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
     let endDate = params.end_date || null;
     let durationDays = params.walk_forward_days || null;
 
+    // 2026-11-08: prefer the TRUE test-window boundaries the backtest
+    // itself walked (walkforward.py's resolved_start_date/end_date,
+    // from the actual first/last bar of test data) over inferring from
+    // trade timestamps below. The backtest always walks fresh data
+    // through to its real end (data_download.py refetches every run,
+    // no end= bound) — but a duration-preset run's last TRADE can exit
+    // well before that if the tail of the window had no closing trade,
+    // which previously made End Date look stale even though the data
+    // behind it wasn't. See PLAN.md's 2026-11-08 entry.
+    const resolved = modal.run.metrics || {};
+    if (!startDate) startDate = resolved.resolved_start_date || null;
+    if (!endDate) endDate = resolved.resolved_end_date || null;
+
     if (trades.length > 0) {
       if (!startDate) startDate = trades[0].entry_ts?.slice(0, 10);
       if (!endDate) endDate = trades[trades.length - 1].exit_ts?.slice(0, 10);
