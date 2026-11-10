@@ -871,6 +871,84 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-08/09 — optimizer objective is now trade-frequency + win-
+  rate aware, not pure-return-max; plus a confirmed backtest
+  reproducibility gap for duration-preset runs.** Owner's observation:
+  the live engine's first two trades were both winners (~5% avg) but
+  signals are far too rare to actually test the platform — "thresholds
+  are too strict... let us loosen [them]... about 3-4 trades a day...
+  if we could keep about 75% win rate, we would still be in profit."
+  Also separately noticed the SAME historical hour's backtest result can
+  differ depending on when the backtest itself is run.
+  - **Reproducibility gap, confirmed by reading the code (not fixed —
+    documented as known behavior)**: for a `WALK_FORWARD_DAYS`
+    duration-preset run (no explicit `start_date`/`end_date`),
+    `run_walk_forward()` anchors `start_bar = n_bars - (WALK_FORWARD_DAYS
+    * bars_per_day)` — i.e. counting backward from `n_bars`, the length
+    of WHATEVER data `data_download.py` fetched at run time. Since that
+    length grows by ~24 bars every day (fresh fetch every run, no `end=`
+    bound), the boundary between a given historical hour's "training"
+    and "test" window shifts depending on when the backtest was
+    executed — so the same calendar hour's 30-day rolling UKF training
+    window (and therefore its gate state) is **not reproducible** across
+    two duration-preset runs made on different days, even though both
+    runs had that hour's data fully available. The explicit
+    `start_date`/`end_date` path does NOT have this problem — it pins
+    `start_bar` to an actual calendar-date mask, stable regardless of
+    how much data has accumulated since. **Recommendation**: use
+    explicit date ranges, not duration presets, for any exact-hour/exact-
+    day comparison against live (live's own daily retrain is calendar-
+    anchored and deterministic — see `pyq_p4.py`'s `retrain_daily_ukfs()`
+    — so it never has this issue). This compounds with, but is distinct
+    from, the already-documented "live re-evaluates every tick against
+    one fixed hourly band" explanation (2026-11-06/07 entries).
+  - **Objective function changed** (the actual fix for "thresholds are
+    too strict"): both `walkforward.py`'s and `p4_search.py`'s
+    `_evaluate_params()` now also count real closed trades and wins
+    (never the end-of-window mark-to-market, which isn't a realized
+    trade), and their Bayesian objective / blind-grid-search selection
+    now score candidates via a new shared `pyquant_signal_math.
+    score_candidate()` — total return, penalized smoothly for landing
+    outside a target trade-frequency band or below a win-rate floor —
+    instead of raw pnl_pct. Previously nothing in the objective rewarded
+    firing more often, so a pure-return-max search naturally converges
+    on rare-but-accurate thresholds if that compounds to a higher total
+    return, which is exactly what's been observed live. `p4_search.py`
+    is the one that actually matters for live (today's `daily_optimizer()`
+    calls `p4_search.run_grid_search()`, not `walkforward.py`'s — see
+    the 2026-11-03 p4_search.py entry), so it got the identical change,
+    not just `walkforward.py`.
+    - `TARGET_TRADES_PER_DAY_RANGE = (2.0, 5.0)` — covers both of the
+      owner's own stated figures in the same message ("3-4" and,
+      restated more aggressively, "2-5").
+    - `MIN_WIN_RATE_FLOOR = 0.70`, deliberately below the stated "about
+      75%" — leaves margin for backtest-to-live execution differences
+      (slippage, fees, the reproducibility gap above) a backtest can't
+      fully capture.
+    - The penalty-scale constants are a first pass, **not empirically
+      validated against real data** — this sandbox has no network
+      access to Alpaca, so there's no way to run the real optimizer here
+      and see where it actually converges. The next optimizer run's
+      resulting `trades_per_day`/`win_rate` (now surfaced in its
+      returned/stored params dict — `n_trades`, `win_rate`,
+      `trades_per_day`, `best_score` alongside the existing
+      `best_returns`) should be checked, and the scales in
+      `pyquant_signal_math.py` adjusted if the search isn't landing in
+      the target band.
+  - **Verified**: `score_candidate()` directly against three synthetic
+    cases (rare-accurate, in-band-good-win-rate, overtrading-low-win-
+    rate) — confirmed the in-band candidate now outscores both others,
+    where the old pure-pnl objective would have ranked purely by return
+    regardless of frequency; a full synthetic end-to-end run of
+    `walkforward.py`'s `_evaluate_params()`/`run_bayesian_search()`/
+    `run_grid_search()` and `p4_search.py`'s equivalents against
+    installed `optuna`/`filterpy` with synthetic price data, confirming
+    no exceptions and the extended return dict's new fields populate
+    correctly. Not run against real historical data (no network access
+    here) — the real convergence behavior can only be confirmed by
+    triggering the optimizer for real (Settings page's existing "Run
+    Optimizer Now" button) and checking the result.
+
 - **2026-11-08 — Backtest Run Detail's "End Date" was understating how
   fresh the data actually was; fixed, display-only bug, no backtest-
   math change.** Owner noticed Run #68 (finished 2026-11-07, triggered

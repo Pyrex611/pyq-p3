@@ -15,6 +15,8 @@ import pandas as pd
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 from filterpy.common import Q_discrete_white_noise
 
+import pyquant_signal_math as signal_math  # 2026-11-08: score_candidate() — see its docstring
+
 try:
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -199,6 +201,9 @@ def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
     ep_b = ep_e = qty_b = qty_e = 0.0
     tp_b = sl_b = tp_e = sl_e = 0.0
     n = min(len(btc_preds), len(btc_bars), len(eth_preds), len(eth_bars))
+    # 2026-11-08: see walkforward.py's identical comment — counts of REAL
+    # closed trades only, never the end-of-window mark-to-market below.
+    n_trades = n_wins = 0
 
     for i in range(n):
         rb = btc_bars.iloc[i]; re = eth_bars.iloc[i]
@@ -216,7 +221,10 @@ def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
                 leg  = 'SL' if h_sl else 'TP'
                 trig = sl_b if h_sl else tp_b
                 xp, xc = apply_exit(trig, leg, side_b, qty_b)
-                equity += compute_profit(side_b, ep_b, xp, qty_b) - xc
+                pnl = compute_profit(side_b, ep_b, xp, qty_b) - xc
+                equity += pnl
+                n_trades += 1
+                n_wins += 1 if pnl > 0 else 0
                 in_b = False
 
         if in_e:
@@ -228,7 +236,10 @@ def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
                 leg  = 'SL' if h_sl else 'TP'
                 trig = sl_e if h_sl else tp_e
                 xp, xc = apply_exit(trig, leg, side_e, qty_e)
-                equity += compute_profit(side_e, ep_e, xp, qty_e) - xc
+                pnl = compute_profit(side_e, ep_e, xp, qty_e) - xc
+                equity += pnl
+                n_trades += 1
+                n_wins += 1 if pnl > 0 else 0
                 in_e = False
 
         atr_b = compute_atr(btc_bars.iloc[max(0, i - ATR_PERIOD):i + 1]) if USE_ATR_SL else 0.0
@@ -279,11 +290,19 @@ def _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
     if in_e:
         equity += compute_profit(side_e, ep_e, eth_bars.iloc[-1]['close'], qty_e)
 
-    return (equity / balance - 1) * 100
+    pnl_pct = (equity / balance - 1) * 100
+    return pnl_pct, n_trades, n_wins, n
 
 
 def _run_bayesian(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage,
                   n_trials, warm_start=None):
+    """2026-11-08: objective is now signal_math.score_candidate() — see
+    walkforward.py's run_bayesian_search() for the identical pattern and
+    score_candidate()'s own docstring for why. This is the optimizer
+    live trading actually uses today (daily_optimizer() → this file's
+    run_grid_search(), not walkforward.py's), so THIS is the one that
+    needs to change for the owner's "thresholds are too strict" request
+    to have any live effect."""
     def objective(trial):
         sb  = trial.suggest_float('strict_btc',  0.002,  0.006,  step=0.00005)
         sbs = trial.suggest_float('stricts_btc', 0.003,  0.009,  step=0.00005)
@@ -291,9 +310,15 @@ def _run_bayesian(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage,
         ses = trial.suggest_float('stricts_eth', 0.003,  0.009,  step=0.00005)
         am  = (trial.suggest_float('atr_mult', ATR_SL_RANGE[0], ATR_SL_RANGE[1], step=0.1)
                if USE_ATR_SL else None)
-        ret = _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
-                                balance, leverage, sb, sbs, se, ses, am)
-        return ret if ret > -np.inf else -999.0
+        pnl_pct, n_trades, n_wins, n_bars = _evaluate_params(
+            btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage, sb, sbs, se, ses, am)
+        scored = signal_math.score_candidate(pnl_pct, n_trades, n_wins, n_bars / 24.0)
+        trial.set_user_attr('pnl_pct', scored['pnl_pct'])
+        trial.set_user_attr('n_trades', scored['n_trades'])
+        trial.set_user_attr('win_rate', scored['win_rate'])
+        trial.set_user_attr('trades_per_day', scored['trades_per_day'])
+        score = scored['score']
+        return score if score > -np.inf else -999.0
 
     study = optuna.create_study(
         direction='maximize',
@@ -313,29 +338,41 @@ def _run_bayesian(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage,
 
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best = study.best_params
+    best_attrs = study.best_trial.user_attrs
     return {
         'strict_btc':  best['strict_btc'],
         'stricts_btc': best['stricts_btc'],
         'strict_eth':  best['strict_eth'],
         'stricts_eth': best['stricts_eth'],
         'atr_mult':    best.get('atr_mult', ATR_SL_MULTIPLIER),
-        'best_returns': study.best_value,
+        'best_returns': best_attrs.get('pnl_pct', study.best_value),
+        'best_score':   study.best_value,
+        'n_trades':     best_attrs.get('n_trades'),
+        'win_rate':     best_attrs.get('win_rate'),
+        'trades_per_day': best_attrs.get('trades_per_day'),
     }
 
 
 def _run_grid_fallback(btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage):
+    """2026-11-08: selects by score_candidate()'s composite score, not
+    raw pnl_pct — see walkforward.py's run_grid_search() for the
+    identical pattern."""
     from itertools import product
-    best_ret, best_params = -np.inf, None
+    best_score, best_params = -np.inf, None
     for sb, sbs, se, ses in product(STRICT_BTC_VALS, STRICTS_BTC_VALS,
                                      STRICT_ETH_VALS, STRICTS_ETH_VALS):
-        ret = _evaluate_params(btc_preds, eth_preds, btc_bars, eth_bars,
-                                balance, leverage, sb, sbs, se, ses,
-                                ATR_SL_MULTIPLIER if USE_ATR_SL else None)
-        if ret > best_ret and ret > 0:
-            best_ret = ret
+        pnl_pct, n_trades, n_wins, n_bars = _evaluate_params(
+            btc_preds, eth_preds, btc_bars, eth_bars, balance, leverage, sb, sbs, se, ses,
+            ATR_SL_MULTIPLIER if USE_ATR_SL else None)
+        scored = signal_math.score_candidate(pnl_pct, n_trades, n_wins, n_bars / 24.0)
+        if scored['score'] > best_score and scored['score'] > 0:
+            best_score = scored['score']
             best_params = dict(strict_btc=sb, stricts_btc=sbs,
                                 strict_eth=se, stricts_eth=ses,
-                                atr_mult=ATR_SL_MULTIPLIER, best_returns=ret)
+                                atr_mult=ATR_SL_MULTIPLIER,
+                                best_returns=scored['pnl_pct'], best_score=scored['score'],
+                                n_trades=scored['n_trades'], win_rate=scored['win_rate'],
+                                trades_per_day=scored['trades_per_day'])
     return best_params
 
 

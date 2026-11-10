@@ -135,6 +135,19 @@ section only orients a new session to where things stand structurally.
   Supabase Postgres, GitHub Actions cron (`.github/workflows/
   orchestra.yml`, every 5 min), `SIGNAL_ONLY_MODE` (live on
   `origin/main`).
+- **Added 2026-11-08/09 — optimizer objective is now trade-frequency +
+  win-rate aware** (`pyquant_signal_math.score_candidate()`, applied to
+  both `walkforward.py`'s and `p4_search.py`'s search loops — the
+  latter is the one that actually drives live). Targets 2-5 trades/day
+  at a ≥0.70 win-rate floor, replacing a pure-return-max objective that
+  had no reason to prefer firing more often. Also documented: duration-
+  preset backtest runs (no explicit dates) are not reproducible hour-
+  for-hour across days because their train/test boundary is anchored to
+  the ever-growing fetched-data length, not a calendar date — use
+  explicit date ranges for exact-hour comparisons. Not yet validated
+  against real data (no network access in this sandbox) — next step is
+  triggering the real optimizer and checking its resulting
+  trades_per_day/win_rate. See `PLAN.md`'s 2026-11-08/09 entry.
 - **Added 2026-11-07 — P4.1 (`data_download()` now only returns fully
   closed bars, every cadence) and `P5_PLAN.md`** (full V5/P5 design:
   touch-confirmed adaptive direction, multi-timeframe confluence,

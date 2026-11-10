@@ -128,3 +128,86 @@ def expected_max_loss(entry_price: float, sl_price: float, allocated_capital: fl
         return 0.0
     pos_est = (allocated_capital * leverage) / entry_price
     return abs(entry_price - sl_price) * pos_est
+
+
+# ── Optimizer objective — trade-frequency + win-rate aware (2026-11-08) ─────
+# Added after the owner's own observation from the live engine's first
+# two trades (both winners, ~5% avg): "the thresholds are too strict...
+# we're not testing the platform much if no signal is being generated."
+# Both walkforward.py's and p4_search.py's _evaluate_params()/objective()
+# previously scored a candidate (strict/stricts) purely by total % return
+# over the search window — nothing in that objective rewards firing more
+# often or penalizes firing too rarely, so a pure-return-maximizing
+# search naturally gravitates toward whatever thresholds are strict
+# enough to be rare-but-accurate, if that happens to compound to a
+# higher total return than trading more often — which is exactly what's
+# been observed live. This adds two smooth penalty terms on top of the
+# existing pnl_pct objective so the search explicitly favors landing in
+# a target trading-frequency band with a minimum win-rate floor, while
+# still preferring higher return among candidates that satisfy both.
+#
+# TARGET_TRADES_PER_DAY_RANGE reflects the owner's own two statements in
+# the same message: "about 3-4 trades a day are okay" and, restated more
+# aggressively a few lines later, "2-5 times a day" — (2.0, 5.0) covers
+# both without contradicting either.
+#
+# MIN_WIN_RATE_FLOOR is set to 0.70, not the owner's stated "about 75%"
+# target — deliberately, to leave margin for backtest-to-live execution
+# differences a backtest can't fully capture (slippage, fees, and the
+# day-bucketing/partial-bar effects documented in PLAN.md's 2026-11-07/
+# 2026-11-08 entries). A search tuned to exactly hit 75% in-backtest has
+# no slack left once real execution differs even slightly.
+#
+# The penalty scale constants below (*_PENALTY_PER_*) are a first pass,
+# not empirically validated against real data — this sandbox has no
+# network access to Alpaca, so there's no way to run the real optimizer
+# here and see where it actually converges. Check the next optimizer
+# run's resulting trades_per_day/win_rate (now surfaced in its returned
+# dict — see score_candidate()'s docstring) and adjust these scales if
+# the search isn't landing in the target band as intended.
+TARGET_TRADES_PER_DAY_RANGE = (2.0, 5.0)
+MIN_WIN_RATE_FLOOR = 0.70
+FREQUENCY_PENALTY_PER_TRADE_PER_DAY = 40.0  # score lost per 1.0 trades/day outside the target range
+WIN_RATE_PENALTY_PER_PCT_POINT = 3.0        # score lost per percentage point of win rate below the floor
+
+
+def score_candidate(pnl_pct: float, n_trades: int, n_wins: int, days_evaluated: float) -> dict:
+    """Composite optimizer objective: total return, penalized for
+    landing outside TARGET_TRADES_PER_DAY_RANGE or below
+    MIN_WIN_RATE_FLOOR. Both walkforward.py's and p4_search.py's
+    objective()/run_grid_search() call this on every candidate instead
+    of returning pnl_pct directly, so the two optimizers can't silently
+    diverge on what "better" means (same standing rule as the SL/TP math
+    above: shared scoring logic lives here only).
+
+    Returns a dict (not just the score) so every call site can surface
+    the real numbers behind a candidate — n_trades/win_rate/trades_per_day
+    — not just the opaque composite value, which previously hid what the
+    "best" params actually DO beyond their aggregate return.
+
+    `n_trades`/`n_wins` count only real closed trades (SL/TP/force-close
+    exits) — never the end-of-window mark-to-market used for ranking
+    only (see both _evaluate_params()'s docstrings), since that's not a
+    trade that was ever actually realized.
+    """
+    win_rate = (n_wins / n_trades) if n_trades > 0 else 0.0
+    trades_per_day = (n_trades / days_evaluated) if days_evaluated > 0 else 0.0
+
+    score = pnl_pct
+
+    lo, hi = TARGET_TRADES_PER_DAY_RANGE
+    if trades_per_day < lo:
+        score -= (lo - trades_per_day) * FREQUENCY_PENALTY_PER_TRADE_PER_DAY
+    elif trades_per_day > hi:
+        score -= (trades_per_day - hi) * FREQUENCY_PENALTY_PER_TRADE_PER_DAY
+
+    if n_trades > 0 and win_rate < MIN_WIN_RATE_FLOOR:
+        score -= (MIN_WIN_RATE_FLOOR - win_rate) * 100.0 * WIN_RATE_PENALTY_PER_PCT_POINT
+
+    return {
+        "score": score,
+        "pnl_pct": pnl_pct,
+        "n_trades": n_trades,
+        "win_rate": win_rate,
+        "trades_per_day": trades_per_day,
+    }
