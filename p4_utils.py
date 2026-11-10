@@ -1341,7 +1341,21 @@ class PositionGuard:
     def run_scheduler(self):
         private_sched = _schedule_module.Scheduler()
         private_sched.every(30).seconds.do(self.check_all_orders_and_positions)
-        self.add_alert_to_queue("🔔 PositionGuard scheduler ONLINE.")
+        # 2026-11-09: NOT an alert anymore — PositionGuard (and this
+        # scheduler) is constructed fresh on every cron_runner.py
+        # invocation (module-level `guard.start()` in pyq_p4.py), i.e.
+        # every ~5 minutes under GitHub Actions' cadence, so an
+        # unconditional alert here was a "still alive" ping fired every
+        # single tick, not a real heartbeat — exactly the noise the
+        # owner flagged ("the telegram bot sends a message every 5
+        # minutes saying its active... we are not testing the platform
+        # much if no signal is being generated"). The one-a-day "active"
+        # ping now lives in p4_orchestra.py's _run_daily_ukf_retrain(),
+        # gated by the same try_claim_run() day-bucket the retrain
+        # itself uses, so it fires once per day right after UKF
+        # anchoring. Real activity (order fills, new monitored orders,
+        # errors) already alerts via its own call sites below and is
+        # untouched by this change.
         logger.info("PositionGuard scheduler started (private scheduler instance).")
         while self.running:
             private_sched.run_pending()

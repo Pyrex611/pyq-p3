@@ -871,6 +871,38 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-09 — Telegram "active" ping throttled from every cron tick
+  to once a day.** Root cause of the owner's "the telegram bot sends a
+  message every 5 minutes saying its active": `pyq_p4.py` instantiates
+  `PositionGuard` and calls `guard.start()` at MODULE level, and since
+  `cron_runner.py` re-imports `pyq_p4.py` fresh on every GitHub Actions
+  tick (every 5 min), `run_scheduler()`'s unconditional
+  `add_alert_to_queue("🔔 PositionGuard scheduler ONLINE.")` fired on
+  every single tick — not a real heartbeat, just scheduler-construction
+  noise. Fixed by removing that unconditional alert and adding a true
+  once-a-day "active" ping in `p4_orchestra.py`'s
+  `_run_daily_ukf_retrain()`, sent right after a successful UKF
+  re-anchor and piggybacking on that function's own
+  `try_claim_run("ukf_retrain", current_day_bucket())` guard so it
+  structurally cannot fire more than once per day. Event-driven alerts
+  (order fills, new monitored orders, errors — `p4_utils.py`'s other
+  `add_alert_to_queue()` call sites) are untouched; those are exactly
+  the real-activity signals the owner wants to keep seeing.
+  **Not touched / out of scope this round**: the "add touch-tolerance
+  monitoring to the granular 5M/15M loop" part of the same request is a
+  P5-scope build, not a small throttle fix — `fifteen_minute_task()`/
+  `five_minute_task()` already run closed-bar 15M/5M UKF predictors
+  every tick (confirmed: both call `data_download("1T", ...)`, which
+  already has the P4.1 closed-bar-only fix, so bar-completeness IS
+  correctly integrated here), but their `ukf_handler()` return values
+  are discarded (`print("Work on Price Tracker (15T)")` is a literal
+  placeholder) — there is no touch-detection logic to extend yet. This
+  matches `P5_PLAN.md`'s own readiness checklist (Section 12), which
+  already lists the 30-minute predictor and market-bar persistence as
+  the next concrete build steps before touch-tolerance logic can be
+  built on real data. Picking this up means starting P5's build plan
+  (Section 10), not a quick addition here.
+
 - **2026-11-08/09 — optimizer objective is now trade-frequency + win-
   rate aware, not pure-return-max; plus a confirmed backtest
   reproducibility gap for duration-preset runs.** Owner's observation:

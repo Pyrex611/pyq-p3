@@ -163,6 +163,18 @@ def _run_daily_ukf_retrain():
             "ts": datetime.now(timezone.utc).isoformat(), "status": "ok",
         })
         print("[Orchestra] UKF re-anchor complete.")
+        # 2026-11-09: this is the one-a-day "still alive" Telegram ping
+        # (replaces the old every-cron-tick "scheduler ONLINE" alert —
+        # see p4_utils.py's run_scheduler() comment). Piggybacks on this
+        # try_claim_run("ukf_retrain", current_day_bucket()) guard so it
+        # can never fire more than once per day, same as the retrain
+        # itself. Best-effort: a failed alert must never fail the
+        # retrain it's reporting on.
+        try:
+            pyq_p4.guard.add_alert_to_queue(
+                "🔔 PyQuant daily UKF anchor complete — engine active.")
+        except Exception as alert_err:
+            print(f"[Orchestra] Daily active-ping alert failed (non-fatal): {alert_err}")
     except Exception as e:
         err = f"{e}\n{traceback.format_exc()}"
         print(f"[Orchestra] ukf_retrain error: {err}")
