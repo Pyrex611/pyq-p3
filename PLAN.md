@@ -588,6 +588,99 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [ ] **NEW, 2026-11-10 — confirmed via real live data: UKF predictions
+  drift on an almost perfectly CONSTANT hourly increment all day after
+  each daily retrain, eventually inverting high_pred/low_pred relative
+  to pred — this structurally blocks the strict-entry gate regardless
+  of threshold tuning, and is the most likely reason live is firing far
+  fewer signals than expected even after the 2026-11-08/09 optimizer
+  change.** Investigated in response to the owner's "how can I be sure
+  there isn't a problem with the signal generation logic/architecture."
+  - **What the real data shows** (pulled live from
+    `GET /api/heartbeat` and `GET /api/diagnostics/history` against
+    `https://pyq-p3.vercel.app`, not a hypothesis): since the
+    2026-11-10 00:01:40 UTC daily retrain, BTC's hourly `pred` has
+    risen by **exactly 97.1537/hour**, `high_pred` by **exactly
+    78.1155/hour**, and `low_pred` by **exactly 191.3348/hour** — for
+    every single hour checked (05:01 through 19:01 UTC), to 5-6 decimal
+    places. A properly Kalman-corrected filter responding to genuinely
+    noisy real market data cannot produce an identical increment hour
+    after hour; this is the mathematical signature of a filter running
+    in pure predict-only/dead-reckoning mode, i.e. its `.update(val)`
+    call with the real closed bar is having ~zero measurable effect on
+    the trajectory. By 19:01 UTC this had grown large enough that BTC's
+    `low_pred` (79029.19) is now ABOVE its own `pred` (77245.39), with
+    `high_pred` (76884.78) now BELOW `pred` — a fully inverted
+    high/low/close ordering — and `pred` itself was already 5.2% above
+    the real price (73398.56). ETH shows the identical pattern at the
+    same tick (`low_pred` 2205.95 > `pred` 2158.47 > `high_pred`
+    2128.40). Live's `generate_signal()`'s strict gate for an "up"
+    trend requires `pred > buy_price` (`buy_price = low_pred`) before
+    even checking the magnitude threshold — once `low_pred` drifts
+    above `pred`, this condition is FALSE by construction, so the gate
+    cannot pass no matter how loose `strict` is set. This is a
+    DIRECTION/ORDERING failure, not a magnitude one — the 2026-11-08/09
+    optimizer-objective change (which only reaches for a different
+    `strict`/`stricts` magnitude) cannot fix this failure mode at all.
+  - **Is this a live-only bug, or shared with the validated backtest?**
+    Checked: `walkforward.py`'s `run_walk_forward()` also retrains via
+    `build_ukfs()` exactly once per simulated day (same `_train_ukf()`/
+    `step_ukf()` code, byte-identical to `p4_utils.py`'s — re-verified
+    directly, no divergence found), then walks `bars_per_day` (24)
+    hourly `step_ukf()` calls before the next day's retrain — the SAME
+    "train once, then mostly-coast for 24 hours" cadence as live's
+    `retrain_daily_ukfs()`. So this specific drift-after-retrain
+    behavior is almost certainly a property of the shared UKF
+    hyperparameters/math (plausible mechanism: `_train_ukf()`'s long
+    training loop drives the velocity state's covariance `P[1][1]`
+    very low/confident, so by the time daily use starts, the Kalman
+    gain for the velocity term is already tiny and subsequent hourly
+    updates barely correct it) — not a live-only code bug. **This
+    means the validated backtest almost certainly experiences the same
+    per-day drift internally.** The likely reason backtest still
+    reports far more signals than live despite this: a multi-day
+    walk-forward run gets a FRESH, low-drift window right after EVERY
+    one of its many simulated days' retrains, so across hundreds of
+    simulated days it accumulates many "fresh" entry windows; live has
+    so far only lived through a handful of real calendar days, so it
+    has only had a handful of "fresh, low-drift" windows to work with
+    — not necessarily a math/architecture bug distinguishing live from
+    backtest, but a sample-size/maturity gap, PLUS a real, previously
+    undocumented model characteristic (growing intraday drift) that
+    nobody had specifically measured until now.
+  - **Not yet resolved — needs an owner decision between real options,
+    not a unilateral code change**, since this affects core strategy
+    behavior validated against `walkforward.py`'s reference run (the
+    standing "shared math only changes after confirming in walkforward
+    first" rule applies squarely here):
+    1. **Retrain more often than once/day** (e.g., every 6-8 hours) —
+       directly shortens the drift window, but must be validated in
+       `walkforward.py` first (a shorter retrain cadence is itself a
+       strategy-affecting change, not a bug fix) before touching live.
+    2. **Retune Q/P so the velocity state stays more "alive" to new
+       updates** (increase `Q_scale` or `P_init`'s velocity term) — a
+       more invasive change to validated math; same validate-in-
+       walkforward-first rule applies, and needs real historical data
+       to confirm it doesn't just trade drift for noise.
+    3. **Confirm this is already accounted for and accept it** — if
+       walkforward's validated 276%/86.7%-win-rate run already contains
+       this exact behavior baked in (very likely, per above), the
+       strategy may already be "priced in" around it, and the real
+       issue is just needing more live calendar time to accumulate
+       fresh-retrain windows, not a fix at all.
+  - **Also found and fixed in passing, unrelated to the above**:
+    `CLAUDE.md` Section 5 still listed the Supabase `DATABASE_URL`
+    IPv6 issue as "known-broken right now" — stale; `PLAN.md`'s own
+    2026-10-19 entry (below) already confirmed this fixed via a real
+    live cron log showing successful DB reads/writes. Also confirmed
+    via `gh run list`/`gh run view --log` against the real repo: the
+    GitHub Actions cron cadence issue documented in
+    `GITHUB_ACTIONS_SETUP.md` Part G (schedule-trigger firing every
+    2-5 hours instead of 5 minutes) is CONFIRMED RESOLVED — every
+    recent run is `workflow_dispatch`-triggered exactly 5 minutes
+    apart, confirming the owner's external pinger (cron-job.org) is
+    working. Neither of these is the cause of the low signal rate.
+
 - [x] **Backtest "reform" pass (2026-10-27)** — signals baseline/"fresh
   start", run-detail modal, Kaggle manual-trigger rewrite +
   `POST /api/backtests/sync-to-kaggle`, Backtest-vs-Live Compare page.

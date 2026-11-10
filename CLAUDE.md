@@ -156,16 +156,32 @@ section only orients a new session to where things stand structurally.
   against a live GitHub Actions run. P5 itself is brainstorm/design
   status only — see `PLAN.md`'s Backlog pointer and `P5_PLAN.md`'s own
   readiness checklist for what's next.
-- **Known-broken right now, both config-only fixes, no code needed:**
-  (1) `DATABASE_URL` was set to Supabase's Direct connection string,
-  which is IPv6-only — GitHub Actions has no IPv6 egress, so every
-  state-store write has been failing, including run-guards (which fail
-  *open*, so every task has been running every 5 minutes instead of its
-  real cadence — see `SUPABASE_SETUP.md`'s IPv6 incident note for the
-  fix: switch to the Transaction pooler string). (2) The `kaggle`
-  PyPI dependency was only listed in `api/requirements.txt`, which
-  Vercel's framework-preset deployment doesn't read — every backtest
-  trigger 502'd. Fixed in `pyproject.toml`.
+- **Both long-since resolved, kept here only because this section had
+  gone stale calling them "known-broken" (corrected 2026-11-10):**
+  (1) `DATABASE_URL`'s IPv6-only Direct connection string — fixed
+  2026-10-19 (switched to the Transaction pooler string), confirmed via
+  a real live cron log the same day (`PLAN.md`'s 2026-10-19 "[x]" entry)
+  and reconfirmed live via `GET /api/heartbeat` on 2026-11-10 (DB writes
+  healthy). (2) The `kaggle` PyPI dependency being `api/requirements.txt`
+  -only — fixed in `pyproject.toml`. Also reconfirmed 2026-11-10 via
+  real `gh run list`/`gh run view --log` data: the separately-documented
+  GitHub Actions cron-cadence issue (`GITHUB_ACTIONS_SETUP.md` Part G —
+  `schedule:` firing every 2-5 hours instead of 5 minutes) is resolved
+  too — every recent run is `workflow_dispatch`-triggered exactly 5
+  minutes apart, confirming the owner's external pinger is working.
+- **OPEN, 2026-11-10 — UKF predictions drift at an almost perfectly
+  constant hourly rate after each daily retrain, eventually inverting
+  high_pred/low_pred relative to pred** — confirmed via real live data
+  (not hypothesis), and structurally blocks the strict-entry gate
+  regardless of threshold tuning (a direction/ordering failure, not a
+  magnitude one the 2026-11-08/09 optimizer change can reach). Very
+  likely a shared, validated-but-undocumented characteristic of
+  `walkforward.py`'s own model too (same once-per-day retrain cadence,
+  byte-identical UKF code) rather than a live-only bug — needs an
+  owner decision (retrain more often / retune Q-P / accept as already
+  priced into the validated strategy), not a unilateral fix. Full
+  writeup, evidence, and the three candidate paths: `PLAN.md`'s Active
+  section, top entry.
 - **Fixed, verified, not yet pushed:** the UKF per-tick-retraining bug
   (`DOCS.md` Section 10) and the Binance geo-block crash, in two rounds
   (`BINANCE_GEOBLOCK.md` — round 1 fixed client construction, round 2
