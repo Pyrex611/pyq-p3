@@ -733,54 +733,90 @@ here before moving on, even if you also wrote it up elsewhere.
     catching fresh, low-drift windows — most of its simulated days
     must NOT be hitting anything like the severity of inversion seen
     in live's 2026-11-10 data.
-  - **Better-supported working hypothesis**: today's live data shows a
-    real intraday TREND REVERSAL — BTC trades in run #78 priced it at
-    ~$74,600-74,700 through most of 2026-11-10, but live's own
-    heartbeat at 19:01 UTC the same day showed real price at $73,398.56
-    (price actually fell ~1.7% later in the day) while BTC's `pred`
-    was still extrapolating UPWARD to $77,245 — consistent with a
-    filter trained on a preceding uptrend that hadn't yet "noticed" the
-    reversal, its confidence (covariance) already narrowed from
-    training, making it slow to re-adjust. If true, this would be a
-    REGIME-triggered failure mode (sharp reversal against the trained
-    trend), not a routine daily characteristic every day shares —
-    which would explain why most of run #78's 15 simulated days traded
-    fine at all hours while today specifically did not.
-  - **Not yet proven — this is still the best-supported hypothesis,
-    not a confirmed root cause.** The direct test (do backtest's OWN
-    hour-by-hour predictions show the same inversion specifically on
-    days where real price reverses against the recent trend) requires
-    reading real `diagnose_gates()` output per bar — which was
-    impossible until the 2026-11-10/11 fix above (every prior run's
-    diagnostics silently failed to save). Needs a FRESH backtest run
-    triggered after that fix to actually check this. This sandbox
-    cannot trigger one itself (no POST capability to the live API, and
-    the CSVs `walkforward.py` needs are gitignored/fetched fresh from
-    Alpaca each run — not present here, no Alpaca credentials either)
-    — next session (or the owner, via the existing "Run Backtest"
-    button) should trigger one, then read `GET /api/runs/{id}/
-    diagnostics` for a day that included a real trend reversal and
-    compare directly against live's current state.
-  - **Not yet resolved — needs an owner decision between real options,
-    not a unilateral code change**, since this affects core strategy
-    behavior validated against `walkforward.py`'s reference run (the
-    standing "shared math only changes after confirming in walkforward
-    first" rule applies squarely here):
-    1. **Retrain more often than once/day** (e.g., every 6-8 hours) —
-       directly shortens the drift window, but must be validated in
-       `walkforward.py` first (a shorter retrain cadence is itself a
-       strategy-affecting change, not a bug fix) before touching live.
-    2. **Retune Q/P so the velocity state stays more "alive" to new
-       updates** (increase `Q_scale` or `P_init`'s velocity term) — a
-       more invasive change to validated math; same validate-in-
-       walkforward-first rule applies, and needs real historical data
-       to confirm it doesn't just trade drift for noise.
-    3. **Confirm this is already accounted for and accept it** — if
-       walkforward's validated 276%/86.7%-win-rate run already contains
-       this exact behavior baked in (very likely, per above), the
-       strategy may already be "priced in" around it, and the real
-       issue is just needing more live calendar time to accumulate
-       fresh-retrain windows, not a fix at all.
+  - **RESOLVED, 2026-11-11 — "it's a shared/trend-reversal property of
+    the math" is now REFUTED too, with real diagnostic data from run
+    #83 (triggered by the owner specifically to test this, after the
+    `_train_meta()` fix above made diagnostics persistence actually
+    work).** Run #83 (`walk_forward_days=15`, `resolved_start_date`
+    2026-10-27, `resolved_end_date` 2026-11-11 — i.e. it covers the
+    EXACT same calendar dates, including 2026-11-10, that live's drift
+    was observed on) was pulled via `GET /api/runs/83/diagnostics?
+    symbol=BTC`. Findings:
+    - Across the ENTIRE 15-day backtest window (hundreds of hourly
+      rows checked, including every hour of 2026-11-09 and
+      2026-11-10), backtest's `pred`/`high_pred`/`low_pred` move
+      noisily and bidirectionally hour-to-hour — e.g. BTC's `Δpred`
+      on 2026-11-10 alone ranges from -986.17 to +658.24 and changes
+      sign constantly. **No stretch of backtest data anywhere in the
+      run shows a sustained constant-delta run** — transient single-
+      hour inversions (`low_pred > pred` or `high_pred < pred`) do
+      happen occasionally and self-correct the very next hour, which
+      is normal UKF measurement noise, not drift.
+    - **Live's diagnostics for the same dates tell a completely
+      different story.** Pulled `GET /api/diagnostics/history?
+      symbol=BTC/USD&source=p4_search` for 2026-11-10: `train_window_
+      start`/`train_window_end` correctly rolled forward to a fresh
+      30-day window at 2026-11-10T00:01:40 UTC (so `retrain_daily_
+      ukfs()` DID run and DID re-anchor correctly that day — ruling
+      out "retrain silently failed" as the cause). But starting with
+      the very next hourly tick (01:01 UTC) and continuing for at
+      least 22 consecutive hours straight through 23:01 UTC, BTC's
+      `pred` grew by **exactly +97.1537 per hour, to 4 decimal
+      places, every single hour, with zero variation**. That is the
+      unmistakable signature of the UKF's constant-velocity state-
+      transition term (`fx = x[0] + dt*x[1]`, in `p4_utils.py`'s
+      `_make_ukf()`) running unopposed — i.e. `.predict()` executing
+      normally every hour while `.update(real_close)` has **zero
+      measurable effect** on the state, hour after hour, even while
+      real BTC price was independently moving (and later diverging
+      hugely from `pred` — see the original finding above).
+    - **Conclusion: this is NOT a property of the shared UKF math/
+      hyperparameters** (backtest runs the byte-identical `_make_ukf`/
+      `_train_ukf`/`step_ukf` code and never produces this signature,
+      including on the same real dates) **and is NOT a trend-reversal-
+      triggered regime failure** (backtest's Nov 9-10 window contains
+      real price swings of similar or greater magnitude and never
+      locks up). It is a LIVE-ONLY phenomenon. The one structural
+      thing live does that backtest never does at all is round-trip
+      every filter's `.x`/`.P` through `pyquant_state`'s JSON kv store
+      every ~5 minutes via `_persist_ukf_state()`/`_restore_ukf_
+      state()` (`pyq_p4.py` lines ~235-275) — required only because
+      `cron_runner.py` restarts the whole Python process from scratch
+      on every tick, whereas `walkforward.py` runs as one continuous
+      in-memory process for an entire simulated day. Backtest never
+      exercises this restore/persist path at all. This round-trip
+      (or something about the freshly-restored object's effective
+      Kalman gain afterward) is the leading suspect for why `update()`
+      stops moving the state after a live retrain, specifically —
+      not yet proven to the exact line, since confirming it needs
+      either a direct read of the persisted `pyquant_kv` payload
+      right after the next retrain (no DB credentials in this
+      sandbox) or added diagnostic logging of `ukf.P`'s diagonal
+      alongside `pred` each hour (not yet implemented — would need a
+      small, diagnostic-only, non-trading-logic change to `step_ukf()`'s
+      call sites in both `pyq_p4.py` and the diagnostic-capture path,
+      plus matching nullable DB columns, mirroring the 2026-11-06
+      pattern). Flagging as the concrete next step, not done yet —
+      owner should decide whether to greenlight that logging addition
+      before the next daily retrain (~00:01 UTC) so it can catch the
+      mechanism in the act.
+  - **Not yet resolved — needs an owner decision**, now that "shared
+    math characteristic" is ruled out and this is confirmed to be a
+    live-only effect localized to the UKF-state persistence mechanism:
+    1. **Add targeted diagnostic logging** (P-diagonal/velocity state
+       alongside the existing `pred`/`high_pred`/`low_pred` diagnostic
+       fields) to catch the exact mechanism on the next retrain cycle
+       — cheapest, lowest-risk, purely additive, recommended first
+       step before changing any trading-affecting code.
+    2. **Retrain more often than once/day** — would shorten any single
+       drift window's damage but doesn't address the root cause if
+       it's a persistence-round-trip defect; still needs `walkforward.py`
+       validation first per the standing rule before touching live.
+    3. **Bypass the persist/restore round-trip for `.P` specifically**
+       (e.g. re-run a cheap partial retrain instead of restoring `.P`
+       from kv) — more invasive, needs the diagnostic logging above
+       first to confirm this is actually where the defect lives before
+       committing to a fix.
   - **Also found and fixed in passing, unrelated to the above**:
     `CLAUDE.md` Section 5 still listed the Supabase `DATABASE_URL`
     IPv6 issue as "known-broken right now" — stale; `PLAN.md`'s own
