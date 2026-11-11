@@ -1393,8 +1393,30 @@ def run_walk_forward():
 
         btc_train = btc_full.iloc[max(0, test_start - train_bars):test_start]
         eth_train = eth_full.iloc[max(0, test_start - train_bars):test_start]
-        btc_test  = btc_full.iloc[test_start:test_end].reset_index(drop=True)
-        eth_test  = eth_full.iloc[test_start:test_end].reset_index(drop=True)
+        # 2026-11-10: preserve the real DatetimeIndex into an explicit
+        # 'timestamp' column BEFORE reset_index(drop=True) below discards
+        # it. Root-cause fix for "Persisted 0/720 diagnostic rows" on
+        # EVERY backtest run since the 2026-11-03 diagnostics feature was
+        # built: paper_trade_day()'s per-bar loop does
+        # `ts = str(row_b.get('timestamp', row_b.name))` — with no
+        # 'timestamp' column and a plain RangeIndex (post-reset), that
+        # fell back to row_b.name, a bare row-position integer like
+        # "7721", which Postgres's `timestamp with time zone` column
+        # rejected on every single row, silently (best-effort try/except
+        # in run_backtest_gha.py), for every run — meaning
+        # get_backtest_diagnostics() has always returned an empty list,
+        # and the Compare page's backtest-vs-live gate comparison has
+        # never had real backtest-side data to show, for any run, since
+        # that feature shipped. Diagnostic-only plumbing (never read back
+        # into a trading decision), so this does not need the
+        # validate-in-walkforward-first gate that strategy-math changes
+        # require.
+        btc_test = btc_full.iloc[test_start:test_end].copy()
+        btc_test['timestamp'] = btc_test.index
+        btc_test = btc_test.reset_index(drop=True)
+        eth_test = eth_full.iloc[test_start:test_end].copy()
+        eth_test['timestamp'] = eth_test.index
+        eth_test = eth_test.reset_index(drop=True)
 
         if day_idx == 0 and len(btc_test):
             first_btc_ts = str(btc_test.iloc[0].get('timestamp', btc_test.index[0]))

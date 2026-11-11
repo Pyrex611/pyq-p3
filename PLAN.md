@@ -588,6 +588,54 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [x] **FIXED 2026-11-10/11 — backtest gate diagnostics have NEVER
+  actually persisted to the DB, for any run, since the comparison
+  feature shipped 2026-11-03; this also silently broke the 2026-11-08
+  "resolved_start_date/End Date" fix the same way.** Found while
+  investigating the owner's follow-up to the drift finding below
+  ("if it is implemented as-is in the backtest, why does it generate
+  signals there and not in live — review more thoroughly").
+  - **Root cause**: `run_walk_forward()` builds each day's test window
+    with `.reset_index(drop=True)`, which discards the real
+    `DatetimeIndex`. `paper_trade_day()`'s per-bar loop then does
+    `ts = str(row_b.get('timestamp', row_b.name))` — with no
+    `'timestamp'` COLUMN left (only the now-discarded index), this
+    silently fell back to `row_b.name`, which after the reset is just
+    the bare row-position integer (e.g. `"7721"`), not a real date.
+  - **Real, confirmed blast radius** (pulled from `gh run view --log`
+    on run #78's actual GitHub Actions log, not guessed): every single
+    one of 720 attempted diagnostic rows failed with `invalid input
+    syntax for type timestamp with time zone: "7721"` — logged as
+    `[run_backtest_gha] Persisted 0/720 diagnostic rows for run 78`.
+    Confirmed via the live API that `GET /api/runs/{id}/diagnostics`
+    returns an empty list for multiple runs (78, 75 both checked). This
+    means the Compare page's "Model State Comparison" card, the
+    `FullComparisonTable`, and `RunDetailModal`'s "Compare to Live"
+    drawer have had NO real backtest-side data to show, for ANY run,
+    since 2026-11-03 — every prior "not yet confirmed on a live
+    deploy" caveat on that feature (see the 2026-11-03/06 entries
+    below) was actually masking a total persistence failure, not just
+    an unconfirmed-but-working feature.
+  - **Same root cause also silently broke the 2026-11-08 "Run Detail's
+    End Date" fix** (`resolved_start_date`/`resolved_end_date`,
+    `first_btc_ts`/`last_btc_ts`) — those read the identical
+    `.get('timestamp', btc_test.index[0/-1])` pattern on the same
+    reset-index'd DataFrame, so they too were silently falling back to
+    bare row-position integers this whole time (`pd.Timestamp("7721")`
+    would itself raise or produce nonsense — needs re-verification
+    post-fix, flagged as a follow-up below).
+  - **Fix** (`walkforward.py`'s `run_walk_forward()`): explicitly copy
+    the real index into a `'timestamp'` column BEFORE
+    `reset_index(drop=True)`, for both `btc_test`/`eth_test`. Diagnostic
+    -only change — never read back into a trading decision — so this
+    did not need the standing validate-in-walkforward-first gate that
+    strategy-math changes require.
+  - **Follow-up, not yet done**: re-verify the 2026-11-08 End Date fix
+    actually works now (needs a fresh completed run to check
+    `resolved_start_date`/`resolved_end_date` against real dates, not
+    `"7721"`-style garbage) — flag to the owner that any Run Detail
+    page viewed before this fix may have shown a wrong End Date.
+
 - [ ] **NEW, 2026-11-10 — confirmed via real live data: UKF predictions
   drift on an almost perfectly CONSTANT hourly increment all day after
   each daily retrain, eventually inverting high_pred/low_pred relative
@@ -635,19 +683,51 @@ here before moving on, even if you also wrote it up elsewhere.
     training loop drives the velocity state's covariance `P[1][1]`
     very low/confident, so by the time daily use starts, the Kalman
     gain for the velocity term is already tiny and subsequent hourly
-    updates barely correct it) — not a live-only code bug. **This
-    means the validated backtest almost certainly experiences the same
-    per-day drift internally.** The likely reason backtest still
-    reports far more signals than live despite this: a multi-day
-    walk-forward run gets a FRESH, low-drift window right after EVERY
-    one of its many simulated days' retrains, so across hundreds of
-    simulated days it accumulates many "fresh" entry windows; live has
-    so far only lived through a handful of real calendar days, so it
-    has only had a handful of "fresh, low-drift" windows to work with
-    — not necessarily a math/architecture bug distinguishing live from
-    backtest, but a sample-size/maturity gap, PLUS a real, previously
-    undocumented model characteristic (growing intraday drift) that
-    nobody had specifically measured until now.
+    updates barely correct it) — not a live-only code bug, so the
+    mechanism itself (a filter that can get "stuck" extrapolating a
+    trained-in velocity) is almost certainly shared.
+  - **CORRECTED, 2026-11-10/11 — the "backtest avoids this by only
+    trading early in the day, before drift builds up" half of the
+    above reasoning is REFUTED by real data, not just theory.** Pulled
+    all 116 real trades from completed run #78 (`GET
+    /api/runs/78/trades`) and tallied entry hour-of-day: trades fire at
+    EVERY hour 00:00-23:00 UTC, and the late hours (21:00-23:00, where
+    the drift mechanism above would be most built-up) actually show a
+    slightly HIGHER per-hour trade rate (~4.7/hr) than the early/mid
+    hours (2:00-11:00, ~3.1/hr) — the opposite of what "drift
+    accumulates and blocks late-day entries" would predict. So
+    backtest does NOT appear to be dodging this mechanism by only
+    catching fresh, low-drift windows — most of its simulated days
+    must NOT be hitting anything like the severity of inversion seen
+    in live's 2026-11-10 data.
+  - **Better-supported working hypothesis**: today's live data shows a
+    real intraday TREND REVERSAL — BTC trades in run #78 priced it at
+    ~$74,600-74,700 through most of 2026-11-10, but live's own
+    heartbeat at 19:01 UTC the same day showed real price at $73,398.56
+    (price actually fell ~1.7% later in the day) while BTC's `pred`
+    was still extrapolating UPWARD to $77,245 — consistent with a
+    filter trained on a preceding uptrend that hadn't yet "noticed" the
+    reversal, its confidence (covariance) already narrowed from
+    training, making it slow to re-adjust. If true, this would be a
+    REGIME-triggered failure mode (sharp reversal against the trained
+    trend), not a routine daily characteristic every day shares —
+    which would explain why most of run #78's 15 simulated days traded
+    fine at all hours while today specifically did not.
+  - **Not yet proven — this is still the best-supported hypothesis,
+    not a confirmed root cause.** The direct test (do backtest's OWN
+    hour-by-hour predictions show the same inversion specifically on
+    days where real price reverses against the recent trend) requires
+    reading real `diagnose_gates()` output per bar — which was
+    impossible until the 2026-11-10/11 fix above (every prior run's
+    diagnostics silently failed to save). Needs a FRESH backtest run
+    triggered after that fix to actually check this. This sandbox
+    cannot trigger one itself (no POST capability to the live API, and
+    the CSVs `walkforward.py` needs are gitignored/fetched fresh from
+    Alpaca each run — not present here, no Alpaca credentials either)
+    — next session (or the owner, via the existing "Run Backtest"
+    button) should trigger one, then read `GET /api/runs/{id}/
+    diagnostics` for a day that included a real trend reversal and
+    compare directly against live's current state.
   - **Not yet resolved — needs an owner decision between real options,
     not a unilateral code change**, since this affects core strategy
     behavior validated against `walkforward.py`'s reference run (the
