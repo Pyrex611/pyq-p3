@@ -1393,30 +1393,19 @@ def run_walk_forward():
 
         btc_train = btc_full.iloc[max(0, test_start - train_bars):test_start]
         eth_train = eth_full.iloc[max(0, test_start - train_bars):test_start]
-        # 2026-11-10: preserve the real DatetimeIndex into an explicit
-        # 'timestamp' column BEFORE reset_index(drop=True) below discards
-        # it. Root-cause fix for "Persisted 0/720 diagnostic rows" on
-        # EVERY backtest run since the 2026-11-03 diagnostics feature was
-        # built: paper_trade_day()'s per-bar loop does
-        # `ts = str(row_b.get('timestamp', row_b.name))` — with no
-        # 'timestamp' column and a plain RangeIndex (post-reset), that
-        # fell back to row_b.name, a bare row-position integer like
-        # "7721", which Postgres's `timestamp with time zone` column
-        # rejected on every single row, silently (best-effort try/except
-        # in run_backtest_gha.py), for every run — meaning
-        # get_backtest_diagnostics() has always returned an empty list,
-        # and the Compare page's backtest-vs-live gate comparison has
-        # never had real backtest-side data to show, for any run, since
-        # that feature shipped. Diagnostic-only plumbing (never read back
-        # into a trading decision), so this does not need the
-        # validate-in-walkforward-first gate that strategy-math changes
-        # require.
-        btc_test = btc_full.iloc[test_start:test_end].copy()
-        btc_test['timestamp'] = btc_test.index
-        btc_test = btc_test.reset_index(drop=True)
-        eth_test = eth_full.iloc[test_start:test_end].copy()
-        eth_test['timestamp'] = eth_test.index
-        eth_test = eth_test.reset_index(drop=True)
+        # 2026-11-10 fix attempt REVERTED 2026-11-11: this block previously
+        # overwrote btc_test/eth_test's real 'timestamp' column (which
+        # btc_full already carries correctly — see the set_index/
+        # reset_index dance a few dozen lines up, confirmed by direct
+        # reproduction) with raw bar-position integers from the
+        # post-reset_index() RangeIndex, which is wrong and caused run #81
+        # to crash outright (pd.Timestamp("8434.0") -> DateParseError at
+        # the resolved_start_date/resolved_end_date computation below).
+        # That diagnosis was incorrect — see the 2026-11-11 PLAN.md entry
+        # for the real root cause, which is _train_meta() below, not this
+        # line. Restored to the original, correct form.
+        btc_test  = btc_full.iloc[test_start:test_end].reset_index(drop=True)
+        eth_test  = eth_full.iloc[test_start:test_end].reset_index(drop=True)
 
         if day_idx == 0 and len(btc_test):
             first_btc_ts = str(btc_test.iloc[0].get('timestamp', btc_test.index[0]))
@@ -1427,11 +1416,29 @@ def run_walk_forward():
         # below (see paper_trade_day()'s btc_train_meta/eth_train_meta) —
         # purely descriptive, read by the Compare page only.
         def _train_meta(train_df):
+            # 2026-11-11 FIX — this is the actual root cause of "Persisted
+            # 0/720 diagnostic rows" on every backtest run since the
+            # 2026-11-06 training-window-metadata feature shipped (not the
+            # btc_test/eth_test reset_index line touched and reverted
+            # above). btc_train/eth_train are sliced from btc_full/
+            # eth_full via plain .iloc[...] with NO reset_index call, so
+            # train_df.index is the post-reset_index() RangeIndex — bare
+            # bar-position integers (e.g. 7721, matching test_start -
+            # train_bars for day 1 of a real run) — not real dates.
+            # btc_full/eth_full DO carry a correct 'timestamp' column
+            # (confirmed by direct reproduction of the set_index/
+            # reset_index dance above), so use that instead of the index.
+            # Confirmed via the real run #81/#78 GitHub Actions logs: every
+            # one of 720 attempted diagnostic INSERTs failed with
+            # "invalid input syntax for type timestamp with time zone:
+            # '7721'" — train_window_start/train_window_end are
+            # `timestamp with time zone` columns in pyquant_backtest_
+            # diagnostics, and this was feeding them a bar-index string.
             if train_df is None or len(train_df) == 0:
                 return None
             return {
-                "start": str(train_df.index[0]),
-                "end": str(train_df.index[-1]),
+                "start": str(train_df['timestamp'].iloc[0]),
+                "end": str(train_df['timestamp'].iloc[-1]),
                 "bar_count": int(len(train_df)),
             }
         btc_train_meta = _train_meta(btc_train)

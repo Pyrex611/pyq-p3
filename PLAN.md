@@ -588,20 +588,12 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
-- [x] **FIXED 2026-11-10/11 — backtest gate diagnostics have NEVER
-  actually persisted to the DB, for any run, since the comparison
-  feature shipped 2026-11-03; this also silently broke the 2026-11-08
-  "resolved_start_date/End Date" fix the same way.** Found while
-  investigating the owner's follow-up to the drift finding below
-  ("if it is implemented as-is in the backtest, why does it generate
-  signals there and not in live — review more thoroughly").
-  - **Root cause**: `run_walk_forward()` builds each day's test window
-    with `.reset_index(drop=True)`, which discards the real
-    `DatetimeIndex`. `paper_trade_day()`'s per-bar loop then does
-    `ts = str(row_b.get('timestamp', row_b.name))` — with no
-    `'timestamp'` COLUMN left (only the now-discarded index), this
-    silently fell back to `row_b.name`, which after the reset is just
-    the bare row-position integer (e.g. `"7721"`), not a real date.
+- [x] **FIXED 2026-11-11 (CORRECTED — see below) — backtest gate
+  diagnostics have NEVER actually persisted to the DB, for any run,
+  since the training-window-metadata feature shipped 2026-11-06.**
+  Found while investigating the owner's follow-up to the drift finding
+  below ("if it's implemented as-is in the backtest, why does it
+  generate signals there and not live — review more thoroughly").
   - **Real, confirmed blast radius** (pulled from `gh run view --log`
     on run #78's actual GitHub Actions log, not guessed): every single
     one of 720 attempted diagnostic rows failed with `invalid input
@@ -612,29 +604,70 @@ here before moving on, even if you also wrote it up elsewhere.
     means the Compare page's "Model State Comparison" card, the
     `FullComparisonTable`, and `RunDetailModal`'s "Compare to Live"
     drawer have had NO real backtest-side data to show, for ANY run,
-    since 2026-11-03 — every prior "not yet confirmed on a live
+    since 2026-11-06 — every prior "not yet confirmed on a live
     deploy" caveat on that feature (see the 2026-11-03/06 entries
     below) was actually masking a total persistence failure, not just
     an unconfirmed-but-working feature.
-  - **Same root cause also silently broke the 2026-11-08 "Run Detail's
-    End Date" fix** (`resolved_start_date`/`resolved_end_date`,
-    `first_btc_ts`/`last_btc_ts`) — those read the identical
-    `.get('timestamp', btc_test.index[0/-1])` pattern on the same
-    reset-index'd DataFrame, so they too were silently falling back to
-    bare row-position integers this whole time (`pd.Timestamp("7721")`
-    would itself raise or produce nonsense — needs re-verification
-    post-fix, flagged as a follow-up below).
-  - **Fix** (`walkforward.py`'s `run_walk_forward()`): explicitly copy
-    the real index into a `'timestamp'` column BEFORE
-    `reset_index(drop=True)`, for both `btc_test`/`eth_test`. Diagnostic
-    -only change — never read back into a trading decision — so this
-    did not need the standing validate-in-walkforward-first gate that
-    strategy-math changes require.
-  - **Follow-up, not yet done**: re-verify the 2026-11-08 End Date fix
-    actually works now (needs a fresh completed run to check
-    `resolved_start_date`/`resolved_end_date` against real dates, not
-    `"7721"`-style garbage) — flag to the owner that any Run Detail
-    page viewed before this fix may have shown a wrong End Date.
+  - **FIRST diagnosis (2026-11-10/11, WRONG — reverted 2026-11-11)**:
+    initially attributed this to `run_walk_forward()`'s
+    `.reset_index(drop=True)` on `btc_test`/`eth_test` discarding the
+    real `DatetimeIndex`, with `paper_trade_day()`'s per-bar `ts =
+    str(row_b.get('timestamp', row_b.name))` supposedly falling back to
+    a bare row-position integer. **This was incorrect** — direct
+    reproduction (a synthetic DataFrame run through the exact same
+    `set_index`/`reset_index`/CSV-round-trip pipeline) showed
+    `btc_full`/`btc_test` already carry a correct `'timestamp'` COLUMN
+    throughout (alpaca-py's `bars.df` index level is literally named
+    `'timestamp'`, which survives every reset/slice in this pipeline
+    unchanged) — so `row_b.get('timestamp', ...)` was already finding
+    the real date, confirmed independently by run #78's TRADES having
+    perfectly valid `entry_ts` values (fed from the exact same `ts`
+    loop variable). **Worse, the "fix" (overwriting `btc_test['timestamp']`
+    with `btc_test.index`, i.e. the post-reset bar-position integers)
+    actively broke the previously-working `resolved_start_date`/
+    `resolved_end_date` computation**, crashing run #81 outright with
+    `pd.Timestamp("8434.0")` raising a `DateParseError` — caught
+    immediately from the owner's "the backtest attempt failed" report
+    and the real GitHub Actions log. **Reverted** to the original
+    `btc_test = btc_full.iloc[test_start:test_end].reset_index(drop=True)`
+    form, which was correct all along.
+  - **REAL root cause, found 2026-11-11 by tracing the exact error
+    value ("7721") back to where it's actually computed**: the
+    2026-11-06 training-window-metadata feature's `_train_meta()`
+    helper (inside `run_walk_forward()`) does
+    `"start": str(train_df.index[0])` / `"end": str(train_df.index[-1])`
+    — but `btc_train`/`eth_train` are sliced from `btc_full`/`eth_full`
+    via plain `.iloc[...]` with **no** `reset_index()` call, so
+    `train_df.index` is the ALREADY-reset plain `RangeIndex` (bare
+    bar-position integers like `7721`, which is exactly
+    `test_start - train_bars` for day 1 of a real run — an exact
+    numeric match to the logged error value), not a `DatetimeIndex`.
+    `train_window_start`/`train_window_end` are the `timestamp with
+    time zone` columns this feeds, on EVERY diagnostic row, every day —
+    matching the observed "every row fails" blast radius exactly.
+  - **Real fix**: `_train_meta()` now reads
+    `train_df['timestamp'].iloc[0]`/`.iloc[-1]` (the real column, which
+    `btc_train`/`eth_train` already carry correctly, same as
+    `btc_test`/`eth_test` — confirmed by the same direct reproduction)
+    instead of `train_df.index[...]`. Diagnostic-only change — never
+    read back into a trading decision — so this did not need the
+    standing validate-in-walkforward-first gate strategy-math changes
+    require.
+  - **Lesson for next time**: the first diagnosis was built from
+    reading the code and pattern-matching the symptom to a plausible-
+    looking line, without tracing the actual erroring VALUE back to
+    its real source or reproducing it — and it was wrong, cost a
+    broken run, and had to be found from the owner reporting the
+    failure. The second pass traced the exact number ("7721") to the
+    exact line computing it (`test_start - train_bars` for day 1) and
+    confirmed the fix with a full synthetic CSV-round-trip
+    reproduction before touching the file again.
+  - **Follow-up, not yet done**: trigger a fresh backtest run to
+    confirm diagnostics now actually persist and `resolved_start_date`/
+    `resolved_end_date` show real dates, not placeholder/garbage
+    values. Not done here — this sandbox cannot trigger a backtest run
+    (no POST capability to the live API, no Alpaca credentials, CSVs
+    are gitignored).
 
 - [ ] **NEW, 2026-11-10 — confirmed via real live data: UKF predictions
   drift on an almost perfectly CONSTANT hourly increment all day after
