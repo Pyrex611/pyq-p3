@@ -850,15 +850,50 @@ here before moving on, even if you also wrote it up elsewhere.
     `2.51 → 0.053`, `p_velocity_var` `0.049 → 0.013`) — the expected
     shape of a fresh retrain's tightly-converged state, confirming the
     anchor itself worked correctly and gives a clean new baseline to
-    watch. **Not yet checked**: whether the freeze recurs a few hours
-    into THIS retrain cycle too (would need 2-3 more hourly ticks,
-    i.e. check again after ~13:00-14:00 UTC) — if it does, that proves
-    this happens on every retrain regardless of trigger (manual or
-    automatic), which would point squarely at something in the
-    per-tick live execution path itself (most likely still the
-    persist/restore round-trip, or possibly a conditional that skips
-    `.update()` under some condition true on live but never true in
-    backtest) rather than anything specific to the overnight schedule.
+    watch.
+  - **[x] CONFIRMED RECURRING, 2026-11-12 (same day, later check) —
+    rules out anything schedule-specific.** Pulled all 11 hourly
+    `source: "walkforward"` rows from 11:01 through 21:01 UTC (the
+    manual anchor's own retrain cycle). `ukf_velocity` sat at
+    `-52.3579721...` for all 11 straight hours (variation only in the
+    9th-10th significant digit — ordinary float noise, not real
+    movement), while `ukf_p_velocity_var` grew by an exactly constant
+    `+0.0040`/hour (`0.0134 → 0.0174 → 0.0214 → … → 0.0534`) and
+    `ukf_p_price_var` grew the same way it did last cycle
+    (`0.053 → 0.112 → 0.206 → 0.343 → 0.530 → 0.777 → 1.090 → 1.478 →
+    1.948 → 2.510 → 3.170`) — bit-for-bit the same shape as the
+    automatic-retrain cycle before it, just restarted from the fresh
+    (lower) post-anchor baseline. `pred` itself moved by EXACTLY the
+    frozen velocity every single hour (e.g. `73261.91 → 73209.55`,
+    `Δ = -52.36`, matching `ukf_velocity` to 2 decimal places) — so
+    **both state components (`x[0]` price and `x[1]` velocity) are
+    unaffected by `.update()`, not just the velocity term** — while
+    real price moved independently and hard in the opposite direction
+    (`73372 → 71350` over the same 11 hours, price falling as `pred`
+    kept extrapolating upward, the same divergence shape as the
+    original 2026-11-10 incident, now fully reproduced on demand).
+    **Conclusion: this is not tied to the automatic midnight schedule,
+    a specific calendar date, or the retrain trigger (manual or
+    automatic) — it happens starting the very FIRST tick after every
+    retrain and never self-corrects.** That narrows the search
+    squarely onto the per-tick live execution path itself (the one
+    thing every live tick does that backtest's continuous in-process
+    loop never does: round-trip `.x`/`.P` through `pyquant_state`'s
+    JSON kv store via `_persist_ukf_state()`/`_restore_ukf_state()`).
+    One nuance worth flagging precisely: a real `.update()` with a
+    nonzero gain would be expected to move `x`/shrink `P` by SOME
+    amount each hour, however small — the fact that `ukf_velocity` is
+    frozen to 10+ significant figures (not just "nearly" frozen, drifting
+    very slowly) suggests the effective gain is being computed as
+    exactly (or numerically indistinguishable from) zero, not just very
+    small. **Next diagnostic step, not yet done**: log the raw
+    `row['close']`/`row['high']`/`row['low']` values actually fed into
+    `step_ukf()`'s `.update()` call each hour (cheap, additive, same
+    pattern as the fields already added) — this would directly show
+    whether the live measurement itself is stale/duplicate/NaN
+    (upstream data problem) vs. genuinely fresh-but-ineffective
+    (problem inside the update math/restored `.P itself`), which the
+    current fields can't distinguish on their own.
   - **Side finding, unrelated to the drift mechanism but worth fixing
     separately later**: the diagnostics rows currently tagged
     `source: "p4_search"` have NULL `ukf_velocity`/`ukf_p_*_var` on
