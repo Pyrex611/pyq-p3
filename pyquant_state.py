@@ -393,6 +393,23 @@ def _bootstrap_postgres(conn) -> None:
             cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
             cur.execute(f"ALTER TABLE pyquant_backtest_diagnostics ADD COLUMN IF NOT EXISTS {_col} {_type}")
 
+        # 2026-11-12, second pass — raw measurement actually fed into
+        # step_ukf()'s .update() call each live tick (ddata['close']/
+        # ['high']/['low'] in pyq_p4.py's hourly_task(), plus the bar's
+        # own index/timestamp). Added to directly test one half of the
+        # confirmed update()-is-a-no-op finding above: whether the real
+        # measurement is fresh/changing every hour (pointing at the
+        # update math / restored .P itself) or stale/duplicate (pointing
+        # upstream at data_download()/ddata instead). LIVE-ONLY — not
+        # meaningful for a backtest bar, so pyquant_backtest_diagnostics
+        # does not get these columns at all (unlike every other diag
+        # field added so far, which mirrors both tables).
+        for _col, _type in (
+            ("raw_close", "DOUBLE PRECISION"), ("raw_high", "DOUBLE PRECISION"),
+            ("raw_low", "DOUBLE PRECISION"), ("raw_bar_ts", "TEXT"),
+        ):
+            cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
+
 
 @contextmanager
 def _sqlite_conn():
@@ -509,6 +526,14 @@ def _sqlite_conn():
                     conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col}")
                 except sqlite3.OperationalError:
                     pass  # column already exists
+        # 2026-11-12, second pass — see the matching Postgres ALTER block
+        # above: raw measurement fed into step_ukf()'s .update() each
+        # live tick. LIVE-ONLY, pyquant_diagnostics_history only.
+        for _col in ("raw_close REAL", "raw_high REAL", "raw_low REAL", "raw_bar_ts TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN {_col}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         yield conn
         conn.commit()
     finally:
@@ -1161,6 +1186,9 @@ _DIAG_HISTORY_COLS = [
     # 2026-11-12 — see the matching CREATE TABLE/ALTER comment for why
     # these were added (UKF-drift investigation: internal filter state).
     "ukf_velocity", "ukf_p_price_var", "ukf_p_velocity_var",
+    # 2026-11-12, second pass — see the matching CREATE TABLE/ALTER
+    # comment: raw measurement actually fed into .update() each tick.
+    "raw_close", "raw_high", "raw_low", "raw_bar_ts",
 ]
 
 

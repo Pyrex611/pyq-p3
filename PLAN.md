@@ -886,36 +886,52 @@ here before moving on, even if you also wrote it up elsewhere.
     frozen to 10+ significant figures (not just "nearly" frozen, drifting
     very slowly) suggests the effective gain is being computed as
     exactly (or numerically indistinguishable from) zero, not just very
-    small. **Next diagnostic step, not yet done**: log the raw
-    `row['close']`/`row['high']`/`row['low']` values actually fed into
-    `step_ukf()`'s `.update()` call each hour (cheap, additive, same
-    pattern as the fields already added) — this would directly show
-    whether the live measurement itself is stale/duplicate/NaN
-    (upstream data problem) vs. genuinely fresh-but-ineffective
-    (problem inside the update math/restored `.P itself`), which the
-    current fields can't distinguish on their own.
-  - **Side finding, unrelated to the drift mechanism but worth fixing
-    separately later**: the diagnostics rows currently tagged
-    `source: "p4_search"` have NULL `ukf_velocity`/`ukf_p_*_var` on
-    every row, while rows tagged `source: "walkforward"` have them
-    populated — the reverse of what was expected when this was wired
-    up (the snapshot was added right after the SELECTED source's
-    `generate_signal()`/`ukf_handler()` call, which was assumed to be
-    `p4_search`, the documented default). Also noticed in passing:
-    `p4_search`'s and `walkforward`'s rows show IDENTICAL `pred`/
-    `high_pred`/`low_pred` every hour but DIFFERENT `vol_gate_
-    threshold`/`strict_threshold` values at the same timestamp — i.e.
-    both sources really are being evaluated with their own distinct
-    optimizer-chosen params (contradicting this file's own note above
-    that `walkforward_optimal_params` "won't exist" until a shadow
-    optimizer cycle completes — that note is stale, or `live_signal_
-    source` is actually set to `walkforward` right now, opposite of
-    the documented default). Worth a real check of `GET /api/signal-
-    source` next session to confirm what's actually selected and
-    correct either the code or this file's stale assumption — not
-    urgent, and doesn't affect the drift finding above (the real UKF-
-    state fields exist on SOME row every hour regardless of which tag
-    it landed on, which is what the analysis above actually reads).
+    small.
+  - **[x] Side finding RESOLVED, 2026-11-12 — confirmed via `GET /api/
+    signal-source`: `{"live_signal_source": "walkforward",
+    "shadow_comparison_enabled": true, "walkforward_params_available":
+    true}`.** `live_signal_source` really is set to `walkforward`
+    right now (not the documented default `p4_search`) — explains why
+    the UKF-state snapshot fields landed on `source: "walkforward"`
+    rows (that's the currently-SELECTED/tradeable source, where
+    `generate_signal()`/`ukf_handler()` actually run; `p4_search` is
+    the non-selected shadow diagnostic computed through a different
+    path that doesn't touch the live UKF objects the same way) — and
+    confirms `walkforward_optimal_params` genuinely exists now (this
+    file's older "won't exist until a shadow cycle completes" note was
+    stale, not a bug). **Directly answers the owner's question "why
+    does the problem still persist with the backtest being used for
+    signal generation":** `live_signal_source=walkforward` only
+    changes WHICH OPTIMIZER'S GATE THRESHOLDS get loaded by
+    `SignalGenerator.load_params()` — it does not change the
+    execution engine at all. Live still runs through `pyq_p4.py`'s
+    same per-tick path (`p4_utils.py`'s `step_ukf()`/`ukf_handler()`,
+    same `_persist_ukf_state()`/`_restore_ukf_state()` round-trip every
+    ~5 min) regardless of which source is selected — it never actually
+    runs `walkforward.py`'s own continuous in-process loop live, only
+    borrows its optimizer's threshold numbers. Since the confirmed bug
+    lives in that shared execution path (not in either source's
+    thresholds), selecting `walkforward` as the live signal source was
+    never going to avoid it — the name is misleading in exactly the
+    way that caused the question.
+  - **[x] Raw-measurement diagnostic logging added, 2026-11-12, second
+    pass** — `raw_close`/`raw_high`/`raw_low`/`raw_bar_ts` (the exact
+    `ddata['close']`/`['high']`/`['low']` values and the bar's own
+    index, fed straight into `step_ukf()`'s `.update()` call) now ride
+    alongside the existing UKF-state fields on every live
+    `pyquant_diagnostics_history` row (`pyq_p4.py`'s `hourly_task()`,
+    right after the UKF-state snapshot; live-only, no
+    `pyquant_backtest_diagnostics` equivalent — a backtest bar has no
+    analogous "is this measurement stale" question). Purpose: directly
+    distinguishes the two remaining explanations for the confirmed
+    update()-is-a-no-op finding — if `raw_close`/`raw_bar_ts` are
+    frozen hour-to-hour the same way `ukf_velocity` is, the real bug is
+    upstream (`data_download()`/`ddata` serving a stale/duplicate bar);
+    if they're genuinely changing every hour while `ukf_velocity`
+    still doesn't move, the bug is inside the update math or the
+    restored `.P` itself. **Not yet checked against real data** — the
+    next GitHub Actions tick(s) need to run first (this change needs
+    its own deploy/push cycle before any row carries these fields).
   - **Remediation path — still needs an owner decision**, now that
     "shared math characteristic" is ruled out and this is confirmed to
     be a live-only effect localized to the UKF-state persistence

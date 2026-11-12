@@ -1494,6 +1494,30 @@ def hourly_task():
                         )
                     except Exception as e:
                         print(f"UKF diag-state snapshot error for {symbol} (non-fatal): {e}")
+                    # 2026-11-12, second pass — the raw measurement actually
+                    # fed into THIS tick's .update() call (ddata, same
+                    # object just passed to ukf_handler() above), plus the
+                    # bar's own index value (its real timestamp when
+                    # data_download() returns a DatetimeIndex, else just a
+                    # position). Directly tests whether the confirmed
+                    # update()-is-a-no-op finding (PLAN.md Active section)
+                    # is caused by a stale/duplicate measurement upstream
+                    # (this would show raw_close/_bar_ts frozen the same
+                    # way ukf_velocity is) versus a genuinely fresh
+                    # measurement that still has no effect (points at the
+                    # update math / restored .P instead). Live-only, no
+                    # backtest equivalent needed (see pyquant_state.py's
+                    # matching schema comment) — try/except for the same
+                    # "never affect a tick" reason as the snapshot above.
+                    try:
+                        signal_generator.last_diagnostic.update({
+                            "raw_close": float(ddata["close"]),
+                            "raw_high": float(ddata["high"]),
+                            "raw_low": float(ddata["low"]),
+                            "raw_bar_ts": str(getattr(ddata, "name", None)),
+                        })
+                    except Exception as e:
+                        print(f"Raw-measurement snapshot error for {symbol} (non-fatal): {e}")
                     # 2026-11-03 (shadow signal comparison): generate_signal()
                     # above already picked which optimizer's params actually
                     # decided my_signal (SignalGenerator.load_params() reads
