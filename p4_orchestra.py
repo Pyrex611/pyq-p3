@@ -70,6 +70,11 @@ def daily_optimizer():
     # written either way so GET /api/heartbeat (Live Monitor page) can
     # show real pass/fail status instead of requiring a GitHub Actions
     # log dig every time this is in doubt.
+    # 2026-11-12 (manual "Anchor Now" trigger, Settings page) — cheap
+    # (two Alpaca fetches + a UKF fit), so unlike the two heavy
+    # optimizers below it never needs to preempt anything else this
+    # tick; just run it unconditionally before the normal schedule.
+    _run_pending_manual_anchor()
     _run_daily_ukf_retrain()
     # 2026-11-04 (manual trigger + staggered scheduling): a pending
     # "Run Optimizer Now" request from the Settings page (see
@@ -152,15 +157,24 @@ def _clear_manual_optimizer_flag(which: str) -> None:
         print(f"[Orchestra] Failed to clear manual_optimizer_request[{which}] (non-fatal): {e}")
 
 
-def _run_daily_ukf_retrain():
-    if not state_store.try_claim_run("ukf_retrain", state_store.current_day_bucket()):
+def _run_daily_ukf_retrain(manual: bool = False):
+    """`manual=True` (only via _run_pending_manual_anchor(), itself only
+    reachable via the Settings page's "Anchor Now" button) bypasses the
+    day-bucket guard via a one-off bucket, same "extra one-off, not a
+    substitute for the day's own claim" pattern the two heavy optimizers
+    already use below — a manual anchor today does not stop the normal
+    automatic retrain from also claiming and running later the same day."""
+    bucket = (f"manual-{state_store.current_minute_bucket()}" if manual
+              else state_store.current_day_bucket())
+    if not state_store.try_claim_run("ukf_retrain", bucket):
         print("[Orchestra] ukf_retrain already ran (or is running) today. Skipping.")
         return
-    print("[Orchestra] Re-anchoring 1H UKFs…")
+    print(f"[Orchestra] Re-anchoring 1H UKFs{' (manual trigger)' if manual else ''}…")
     try:
         pyq_p4.retrain_daily_ukfs()
         state_store.set_json("pyquant_ukf_retrain_heartbeat", {
             "ts": datetime.now(timezone.utc).isoformat(), "status": "ok",
+            **({"triggered_by": "manual"} if manual else {}),
         })
         print("[Orchestra] UKF re-anchor complete.")
         # 2026-11-09: this is the one-a-day "still alive" Telegram ping
@@ -169,9 +183,12 @@ def _run_daily_ukf_retrain():
         # try_claim_run("ukf_retrain", current_day_bucket()) guard so it
         # can never fire more than once per day, same as the retrain
         # itself. Best-effort: a failed alert must never fail the
-        # retrain it's reporting on.
+        # retrain it's reporting on. A manual anchor (2026-11-12) gets
+        # its own distinct wording since it's an extra, one-off run, not
+        # the day's "still alive" signal.
         try:
             pyq_p4.guard.add_alert_to_queue(
+                "⚓ PyQuant UKF anchor complete (manual trigger)." if manual else
                 "🔔 PyQuant daily UKF anchor complete — engine active.")
         except Exception as alert_err:
             print(f"[Orchestra] Daily active-ping alert failed (non-fatal): {alert_err}")
@@ -181,9 +198,35 @@ def _run_daily_ukf_retrain():
         try:
             state_store.set_json("pyquant_ukf_retrain_heartbeat", {
                 "ts": datetime.now(timezone.utc).isoformat(), "status": "failed", "error": str(e),
+                **({"triggered_by": "manual"} if manual else {}),
             })
         except Exception as e2:
             print(f"[Orchestra] ALSO failed to record the ukf_retrain failure itself: {e2}")
+
+
+def _run_pending_manual_anchor() -> bool:
+    """2026-11-12 (manual "Anchor Now" trigger, Settings page) — checks
+    the `manual_anchor_request` kv flag (set by POST /api/anchor/
+    trigger) and, if set, re-anchors the 1H UKFs right now via
+    _run_daily_ukf_retrain(manual=True) (its own one-off bucket, so it
+    never consumes or is blocked by the day's normal automatic claim —
+    same pattern as _run_pending_manual_optimizer() below). Re-anchoring
+    is cheap (two Alpaca bar fetches + a UKF fit per symbol), so unlike
+    the two heavy optimizers this never needs to preempt anything else
+    in the same tick; daily_optimizer() just calls this unconditionally.
+    Clears the flag before running, same reasoning as
+    _clear_manual_optimizer_flag(): a crash mid-retrain should never
+    tick-lock a retry loop — the owner sees the failure (heartbeat
+    status="failed") and can just click the button again."""
+    if not state_store.get_json("manual_anchor_request", False):
+        return False
+    try:
+        state_store.set_json("manual_anchor_request", False)
+    except Exception as e:
+        print(f"[Orchestra] Failed to clear manual_anchor_request (non-fatal): {e}")
+    print("[Orchestra] Manual trigger: re-anchoring UKFs now…")
+    _run_daily_ukf_retrain(manual=True)
+    return True
 
 
 def _run_daily_param_search(manual: bool = False):

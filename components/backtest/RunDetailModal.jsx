@@ -179,11 +179,9 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
       <div className="modal-card">
         <button className="modal-close" onClick={onClose} aria-label="Close">&times;</button>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 14, flexWrap: "wrap" }}>
           <div>
-            <h3 style={{ margin: 0 }}>
-              Run #{modal.runId} {modalView === "trades" ? "— Executed Trades Log" : "Analytics"}
-            </h3>
+            <h3 style={{ margin: 0 }}>Run #{modal.runId}</h3>
             <div className="modal-sub" style={{ margin: 0, marginTop: 4 }}>
               {modal.loading
                 ? "Loading simulation telemetry…"
@@ -193,15 +191,41 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
             </div>
           </div>
 
-          {modalView === "trades" && (
-            <button
-              type="button"
-              className="btn"
-              style={{ padding: "5px 12px", fontSize: 12 }}
-              onClick={() => { setModalView("overview"); setAlignedTrade(null); }}
+          {/* 2026-11-12 (owner UI request): a segmented "dynamic island"
+              tab control in place of having to click the Total Trades
+              row or the bottom "Inspect All Executed Trades" button —
+              those still work (left as alternate entry points) but this
+              is the primary, always-visible way to switch views. */}
+          {!modal.loading && !modal.error && modal.run && (
+            <div
+              role="tablist"
+              aria-label="Run detail view"
+              style={{
+                display: "inline-flex", padding: 3, borderRadius: 999,
+                background: "var(--bg)", border: "1px solid var(--border-soft)",
+              }}
             >
-              ← Back to Overview
-            </button>
+              {[
+                { key: "overview", label: "Overview" },
+                { key: "trades", label: `Trades (${modal.trades?.length || 0})` },
+              ].map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={modalView === tab.key}
+                  onClick={() => { setModalView(tab.key); if (tab.key === "overview") setAlignedTrade(null); }}
+                  style={{
+                    padding: "6px 16px", fontSize: 12, fontWeight: 600, borderRadius: 999,
+                    border: "none", cursor: "pointer", transition: "background 0.15s, color 0.15s",
+                    background: modalView === tab.key ? "var(--accent-secondary)" : "transparent",
+                    color: modalView === tab.key ? "#FFF" : "var(--text-muted)",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           )}
         </div>
 
@@ -239,6 +263,32 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
                     <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
                       <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Execution Time</div>
                       <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>{runAnalytics.execDuration}</div>
+                    </div>
+                    {/* 2026-11-12 (owner UI request): Initial Capital / Avg Daily
+                        Trade Freq / Avg Daily Return — walkforward.py's
+                        compute_metrics() call site now emits these (see its
+                        2026-11-12 comment); older runs predate them and show
+                        "—" via the same fallback every metric here already uses. */}
+                    <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+                      <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Initial Capital</div>
+                      <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                        {modal.run.metrics?.["Initial Capital ($)"] ? fmtMoney(parseFloat(modal.run.metrics["Initial Capital ($)"])) : "—"}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+                      <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Avg Daily Trade Freq</div>
+                      <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                        {modal.run.metrics?.["Avg Daily Trade Freq"] ?? "—"}{modal.run.metrics?.["Avg Daily Trade Freq"] ? "/day" : ""}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+                      <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Avg Daily Return</div>
+                      <div
+                        className="mono"
+                        style={{ fontSize: 13, fontWeight: 600, color: parseFloat(modal.run.metrics?.["Avg Daily Return (%)"]) < 0 ? "var(--red)" : "var(--green)" }}
+                      >
+                        {modal.run.metrics?.["Avg Daily Return (%)"] ? `${modal.run.metrics["Avg Daily Return (%)"]}%` : "—"}
+                      </div>
                     </div>
                   </div>
                 </div>

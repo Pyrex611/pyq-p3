@@ -48,6 +48,28 @@ export default function EquityCurveChart({ trades, curve, runMetrics = {}, start
       const startMs = startTs ? new Date(startTs).getTime() : null;
       const endMs = endTs ? new Date(endTs).getTime() : null;
       const lastIdx = sampled[sampled.length - 1].i || 1;
+
+      // 2026-11-12 (owner UI request — hover should show a trade's real
+      // % return, not just the bar's cumulative return): capital_curve
+      // has no native per-bar timestamp (ts above is linearly
+      // interpolated across [startMs,endMs], same as always), so this
+      // maps each trade to its APPROXIMATE position in the un-downsampled
+      // curve by where its exit falls in that same [startMs,endMs] span,
+      // then attaches the nearest trade (within one downsample stride)
+      // to each sampled point below. An approximation, like downsample()
+      // itself — good enough for "which trade closed near this point",
+      // not a forensic per-bar reconstruction.
+      const tradesByBarIdx = [];
+      if (startMs !== null && endMs !== null && endMs > startMs) {
+        sortedTrades.forEach((t) => {
+          const exitMs = new Date(t.exit_ts || t.entry_ts).getTime();
+          if (isNaN(exitMs)) return;
+          const frac = Math.max(0, Math.min(1, (exitMs - startMs) / (endMs - startMs)));
+          tradesByBarIdx.push({ barIdx: Math.round(frac * (curve.length - 1)), trade: t });
+        });
+      }
+      const stride = Math.max(1, Math.ceil(curve.length / 400));
+
       const points = [];
       let prevCap = initialCapital;
 
@@ -60,9 +82,19 @@ export default function EquityCurveChart({ trades, curve, runMetrics = {}, start
         const ts = startMs !== null && endMs !== null
           ? new Date(startMs + frac * (endMs - startMs)).toISOString()
           : null;
+
+        let nearTrade = null, bestDist = Infinity;
+        for (const { barIdx, trade } of tradesByBarIdx) {
+          const dist = Math.abs(barIdx - i);
+          if (dist <= stride && dist < bestDist) { bestDist = dist; nearTrade = trade; }
+        }
+
         points.push({
           tradeIndex: i,
-          trade: { exit_leg: i === 0 ? "INITIAL" : "BAR", pnl_pct: null, profit: cap - prevCap },
+          trade: nearTrade
+            ? { exit_leg: nearTrade.exit_leg || "CLOSE", pnl_pct: nearTrade.pnl_pct,
+                profit: nearTrade.profit, symbol: nearTrade.symbol, side: nearTrade.side }
+            : { exit_leg: i === 0 ? "INITIAL" : "BAR", pnl_pct: null, profit: cap - prevCap },
           capital: cap,
           cumPnl: cap - initialCapital,
           returnPct,
@@ -208,6 +240,9 @@ export default function EquityCurveChart({ trades, curve, runMetrics = {}, start
           <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Trade PnL / Leg</div>
           <div className={`mono ${pnlClass(hoveredItem.trade.pnl_pct)}`} style={{ fontSize: 13, fontWeight: 600 }}>
             {hoveredItem.trade.exit_leg || "CLOSE"} ({fmtPct(hoveredItem.trade.pnl_pct)})
+            {hoveredItem.trade.symbol && (
+              <span style={{ color: "var(--text-faint)", fontWeight: 400 }}> · {hoveredItem.trade.symbol}</span>
+            )}
           </div>
         </div>
       </div>
@@ -246,15 +281,39 @@ export default function EquityCurveChart({ trades, curve, runMetrics = {}, start
               marker. Trade-reconstructed mode (far fewer points, each a
               real win/loss) keeps its per-point win/loss dots. */}
           {curve && curve.length > 1
-            ? hoverIndex !== null && (
-                <circle
-                  cx={toX(hoverIndex)}
-                  cy={toY(values[hoverIndex])}
-                  r={5}
-                  fill="var(--accent-secondary)"
-                  stroke="#100F0F"
-                  strokeWidth={1}
-                />
+            ? (
+                <>
+                  {/* 2026-11-12: a small persistent dot on every sampled
+                      point that has a real trade attached (see the
+                      tradesByBarIdx matching above) — makes trades
+                      visually findable on the real per-bar curve, not
+                      just discoverable by hovering every point. */}
+                  {curveData.map((d, i) => {
+                    if (d.trade.pnl_pct === null || d.trade.pnl_pct === undefined) return null;
+                    const isWin = (d.trade.profit ?? 0) > 0;
+                    return (
+                      <circle
+                        key={`trade-${i}`}
+                        cx={toX(i)}
+                        cy={toY(values[i])}
+                        r={hoverIndex === i ? 5 : 3}
+                        fill={isWin ? "var(--green)" : "var(--red)"}
+                        stroke="#100F0F"
+                        strokeWidth={1}
+                      />
+                    );
+                  })}
+                  {hoverIndex !== null && curveData[hoverIndex]?.trade.pnl_pct == null && (
+                    <circle
+                      cx={toX(hoverIndex)}
+                      cy={toY(values[hoverIndex])}
+                      r={5}
+                      fill="var(--accent-secondary)"
+                      stroke="#100F0F"
+                      strokeWidth={1}
+                    />
+                  )}
+                </>
               )
             : curveData.map((d, i) => {
                 const cx = toX(i);

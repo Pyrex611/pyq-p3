@@ -1156,6 +1156,76 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-12 — manual UKF "Anchor Now" button + three Backtest Studio/
+  results UI requests.** All committed together.
+  - **Manual anchor trigger**: new `manual_anchor_request` kv flag +
+    `GET`/`POST /api/anchor/trigger` (same trust-boundary pattern as
+    `manual_optimizer_request`/`trading_enabled` — the API only sets
+    the flag, never runs the retrain itself). `p4_orchestra.py` gained
+    `_run_pending_manual_anchor()` (checked unconditionally at the top
+    of `daily_optimizer()`, before the normal schedule — cheap enough,
+    unlike the two heavy optimizers, that it never needs to preempt
+    anything) and `_run_daily_ukf_retrain(manual: bool = False)`, which
+    claims a one-off `manual-<minute>` bucket when manual, same
+    "extra run, not a substitute for the day's own claim" pattern as
+    `_run_daily_param_search(manual=True)`. Settings page gained an
+    "Anchor Now" card (⚓ icon, per the owner's explicit request) right
+    below "Run Optimizer Now", showing pending/last-anchor status via
+    the existing `pyquant_ukf_retrain_heartbeat` kv key (now tagged
+    `triggered_by: "manual"` when relevant).
+  - **Backtest results modal (`RunDetailModal.jsx`)**: replaced the
+    header's old "click Total Trades / click a button at the bottom"
+    pattern with an always-visible segmented "Overview / Trades"
+    control (both old entry points left in place too, harmless).
+    Expanded metrics: `walkforward.py`'s `compute_metrics()` call site
+    (inside `run_walk_forward()`) now also emits **Initial Capital
+    ($)**, **Avg Daily Trade Freq**, and **Avg Daily Return (%)** as
+    extra `(Metric, Value)` rows, computed from the already-resolved
+    `first_btc_ts`/`last_btc_ts` test-window boundaries (the TRUE
+    elapsed days walked, not just the span between the first/last
+    trade — same reasoning as the 2026-11-08 resolved-dates fix right
+    above it in the file) rather than inside `compute_metrics()` itself
+    (which has no notion of the test window's real length). Surfaced
+    as three new stat tiles in the modal's "Backtest Window & Runtime"
+    row (older runs predate these fields and show "—", same fallback
+    every other metric there already uses) — they also ride along
+    automatically in the generic "Performance Metrics Summary" kv-grid
+    with no further frontend change needed. `EquityCurveChart.tsx`'s
+    hover readout, in real-per-bar-curve mode, previously always showed
+    a blank "Trade PnL / Leg" (each point was just a bar, `pnl_pct:
+    null`, since `capital_curve` has no native per-bar trade
+    attachment) — now matches each trade to its approximate bar index
+    by where its exit falls in the same `[startMs,endMs]` span already
+    used for interpolated hover timestamps (an approximation, like the
+    file's own `downsample()`, not a forensic per-bar reconstruction),
+    attaches the nearest one within a downsample stride to each sampled
+    point, and plots a persistent win/loss dot on every point that has
+    one — so hovering now shows a trade's real % return/exit leg/symbol
+    alongside drawdown, not just the bar's cumulative return.
+  - **Backtest Studio page (`BacktestForm.jsx`/`pages/backtest.js`)**:
+    moved the "Optuna Bayesian"/"ATR-Adaptive SL" checkboxes to their
+    own row below the main input row (Duration/Dates/Trials/Leverage).
+    Replaced the old separate queueing-status text line with the Run
+    Backtest button itself animating through
+    `Queueing…`/`Running…`/`Backtest Completed`/`Backtest Failed`
+    (a plain `setInterval` dot-count, not a CSS `content` keyframe —
+    inconsistent cross-browser support for animating that property),
+    tracked against the SPECIFIC run this submission started (a new
+    `activeRunId`/`runPhase` state pair in `pages/backtest.js`, checked
+    against `wfRuns`/`optRuns` on every existing poll tick) — not just
+    "any run is active," so a background daily_optimizer tick running
+    at the same time can never make the button say "Running." Reverts
+    to normal "Run Backtest" text and re-enables itself ~2.5s after
+    reaching `completed`/`failed`.
+  - Verified via `python3 -c "import ast; ast.parse(...)"` on every
+    changed `.py` file and a full `npm run build` (clean, all 8 pages)
+    on the frontend — no live deploy confirmation yet.
+  - **Owner's follow-up, recorded for later**: once the UKF-drift root
+    cause (Active section, top entry) is pinned and fixed, the Anchor
+    Now button is a reasonable way to force a fresh re-anchor
+    immediately to help confirm the fix, rather than waiting for the
+    next scheduled midnight retrain.
+
 - **2026-11-09 — Telegram "active" ping throttled from every cron tick
   to once a day.** Root cause of the owner's "the telegram bot sends a
   message every 5 minutes saying its active": `pyq_p4.py` instantiates

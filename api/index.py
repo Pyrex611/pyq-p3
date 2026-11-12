@@ -313,6 +313,38 @@ def post_optimizer_trigger(body: OptimizerTriggerRequest):
     }
 
 
+@app.get("/api/anchor/trigger")
+def get_anchor_trigger():
+    """2026-11-12 (manual "Anchor Now" trigger, Settings page) — current
+    pending flag plus the most recent UKF retrain heartbeat (whichever
+    kind, automatic or manual — see pyquant_ukf_retrain_heartbeat's
+    `triggered_by` field), so the Settings page can show "last anchored
+    at X" / "queued, runs within ~5 min" without a second round trip.
+    Same read-only, no-credentials pattern as every other endpoint here."""
+    return {
+        "pending": bool(state_store.get_json("manual_anchor_request", False)),
+        "last_heartbeat": state_store.get_json("pyquant_ukf_retrain_heartbeat"),
+    }
+
+
+@app.post("/api/anchor/trigger")
+def post_anchor_trigger():
+    """Sets the `manual_anchor_request` kv flag — same trust-boundary
+    pattern as every other write this API makes (trading_enabled,
+    manual_optimizer_request, live_signal_source, …): this never runs
+    the retrain itself, only flags it for the next GitHub Actions cron
+    tick (~5 min) to pick up via p4_orchestra.py's
+    _run_pending_manual_anchor(). Re-anchoring is cheap (two Alpaca bar
+    fetches + a UKF fit per symbol) so, unlike the optimizer triggers,
+    there's nothing to stagger or queue — it just runs on the very next
+    tick alongside everything else."""
+    state_store.set_json("manual_anchor_request", True)
+    return {
+        "queued": True,
+        "note": "Runs on the next GitHub Actions cron tick (~5 min).",
+    }
+
+
 @app.get("/api/config")
 def get_config():
     """

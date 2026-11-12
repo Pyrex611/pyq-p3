@@ -27,7 +27,44 @@ export default function Backtest() {
   const [modal, setModal] = useState(null);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
+  // 2026-11-12: drives the "Run Backtest" button's own animated state
+  // (Queueing… / Running… / Backtest Completed / Backtest Failed) instead
+  // of the old separate queueing/etc. text remarks below the form — see
+  // BacktestForm's runPhase prop. activeRunId is the ONE run THIS submit
+  // started (not just "any run active" — a background daily_optimizer
+  // tick running at the same time must never make this button say
+  // "Running"), tracked against wfRuns/optRuns on every poll tick below.
+  const [runPhase, setRunPhase] = useState("idle"); // idle|queueing|running|completed|failed
+  const [activeRunId, setActiveRunId] = useState(null);
+  const resetTimerRef = useRef(null);
+
   const autoPollTimerRef = useRef(null);
+
+  function scheduleRunPhaseReset(delayMs = 2500) {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = setTimeout(() => {
+      setRunPhase("idle");
+      setActiveRunId(null);
+    }, delayMs);
+  }
+
+  useEffect(() => () => {
+    if (resetTimerRef.current) clearTimeout(resetTimerRef.current);
+  }, []);
+
+  // Tracks activeRunId's real status as loadRuns() polls, so the button
+  // reflects the GitHub Actions job's actual queued → running →
+  // completed/failed progression, not just "a request was sent."
+  useEffect(() => {
+    if (!activeRunId) return;
+    const r = (wfRuns || []).find((x) => x.id === activeRunId) ||
+              (optRuns || []).find((x) => x.id === activeRunId);
+    if (!r) return; // not visible yet — stay on "queueing"
+    if (r.status === "queued") setRunPhase("queueing");
+    else if (r.status === "running") setRunPhase("running");
+    else if (r.status === "completed") { setRunPhase("completed"); scheduleRunPhaseReset(); }
+    else if (r.status === "failed") { setRunPhase("failed"); scheduleRunPhaseReset(); }
+  }, [wfRuns, optRuns, activeRunId]);
 
   async function loadRuns() {
     try {
@@ -110,13 +147,16 @@ export default function Backtest() {
   }
 
   async function handleConfirmedSubmit() {
-    setStatusText("Dispatching run to GitHub Actions runner…");
+    setRunPhase("queueing");
+    setStatusText("");
     try {
       const result = await apiPost("/backtests", formBody());
-      setStatusText(`Run #${result.run_id} queued — auto-refresh active.`);
+      setActiveRunId(result.run_id);
       loadRuns();
     } catch (err) {
       setStatusText("Failed to queue backtest: " + err.message);
+      setRunPhase("failed");
+      scheduleRunPhaseReset();
     }
   }
 
@@ -176,6 +216,7 @@ export default function Backtest() {
         onSyncKaggle={handleKaggleSync}
         kaggleUrl={kaggleUrl}
         statusText={statusText}
+        runPhase={runPhase}
       />
 
       {/* Modular Runs Table Component */}

@@ -1637,6 +1637,35 @@ def run_walk_forward():
     ])
     metrics = pd.concat([metrics, _resolved_rows], ignore_index=True) if not metrics.empty else _resolved_rows
 
+    # 2026-11-12 (owner UI request — expand the Backtest results modal's
+    # metrics): Initial Capital / Avg Daily Trade Freq / Avg Daily Return
+    # (%). Computed here rather than inside compute_metrics() itself,
+    # since that function has no notion of the test window's real elapsed
+    # days — first_btc_ts/last_btc_ts (the TRUE resolved test-window
+    # boundaries, just used for the rows above) are already in scope and
+    # the right denominator: the actual days of data walked, not just the
+    # span between the first and last TRADE (which understates it on a
+    # run with no trades near either edge — same reasoning as the
+    # 2026-11-08 resolved_start_date/end_date fix just above). Same
+    # dict(zip(metrics["Metric"], metrics["Value"])) pattern at every
+    # call site picks these up automatically — no other change needed.
+    try:
+        _test_days = (max((pd.Timestamp(last_btc_ts) - pd.Timestamp(first_btc_ts)).total_seconds() / 86400.0, 1e-9)
+                      if first_btc_ts and last_btc_ts else None)
+    except Exception:
+        _test_days = None
+    _final_capital = capital_curve[-1] if capital_curve else INITIAL_CAPITAL
+    _total_ret_pct = (_final_capital / INITIAL_CAPITAL - 1) * 100
+    _trade_count = len(all_trades)
+    _extra_rows = pd.DataFrame([
+        {"Metric": "Initial Capital ($)", "Value": f"{INITIAL_CAPITAL:.2f}"},
+        {"Metric": "Avg Daily Trade Freq",
+         "Value": f"{_trade_count/_test_days:.2f}" if _test_days else "—"},
+        {"Metric": "Avg Daily Return (%)",
+         "Value": f"{_total_ret_pct/_test_days:+.4f}" if _test_days else "—"},
+    ])
+    metrics = pd.concat([metrics, _extra_rows], ignore_index=True) if not metrics.empty else _extra_rows
+
     print(metrics.to_string(index=False))
 
     # Phase 2: log this run for the UI's "Backtest" screen. Purely

@@ -1,7 +1,29 @@
-import React, { useRef } from "react";
+import React, { useRef, useState, useEffect } from "react";
 
 const OPTUNA_TRIAL_OPTIONS = [10, 20, 30, 50, 70, 100, 150, 200, 250, 300, 400, 500];
 const LEVERAGE_OPTIONS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50];
+
+// 2026-11-12: drives the animated "…"/".."/"." suffix on the Run
+// Backtest button while runPhase is "queueing" or "running" — a plain
+// setInterval counter rather than a CSS `content` keyframe (inconsistent
+// cross-browser support for animating that property).
+function useDots(active) {
+  const [n, setN] = useState(0);
+  useEffect(() => {
+    if (!active) { setN(0); return; }
+    const id = setInterval(() => setN((v) => (v % 3) + 1), 400);
+    return () => clearInterval(id);
+  }, [active]);
+  return ".".repeat(n);
+}
+
+const RUN_PHASE_LABELS = {
+  idle: "Run Backtest",
+  queueing: "Queueing",
+  running: "Running",
+  completed: "Backtest Completed",
+  failed: "Backtest Failed",
+};
 
 export default function BacktestForm({
   form,
@@ -11,9 +33,13 @@ export default function BacktestForm({
   onSyncKaggle,
   kaggleUrl,
   statusText,
+  runPhase = "idle",
 }) {
   const startDateInputRef = useRef(null);
   const endDateInputRef = useRef(null);
+  const busy = runPhase === "queueing" || runPhase === "running";
+  const dots = useDots(busy);
+  const buttonLabel = busy ? `${RUN_PHASE_LABELS[runPhase]}${dots}` : RUN_PHASE_LABELS[runPhase] || RUN_PHASE_LABELS.idle;
 
   function setPreset(days) {
     setForm({
@@ -138,8 +164,10 @@ export default function BacktestForm({
               ))}
             </select>
           </label>
+        </div>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8, cursor: "pointer" }}>
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginTop: 14 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
             <input
               type="checkbox"
               checked={form.use_bayesian}
@@ -148,7 +176,7 @@ export default function BacktestForm({
             Optuna Bayesian
           </label>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 6, paddingBottom: 8, cursor: "pointer" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
             <input
               type="checkbox"
               checked={form.use_atr_sl}
@@ -162,9 +190,10 @@ export default function BacktestForm({
           <button
             type="submit"
             className="btn primary"
+            disabled={runPhase !== "idle"}
             style={{ minWidth: 220, padding: "12px 36px", fontSize: 14, letterSpacing: "0.03em" }}
           >
-            Run Backtest
+            {buttonLabel}
           </button>
         </div>
       </form>

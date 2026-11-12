@@ -53,6 +53,9 @@ export default function Settings() {
   const [trigger, setTrigger] = useState(null);
   const [triggerError, setTriggerError] = useState(null);
   const [triggerBusy, setTriggerBusy] = useState(false);
+  const [anchor, setAnchor] = useState(null);
+  const [anchorError, setAnchorError] = useState(null);
+  const [anchorBusy, setAnchorBusy] = useState(false);
 
   useEffect(() => {
     try {
@@ -99,11 +102,22 @@ export default function Settings() {
     }
   }
 
+  async function loadAnchor() {
+    try {
+      const d = await apiGet("/anchor/trigger");
+      setAnchor(d);
+      setAnchorError(null);
+    } catch (e) {
+      setAnchorError(e.message);
+    }
+  }
+
   useEffect(() => {
     apiGet("/config").then(setCfg).catch((e) => setCfgError(e.message));
     loadBaseline();
     loadSigSource();
     loadTrigger();
+    loadAnchor();
   }, []);
 
   async function updateSigSource(patch) {
@@ -136,6 +150,19 @@ export default function Settings() {
       alert("Could not queue the optimizer run: " + e.message);
     } finally {
       setTriggerBusy(false);
+    }
+  }
+
+  async function runAnchorNow() {
+    if (!confirm("Re-anchor the 1H UKFs now (on the next cron tick, within ~5 minutes)?")) return;
+    setAnchorBusy(true);
+    try {
+      await apiPost("/anchor/trigger", {});
+      await loadAnchor();
+    } catch (e) {
+      alert("Could not queue the manual anchor: " + e.message);
+    } finally {
+      setAnchorBusy(false);
     }
   }
 
@@ -294,6 +321,30 @@ export default function Settings() {
                 above — it won&apos;t stop tonight&apos;s scheduled run from also happening. Requesting
                 &quot;Both&quot; queues them one tick apart (~5 min) rather than together, for the same
                 timeout-safety reason the automatic schedule staggers them by 30 minutes.
+              </p>
+            </div>
+
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
+              <div className="stat-label" style={{ marginBottom: 8 }}>Anchor Now</div>
+              {anchorError && <div className="banner error">Could not load ({anchorError}).</div>}
+              <button type="button" className="btn" disabled={anchorBusy} onClick={runAnchorNow}>
+                ⚓ Re-anchor UKFs Now
+              </button>
+              {anchor && (
+                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, marginTop: 8 }}>
+                  {anchor.pending
+                    ? "queued — runs within ~5 min"
+                    : anchor.last_heartbeat?.ts
+                    ? `last anchor ${anchor.last_heartbeat.status === "failed" ? "FAILED" : "ok"} at ${fmtTime(anchor.last_heartbeat.ts)}` +
+                      (anchor.last_heartbeat.triggered_by === "manual" ? " (manual)" : " (automatic)")
+                    : "no anchor recorded yet"}
+                </div>
+              )}
+              <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
+                Re-anchors the 1H UKFs (fresh 30-day fit) right now, same as the once-a-day
+                00:01 UTC automatic retrain — an EXTRA one-off run, on top of (not instead of) tonight&apos;s
+                scheduled retrain. Useful for confirming a fix to the UKF right away rather than waiting for
+                the next daily cycle.
               </p>
             </div>
           </>
