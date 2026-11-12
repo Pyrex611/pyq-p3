@@ -457,6 +457,23 @@ def step_ukf(ukf, high_ukf, low_ukf, row: pd.Series):
         u.predict();   _stabilise_P(u)
     return ukf.x[0], high_ukf.x[0], low_ukf.x[0]
 
+
+def ukf_diag_state(ukf) -> dict:
+    """2026-11-12 — backtest-side counterpart to p4_utils.ukf_diag_state()
+    (see that function's docstring for the full rationale: the UKF-drift
+    investigation in PLAN.md's Active section). Mirrors it exactly so a
+    backtest run's internal filter state can be compared directly against
+    live's, via the same new diagnostics columns — purely descriptive,
+    never read back into run_walk_forward()'s own trading decisions."""
+    try:
+        return {
+            "ukf_velocity": float(ukf.x[1]),
+            "ukf_p_price_var": float(ukf.P[0][0]),
+            "ukf_p_velocity_var": float(ukf.P[1][1]),
+        }
+    except Exception:
+        return {"ukf_velocity": None, "ukf_p_price_var": None, "ukf_p_velocity_var": None}
+
 # ════════════════════════════════════════════════════════╗
 # SECTION 6 — SIGNAL GENERATION
 # ════════════════════════════════════════════════════════╝
@@ -995,6 +1012,7 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
             diag_b["train_window_start"] = btc_train_meta.get("start")
             diag_b["train_window_end"]   = btc_train_meta.get("end")
             diag_b["train_bar_count"]    = btc_train_meta.get("bar_count")
+        diag_b.update(ukf_diag_state(btc_ukf_c))  # 2026-11-12 — see that function's docstring
         diagnostics.append(diag_b)
         diag_e = diagnose_gates(pe, pred_e, hp_e, lp_e, 'ETH', se, ses)
         diag_e["ts"] = ts
@@ -1002,6 +1020,7 @@ def paper_trade_day(btc_day, eth_day, btc_filters, eth_filters,
             diag_e["train_window_start"] = eth_train_meta.get("start")
             diag_e["train_window_end"]   = eth_train_meta.get("end")
             diag_e["train_bar_count"]    = eth_train_meta.get("bar_count")
+        diag_e.update(ukf_diag_state(eth_ukf_c))  # 2026-11-12 — see that function's docstring
         diagnostics.append(diag_e)
 
         # FIX 1 — reject unfillable Limit entries

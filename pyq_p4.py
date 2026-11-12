@@ -51,7 +51,7 @@ from sklearn.metrics import (
 )
 
 from p4_utils import (
-    UKFModel, build_ukfs, step_ukf, get_equities, SignalGenerator, PositionGuard,
+    UKFModel, build_ukfs, step_ukf, ukf_diag_state, get_equities, SignalGenerator, PositionGuard,
     data_download, aggregate_ohlcv_data,
     check_open_position, close_futures_position,
     compute_atr, fetch_recent_bars,
@@ -1479,6 +1479,21 @@ def hourly_task():
                         price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance,
                         atr=atr_val, atr_mult=atr_mult
                     )
+                    # 2026-11-12 — see p4_utils.ukf_diag_state()'s docstring:
+                    # snapshot the close-price UKF's internal state (velocity
+                    # term + its own variance) onto THIS tick's diagnostic
+                    # row, purely for the UKF-drift investigation (PLAN.md's
+                    # Active section) — never read by generate_signal() or
+                    # any trading decision, and if this snapshot itself
+                    # fails for any reason the tick continues exactly as it
+                    # always has (ukf_diag_state() already swallows its own
+                    # errors, but belt-and-suspenders here too).
+                    try:
+                        signal_generator.last_diagnostic.update(
+                            ukf_diag_state(ukf_data["ukf"])
+                        )
+                    except Exception as e:
+                        print(f"UKF diag-state snapshot error for {symbol} (non-fatal): {e}")
                     # 2026-11-03 (shadow signal comparison): generate_signal()
                     # above already picked which optimizer's params actually
                     # decided my_signal (SignalGenerator.load_params() reads

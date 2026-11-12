@@ -800,23 +800,66 @@ here before moving on, even if you also wrote it up elsewhere.
       owner should decide whether to greenlight that logging addition
       before the next daily retrain (~00:01 UTC) so it can catch the
       mechanism in the act.
-  - **Not yet resolved — needs an owner decision**, now that "shared
-    math characteristic" is ruled out and this is confirmed to be a
-    live-only effect localized to the UKF-state persistence mechanism:
-    1. **Add targeted diagnostic logging** (P-diagonal/velocity state
-       alongside the existing `pred`/`high_pred`/`low_pred` diagnostic
-       fields) to catch the exact mechanism on the next retrain cycle
-       — cheapest, lowest-risk, purely additive, recommended first
-       step before changing any trading-affecting code.
+  - **[x] Diagnostic logging added, 2026-11-12** — `ukf_diag_state()`
+    (new, in both `p4_utils.py` and `walkforward.py`, identical
+    implementation) snapshots a UKF's `x[1]` (constant-velocity state
+    component) and `P[0][0]`/`P[1][1]` (diagonal variances) as
+    `ukf_velocity`/`ukf_p_price_var`/`ukf_p_velocity_var`. Wired into
+    `pyq_p4.py`'s `hourly_task()` (merged onto
+    `signal_generator.last_diagnostic` right after the close-price
+    UKF's `ukf_handler()` call, before `_persist_signal_diagnostic()`)
+    and `walkforward.py`'s `paper_trade_day()` (merged onto `diag_b`/
+    `diag_e` right after `diagnose_gates()`, for backtest-side parity).
+    Three new nullable columns added to both `pyquant_diagnostics_
+    history` and `pyquant_backtest_diagnostics` (Postgres `ADD COLUMN
+    IF NOT EXISTS` + SQLite try/except `ALTER TABLE`, placed AFTER both
+    tables' `CREATE TABLE` per the established ordering rule), and to
+    `_DIAG_HISTORY_COLS`/`_BACKTEST_DIAG_COLS` so they ride along
+    automatically through the existing INSERT/SELECT column lists and
+    every API endpoint that already returns those dicts — no
+    `api/index.py` changes needed, same as the 2026-11-06 precedent.
+    Purely additive/diagnostic: never read by `generate_signal()`,
+    `diagnose_gates()`, or any trading decision in either path; every
+    snapshot call is wrapped in try/except so a failure here can never
+    affect a tick. Verified via `ast.parse()` on all four changed files
+    and a full `git diff` review before committing. **Not yet
+    confirmed against real data** — needs the next live daily retrain
+    (~00:01 UTC) to produce fresh rows, then a read of `GET /api/
+    diagnostics/history?symbol=BTC/USD&source=p4_search` for the hours
+    after it: if `ukf_velocity` is frozen hour-to-hour while
+    `ukf_p_velocity_var` sits at/near `_stabilise_P()`'s `1e-6` floor,
+    that confirms the Kalman gain has collapsed and pins the mechanism
+    (next step would be narrowing down why the persist/restore
+    round-trip — or something else live-only — produces that collapse
+    when backtest's in-process equivalent never does).
+  - **Remediation path — still needs an owner decision**, now that
+    "shared math characteristic" is ruled out and this is confirmed to
+    be a live-only effect localized to the UKF-state persistence
+    mechanism:
+    1. **Diagnostic logging (above)** — done; check its first real
+       results after the next retrain before deciding between 2/3 below.
     2. **Retrain more often than once/day** — would shorten any single
        drift window's damage but doesn't address the root cause if
        it's a persistence-round-trip defect; still needs `walkforward.py`
        validation first per the standing rule before touching live.
     3. **Bypass the persist/restore round-trip for `.P` specifically**
        (e.g. re-run a cheap partial retrain instead of restoring `.P`
-       from kv) — more invasive, needs the diagnostic logging above
-       first to confirm this is actually where the defect lives before
-       committing to a fix.
+       from kv) — more invasive, needs the diagnostic logging's first
+       real results to confirm this is actually where the defect lives
+       before committing to a fix.
+  - **Owner's follow-up request, 2026-11-11/12 (recorded for when a fix
+    ships)**: once the actual root cause above is found and fixed, keep
+    the current trade-frequency-aware optimizer objective (confirmed
+    done — see the 2026-11-08/09 entry below, `score_candidate()`'s
+    `TARGET_TRADES_PER_DAY_RANGE = (2.0, 5.0)` in
+    `pyquant_signal_math.py`, live on `origin/main` since commit
+    `6b425fb`) running live for a few days specifically to generate
+    enough signals to confirm the fix, THEN revert live's signal
+    frequency back down to match backtest's validated frequency.
+    Needs a decision closer to that point on exactly what "backtest's
+    frequency" means to revert to (the pre-2026-11-08 objective, a
+    different target range, or something else) — not resolved yet,
+    just recorded so it isn't missed once the drift fix lands.
   - **Also found and fixed in passing, unrelated to the above**:
     `CLAUDE.md` Section 5 still listed the Supabase `DATABASE_URL`
     IPv6 issue as "known-broken right now" — stale; `PLAN.md`'s own

@@ -369,6 +369,30 @@ def _bootstrap_postgres(conn) -> None:
             cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
             cur.execute(f"ALTER TABLE pyquant_backtest_diagnostics ADD COLUMN IF NOT EXISTS {_col} {_type}")
 
+        # 2026-11-12 — diagnostic-only (never read by any trading decision)
+        # UKF internal-state fields, added specifically to investigate the
+        # confirmed live-only prediction drift documented in PLAN.md's
+        # Active section (pred growing by an exactly-constant hourly
+        # increment after a retrain, live only, never reproduced in
+        # backtest on the same real dates). `ukf_velocity` is the
+        # close-price filter's x[1] (constant-velocity) state component;
+        # `ukf_p_price_var`/`ukf_p_velocity_var` are its P[0][0]/P[1][1]
+        # diagonal variances. If the velocity term is frozen hour-to-hour
+        # while its own variance sits at (or near) `_stabilise_P()`'s
+        # 1e-6 floor, that's direct confirmation the Kalman gain has
+        # collapsed and `.update()` can no longer move the state — the
+        # leading suspect being the live-only persist/restore round-trip
+        # through pyquant_kv (_persist_ukf_state()/_restore_ukf_state()
+        # in pyq_p4.py), which backtest never exercises at all. Same
+        # nullable/AFTER-the-CREATE-TABLE placement as the 2026-11-06 cols.
+        for _col, _type in (
+            ("ukf_velocity", "DOUBLE PRECISION"),
+            ("ukf_p_price_var", "DOUBLE PRECISION"),
+            ("ukf_p_velocity_var", "DOUBLE PRECISION"),
+        ):
+            cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
+            cur.execute(f"ALTER TABLE pyquant_backtest_diagnostics ADD COLUMN IF NOT EXISTS {_col} {_type}")
+
 
 @contextmanager
 def _sqlite_conn():
@@ -475,7 +499,12 @@ def _sqlite_conn():
         for _tbl in ("pyquant_diagnostics_history", "pyquant_backtest_diagnostics"):
             for _col in ("high_pred REAL", "low_pred REAL", "buy_price REAL",
                          "sell_price REAL", "train_window_start TEXT",
-                         "train_window_end TEXT", "train_bar_count INTEGER"):
+                         "train_window_end TEXT", "train_bar_count INTEGER",
+                         # 2026-11-12 — see the matching Postgres ALTER block
+                         # above for the full rationale (UKF-internal-state
+                         # drift-investigation diagnostics).
+                         "ukf_velocity REAL", "ukf_p_price_var REAL",
+                         "ukf_p_velocity_var REAL"):
                 try:
                     conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN {_col}")
                 except sqlite3.OperationalError:
@@ -1000,6 +1029,9 @@ _BACKTEST_DIAG_COLS = [
     # these were added (expanded live-vs-backtest comparison).
     "high_pred", "low_pred", "buy_price", "sell_price",
     "train_window_start", "train_window_end", "train_bar_count",
+    # 2026-11-12 — see the matching CREATE TABLE/ALTER comment for why
+    # these were added (UKF-drift investigation: internal filter state).
+    "ukf_velocity", "ukf_p_price_var", "ukf_p_velocity_var",
 ]
 
 
@@ -1126,6 +1158,9 @@ _DIAG_HISTORY_COLS = [
     # these were added (expanded live-vs-backtest comparison).
     "high_pred", "low_pred", "buy_price", "sell_price",
     "train_window_start", "train_window_end", "train_bar_count",
+    # 2026-11-12 — see the matching CREATE TABLE/ALTER comment for why
+    # these were added (UKF-drift investigation: internal filter state).
+    "ukf_velocity", "ukf_p_price_var", "ukf_p_velocity_var",
 ]
 
 

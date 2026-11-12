@@ -374,6 +374,32 @@ def step_ukf(ukf, high_ukf, low_ukf, row: pd.Series) -> Tuple[float, float, floa
     return float(ukf.x[0]), float(high_ukf.x[0]), float(low_ukf.x[0])
 
 
+def ukf_diag_state(ukf) -> dict:
+    """2026-11-12 — diagnostic-only snapshot of one UKF's internal state,
+    added to investigate the confirmed live-only prediction drift (see
+    PLAN.md's Active section): pred growing by an exactly-constant
+    hourly increment after a retrain, reproduced live but never in
+    backtest on the same real dates despite byte-identical step_ukf()/
+    _make_ukf() code. `velocity` is the constant-velocity state
+    component (x[1] in `fx = x[0] + dt*x[1]`, the term that keeps
+    incrementing pred unopposed if .update() stops moving it);
+    `p_price_var`/`p_velocity_var` are the P[0][0]/P[1][1] diagonal
+    variances _stabilise_P() floors at 1e-6. If `velocity` is frozen
+    hour-to-hour while `p_velocity_var` sits at (or near) that floor,
+    that's direct confirmation the Kalman gain has collapsed and new
+    real measurements can no longer correct the state — never used in
+    any trading decision, purely for comparing live's vs. backtest's
+    internal state side by side via the diagnostics tables."""
+    try:
+        return {
+            "ukf_velocity": float(ukf.x[1]),
+            "ukf_p_price_var": float(ukf.P[0][0]),
+            "ukf_p_velocity_var": float(ukf.P[1][1]),
+        }
+    except Exception:
+        return {"ukf_velocity": None, "ukf_p_price_var": None, "ukf_p_velocity_var": None}
+
+
 class UKFModel:
     def __init__(self, crypto_client, start_date):
         self.crypto_client = crypto_client
