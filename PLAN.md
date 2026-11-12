@@ -822,16 +822,65 @@ here before moving on, even if you also wrote it up elsewhere.
     `diagnose_gates()`, or any trading decision in either path; every
     snapshot call is wrapped in try/except so a failure here can never
     affect a tick. Verified via `ast.parse()` on all four changed files
-    and a full `git diff` review before committing. **Not yet
-    confirmed against real data** — needs the next live daily retrain
-    (~00:01 UTC) to produce fresh rows, then a read of `GET /api/
-    diagnostics/history?symbol=BTC/USD&source=p4_search` for the hours
-    after it: if `ukf_velocity` is frozen hour-to-hour while
-    `ukf_p_velocity_var` sits at/near `_stabilise_P()`'s `1e-6` floor,
-    that confirms the Kalman gain has collapsed and pins the mechanism
-    (next step would be narrowing down why the persist/restore
-    round-trip — or something else live-only — produces that collapse
-    when backtest's in-process equivalent never does).
+    and a full `git diff` review before committing.
+  - **[x] CONFIRMED against real data, 2026-11-12 — mechanism pinned:
+    `.update()` is not merely "ineffective," it is not running at
+    all.** Pulled `GET /api/diagnostics/history?symbol=BTC/USD` for
+    the hours between the automatic 2026-11-12 00:0x UTC retrain and
+    the owner's manual "Anchor Now" trigger (10:56:21 UTC, see the
+    entry right above this one): for five straight hourly ticks
+    (06:01 → 10:01 UTC), `ukf_velocity` was **bit-identical** —
+    exactly `-94.3011122951853` every single hour, to 13 decimal
+    places, zero drift. Critically, `ukf_p_velocity_var` and
+    `ukf_p_price_var` were NOT frozen — they grew monotonically every
+    hour (`0.0334 → 0.0374 → 0.0414 → 0.0454 → 0.0494` and
+    `0.78 → 1.09 → 1.48 → 1.95 → 2.51` respectively, each step roughly
+    `P[0][0]`'s own earlier-documented per-hour process-noise
+    increment). This is the key diagnostic: a real Kalman `.update()`
+    ALWAYS shrinks `P` via `P = (I-KH)P` regardless of how small the
+    residual is, as long as the gain is nonzero — so `P` growing
+    every hour with NOTHING pulling it back down proves `.update()`
+    is not executing at all for this tick, not just executing with a
+    collapsed/near-zero gain. `.predict()` is the only thing running
+    (adds `+Q` every step, hence the monotonic growth; carries `x[1]`
+    forward unchanged, hence the perfect freeze). Then, on the very
+    next tick after the manual anchor (11:01 UTC, ~5 min after the
+    10:56:21 retrain completed), `ukf_velocity` moved to a new value
+    (`-52.358`) and both variances dropped sharply (`p_price_var`
+    `2.51 → 0.053`, `p_velocity_var` `0.049 → 0.013`) — the expected
+    shape of a fresh retrain's tightly-converged state, confirming the
+    anchor itself worked correctly and gives a clean new baseline to
+    watch. **Not yet checked**: whether the freeze recurs a few hours
+    into THIS retrain cycle too (would need 2-3 more hourly ticks,
+    i.e. check again after ~13:00-14:00 UTC) — if it does, that proves
+    this happens on every retrain regardless of trigger (manual or
+    automatic), which would point squarely at something in the
+    per-tick live execution path itself (most likely still the
+    persist/restore round-trip, or possibly a conditional that skips
+    `.update()` under some condition true on live but never true in
+    backtest) rather than anything specific to the overnight schedule.
+  - **Side finding, unrelated to the drift mechanism but worth fixing
+    separately later**: the diagnostics rows currently tagged
+    `source: "p4_search"` have NULL `ukf_velocity`/`ukf_p_*_var` on
+    every row, while rows tagged `source: "walkforward"` have them
+    populated — the reverse of what was expected when this was wired
+    up (the snapshot was added right after the SELECTED source's
+    `generate_signal()`/`ukf_handler()` call, which was assumed to be
+    `p4_search`, the documented default). Also noticed in passing:
+    `p4_search`'s and `walkforward`'s rows show IDENTICAL `pred`/
+    `high_pred`/`low_pred` every hour but DIFFERENT `vol_gate_
+    threshold`/`strict_threshold` values at the same timestamp — i.e.
+    both sources really are being evaluated with their own distinct
+    optimizer-chosen params (contradicting this file's own note above
+    that `walkforward_optimal_params` "won't exist" until a shadow
+    optimizer cycle completes — that note is stale, or `live_signal_
+    source` is actually set to `walkforward` right now, opposite of
+    the documented default). Worth a real check of `GET /api/signal-
+    source` next session to confirm what's actually selected and
+    correct either the code or this file's stale assumption — not
+    urgent, and doesn't affect the drift finding above (the real UKF-
+    state fields exist on SOME row every hour regardless of which tag
+    it landed on, which is what the analysis above actually reads).
   - **Remediation path — still needs an owner decision**, now that
     "shared math characteristic" is ruled out and this is confirmed to
     be a live-only effect localized to the UKF-state persistence
