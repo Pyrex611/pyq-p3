@@ -1659,6 +1659,10 @@ def run_walk_forward():
     _trade_count = len(all_trades)
     _extra_rows = pd.DataFrame([
         {"Metric": "Initial Capital ($)", "Value": f"{INITIAL_CAPITAL:.2f}"},
+        # 2026-11-13 (owner UI request): final capital alongside initial —
+        # _final_capital was already computed above for _total_ret_pct,
+        # just not surfaced as its own metrics row until now.
+        {"Metric": "Final Capital ($)", "Value": f"{_final_capital:.2f}"},
         {"Metric": "Avg Daily Trade Freq",
          "Value": f"{_trade_count/_test_days:.2f}" if _test_days else "—"},
         {"Metric": "Avg Daily Return (%)",

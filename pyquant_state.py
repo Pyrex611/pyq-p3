@@ -863,6 +863,29 @@ def list_signals(symbol: Optional[str] = None, status: Optional[str] = None, lim
         return []
 
 
+def get_signal(signal_id: int) -> Optional[dict]:
+    """2026-11-13 (Signals page row click-through) — single signal row
+    by id, with the same column set list_signals() selects (already
+    everything on pyquant_signals the UI shows anywhere, including
+    tp_price/sl_price/qty/entry_capital/expected_max_loss). Returns
+    None if not found or on error."""
+    cols = ["id", "symbol", "side", "entry_price", "sl_price", "tp_price", "qty",
+            "entry_capital", "expected_max_loss", "mode", "status", "outcome_price",
+            "realized_pnl", "realized_pnl_pct", "opened_at", "closed_at", "is_ghosted"]
+    ts_cols = ("opened_at", "closed_at")
+    try:
+        if _using_postgres():
+            with _pg_conn().cursor() as cur:
+                cur.execute(f"SELECT {','.join(cols)} FROM pyquant_signals WHERE id = %s", (signal_id,))
+                row = cur.fetchone()
+                return _row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) if row else None
+        with _lock, _sqlite_conn() as conn:
+            row = conn.execute(f"SELECT {','.join(cols)} FROM pyquant_signals WHERE id = ?", (signal_id,)).fetchone()
+            return _row_timestamps_to_iso(dict(zip(cols, row)), ts_cols) if row else None
+    except Exception:
+        return None
+
+
 # ── Runs (Phase 2 — UI "Backtest" screen: walkforward + daily-optimizer runs) ─
 
 def record_run(
@@ -1561,7 +1584,17 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
     failure rather than raising, matching this module's standing
     try/except convention for every read used by the UI."""
     # Updated snippet inside pyquant_state.py -> compute_comparison_buckets()
-    def _bucket(rows: list, date_key: str, pct_key: str, win_pred) -> dict:
+    def _bucket(rows: list, date_key: str, pct_key: str, win_pred, exit_price_key: str = "exit_price") -> dict:
+        """`exit_price_key` (2026-11-13 fix): live rows (from list_signals())
+        store their close price under `outcome_price`, not `exit_price` —
+        `pyquant_backtest_trades` rows are the only ones with a real
+        `exit_price` column. This function previously always read
+        `exit_price` regardless of which rows were passed in, so every
+        LIVE trade's "Exit" came back None even once the trade had
+        actually closed (a real outcome_price existed, just under a
+        different key) — this is why the Compare page's live trade rows
+        always showed "—" for Exit. Backtest rows are unaffected (their
+        real column genuinely is `exit_price`, the default)."""
         buckets: dict = {}
         for r in rows:
             ts = r.get(date_key)
@@ -1583,7 +1616,7 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
                 "symbol": r.get("symbol"),
                 "side": r.get("side"),
                 "entry_price": r.get("entry_price"),
-                "exit_price": r.get("exit_price"),
+                "exit_price": r.get(exit_price_key),
                 "pnl_pct": pv,
                 "status": r.get("status"),
                 "exit_leg": r.get("exit_leg"),
@@ -1630,11 +1663,54 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
         live_by_day = _bucket(
             live_closed, "closed_at", "realized_pnl_pct",
             lambda r: r.get("status") == "closed_tp",
+            exit_price_key="outcome_price",
         )
 
-        return {"run_id": run_id, "live_by_day": live_by_day, "backtest_by_day": backtest_by_day}
+        # 2026-11-13 — tick-aligned side-by-side rows (owner's explicit
+        # ask: "if live only generated one signal, it would be on the
+        # same row as the backtest's signal of that tick" rather than
+        # two independent lists the reader has to cross-reference by
+        # eye). Both sides' entry_ts are genuinely hourly (live's
+        # hourly_task() is run-guarded to at most once/hour; backtest's
+        # bars are hourly too), so grouping by the UTC hour of
+        # entry_ts is a real, meaningful alignment key here — not a
+        # loose approximation. One row per hour that EITHER side has a
+        # trade in; a side with nothing that hour renders as empty
+        # rather than being hidden, so a "live generated nothing here"
+        # hour is itself visible instead of silently dropped.
+        def _hour_key(ts):
+            if not ts:
+                return None
+            s = str(ts)
+            return s[:13] if len(s) >= 13 else None
+
+        def _align_by_hour(live_trades: list, backtest_trades: list) -> list:
+            rows: dict = {}
+            for t in live_trades:
+                hk = _hour_key(t.get("entry_ts"))
+                if hk is None:
+                    continue
+                rows.setdefault(hk, {"hour": hk, "live": None, "backtest": None})["live"] = t
+            for t in backtest_trades:
+                hk = _hour_key(t.get("entry_ts"))
+                if hk is None:
+                    continue
+                rows.setdefault(hk, {"hour": hk, "live": None, "backtest": None})["backtest"] = t
+            return sorted(rows.values(), key=lambda r: r["hour"])
+
+        aligned_by_day = {}
+        for day in set(live_by_day) | set(backtest_by_day):
+            aligned_by_day[day] = _align_by_hour(
+                live_by_day.get(day, {}).get("trades", []),
+                backtest_by_day.get(day, {}).get("trades", []),
+            )
+
+        return {
+            "run_id": run_id, "live_by_day": live_by_day, "backtest_by_day": backtest_by_day,
+            "aligned_by_day": aligned_by_day,
+        }
     except Exception:
-        return {"run_id": run_id, "live_by_day": {}, "backtest_by_day": {}}
+        return {"run_id": run_id, "live_by_day": {}, "backtest_by_day": {}, "aligned_by_day": {}}
 
 
 def get_run(run_id: int) -> Optional[dict]:

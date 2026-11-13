@@ -1412,6 +1412,65 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Done (newest first)
 
+- **2026-11-13 — Compare page tick-alignment + live exit-price bug,
+  Signals page detail modal, Dashboard windowed Returns card, backtest
+  Final Capital.** All committed together, owner-requested after
+  reviewing the live Compare data directly.
+  - **Live exit-price bug, fixed**: `compute_comparison_buckets()`'s
+    `_bucket()` helper always read `exit_price` off every trade row
+    regardless of source. Live rows (from `list_signals()`) store their
+    close price under `outcome_price` — `pyquant_backtest_trades` is
+    the only table with a real `exit_price` column — so every closed
+    LIVE trade's Exit column always rendered "—" even though the trade
+    really had closed with a real price, just under a different key.
+    `_bucket()` now takes an `exit_price_key` param (default
+    `"exit_price"`, backtest unaffected; the live call passes
+    `"outcome_price"`).
+  - **Tick-aligned side-by-side rows**: new `aligned_by_day` field on
+    `GET /api/compare/daily` — one row per UTC hour that EITHER side
+    traded in (live hourly ticks and backtest's hourly bars are both
+    genuinely hourly, so this is a real alignment key, not a loose
+    approximation), live and backtest columns on the SAME row, an
+    empty side rendering as "—" rather than being hidden. Replaces the
+    Compare page's two independent per-day trade tables with one
+    merged table (`pages/compare.js`).
+  - **Signals page row click-through**: new `GET
+    /api/signals/{id}/detail` (new `pyquant_state.get_signal(id)` +
+    reuses `_nearest_gate_states()`, the same same-UTC-hour lookup
+    Compare already uses, rather than a new matching implementation) —
+    returns the signal row, the nearest live diagnostic row, and (when
+    a completed backtest run exists) that run's diagnostic row at the
+    same hour. `pages/signals.js` rows are now clickable, opening a
+    modal that dumps every non-null field from both as plain key/value
+    pairs — deliberately generic rather than hand-picked fields, so any
+    future diagnostic column shows up automatically.
+  - **Dashboard "Returns (%)" card**: new `GET
+    /api/dashboard/returns?window=24h|2d|7d|2w|1m|all` (thin wrapper
+    around the existing `compute_live_performance(since=...)` — no new
+    aggregation logic) + a new card in the middle of the Dashboard's
+    stat row (now `.cols-5`, was `.cols-4`) with a window dropdown,
+    distinct from the existing fixed-window "Avg. Return (recent)" tile.
+  - **Backtest "Final Capital"**: `walkforward.py`'s metrics gained a
+    `"Final Capital ($)"` row (the `_final_capital` value already
+    computed for `_total_ret_pct`, just not surfaced before) and
+    `RunDetailModal.jsx` shows it next to Initial Capital.
+  - Also investigated (see "ROOT CAUSE FOUND AND FIXED" and the new
+    shadow-optimizer-CSV entries in the Active section above) why live
+    trades were still far fewer than backtest's despite the frequency-
+    aware optimizer objective: `live_signal_source` was pointed at
+    `"walkforward"`, whose automatic refresh (`run_standalone_grid_search()`)
+    had been silently failing every single time in production (missing
+    `btc_back366.csv`/`eth_back366.csv` — gitignored, and orchestra.yml's
+    cron job never writes them, unlike `backtest.yml`'s own
+    `data_download.py` step) — confirmed via `GET /api/optimizer/trigger`'s
+    `last_run.walkforward` error field. Fixed the missing-CSV bug
+    itself (`p4_orchestra.py`), but **the owner still needs to flip
+    `live_signal_source` back to `"p4_search"` on the Settings page**
+    (or trigger a manual `walkforward` optimizer run to re-test it) —
+    this API write can't be issued from this sandbox (no outbound POST
+    capability here), so it's a one-click action left for the owner
+    rather than done automatically.
+
 - **2026-11-12 — manual UKF "Anchor Now" button + three Backtest Studio/
   results UI requests.** All committed together.
   - **Manual anchor trigger**: new `manual_anchor_request` kv flag +

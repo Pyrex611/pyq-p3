@@ -124,8 +124,10 @@ main { padding: 24px; flex: 1 1 auto; }
 .cols-2 { grid-template-columns: repeat(2, 1fr); }
 .cols-3 { grid-template-columns: repeat(3, 1fr); }
 .cols-4 { grid-template-columns: repeat(4, 1fr); }
+/* 2026-11-13: Dashboard's 4-stat row gained a 5th (Returns %) card. */
+.cols-5 { grid-template-columns: repeat(5, 1fr); }
 @media (max-width: 900px) {
-  .cols-2, .cols-3, .cols-4 { grid-template-columns: 1fr; }
+  .cols-2, .cols-3, .cols-4, .cols-5 { grid-template-columns: 1fr; }
 }
 
 .card {

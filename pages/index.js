@@ -17,6 +17,59 @@ const LEVERAGE_OVERRIDE_KEY = "pyquant_leverage_override";
 // ever changed in pyquant_signal_math.py, update this too.
 const SYSTEM_LEVERAGE = 10;
 
+// 2026-11-13 (owner UI request): new Dashboard card with a trailing-
+// window selector (24H/2D/7D/2W/1M/ALL), distinct from the existing
+// fixed-window "Avg. Return (recent)" tile above — hits the new
+// GET /api/dashboard/returns?window=... endpoint on every selection
+// change rather than refetching the whole dashboard payload.
+const RETURNS_WINDOWS = [
+  ["24h", "24H"], ["2d", "2D"], ["7d", "7D"], ["2w", "2W"], ["1m", "1M"], ["all", "ALL"],
+];
+
+function ReturnsWindowCard() {
+  const [window_, setWindow] = useState("24h");
+  const [res, setRes] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiGet("/dashboard/returns", { window: window_ })
+      .then((d) => { if (!cancelled) { setRes(d); setError(null); } })
+      .catch((e) => { if (!cancelled) setError(e.message); });
+    return () => { cancelled = true; };
+  }, [window_]);
+
+  const pct = res?.avg_pnl_pct ?? null;
+
+  return (
+    <div className="card">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <h3 style={{ margin: 0 }}>Returns (%)</h3>
+        <select
+          className="dropdown-select"
+          style={{ fontSize: 11, padding: "3px 6px" }}
+          value={window_}
+          onChange={(e) => setWindow(e.target.value)}
+        >
+          {RETURNS_WINDOWS.map(([val, label]) => (
+            <option key={val} value={val}>{label}</option>
+          ))}
+        </select>
+      </div>
+      {error ? (
+        <div className="stat-label" style={{ color: "var(--red)" }}>—</div>
+      ) : (
+        <>
+          <div className={`stat-value ${pnlClass(pct ?? 0)}`}>{pct !== null ? fmtPct(pct) : "—"}</div>
+          <div className="stat-label">
+            {res ? `${res.trade_count} trade${res.trade_count === 1 ? "" : "s"}${res.win_rate_pct != null ? ` · ${res.win_rate_pct.toFixed(1)}% win` : ""}` : "loading…"}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -105,7 +158,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="grid cols-4" style={{ marginBottom: 16 }}>
+      <div className="grid cols-5" style={{ marginBottom: 16 }}>
         <div className="card">
           <h3>Open Positions</h3>
           <div className="stat-value">{data ? data.open_positions.length : "—"}</div>
@@ -115,6 +168,7 @@ export default function Dashboard() {
           <h3>Avg. Return (recent)</h3>
           <div className={`stat-value ${pnlCls}`}>{pnlValue}</div>
         </div>
+        <ReturnsWindowCard />
         <div className="card">
           <h3>Trading</h3>
           <div className="stat-value">{data ? (data.trading_enabled ? "ON" : "OFF") : "—"}</div>

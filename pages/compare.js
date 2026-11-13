@@ -181,6 +181,7 @@ export default function Compare() {
 
   const liveByDay = daily?.live_by_day || {};
   const backtestByDay = daily?.backtest_by_day || {};
+  const alignedByDay = daily?.aligned_by_day || {};
   const allDates = Array.from(new Set([...Object.keys(liveByDay), ...Object.keys(backtestByDay)])).sort().reverse();
 
   return (
@@ -245,6 +246,7 @@ export default function Compare() {
               {allDates.map((day) => {
                 const l = liveByDay[day];
                 const b = backtestByDay[day];
+                const aligned = alignedByDay[day];
                 const delta = l && b && l.avg_pnl_pct !== null && b.avg_pnl_pct !== null ? l.avg_pnl_pct - b.avg_pnl_pct : null;
                 const isExpanded = expandedDay === day;
 
@@ -268,77 +270,65 @@ export default function Compare() {
                       </td>
                     </tr>
 
-                    {/* Master-Detail Accordion Body */}
+                    {/* Master-Detail Accordion Body — 2026-11-13: one row
+                        per UTC hour that EITHER side traded in, live and
+                        backtest side by side on that SAME row (instead of
+                        two independent lists the reader had to
+                        cross-reference by eye). An empty side for an hour
+                        renders as "—" rather than being hidden, so "live
+                        generated nothing this hour" is itself visible. */}
                     {isExpanded && (
                       <tr>
                         <td colSpan={8} style={{ padding: "12px 16px", background: "#0e1117", borderBottom: "2px solid var(--border)" }}>
-                          <div className="grid cols-2" style={{ gap: 16 }}>
-                            {/* Live Trades on this date */}
-                            <div>
-                              <h4 style={{ margin: "0 0 6px 0", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
-                                Live Signals ({day})
-                              </h4>
-                              {l?.trades && l.trades.length > 0 ? (
-                                <table style={{ fontSize: 11 }}>
-                                  <thead>
-                                    <tr>
-                                      <th>Symbol</th>
-                                      <th>Side</th>
-                                      <th>Entry</th>
-                                      <th>Exit</th>
-                                      <th>Return %</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {l.trades.map((t, idx) => (
-                                      <tr key={idx}>
-                                        <td className="mono">{t.symbol}</td>
-                                        <td className={t.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{t.side}</td>
-                                        <td className="mono">{fmtPrice(t.entry_price)}</td>
-                                        <td className="mono">{fmtPrice(t.exit_price)}</td>
-                                        <td className={`mono ${pnlClass(t.pnl_pct)}`}>{fmtPct(t.pnl_pct)}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              ) : (
-                                <div className="empty-state" style={{ padding: 8 }}>Zero live signals executed.</div>
-                              )}
-                            </div>
-
-                            {/* Backtest Trades on this date */}
-                            <div>
-                              <h4 style={{ margin: "0 0 6px 0", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
-                                Backtest Trades ({day})
-                              </h4>
-                              {b?.trades && b.trades.length > 0 ? (
-                                <table style={{ fontSize: 11 }}>
-                                  <thead>
-                                    <tr>
-                                      <th>Symbol</th>
-                                      <th>Side</th>
-                                      <th>Entry</th>
-                                      <th>Exit</th>
-                                      <th>Return %</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {b.trades.map((t, idx) => (
-                                      <tr key={idx}>
-                                        <td className="mono">{t.symbol}</td>
-                                        <td className={t.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{t.side}</td>
-                                        <td className="mono">{fmtPrice(t.entry_price)}</td>
-                                        <td className="mono">{fmtPrice(t.exit_price)}</td>
-                                        <td className={`mono ${pnlClass(t.pnl_pct)}`}>{fmtPct(t.pnl_pct)}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              ) : (
-                                <div className="empty-state" style={{ padding: 8 }}>Zero backtest trades executed.</div>
-                              )}
-                            </div>
-                          </div>
+                          <h4 style={{ margin: "0 0 6px 0", fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase" }}>
+                            Tick-Aligned Trades ({day})
+                          </h4>
+                          {aligned && aligned.length > 0 ? (
+                            <table style={{ fontSize: 11 }}>
+                              <thead>
+                                <tr>
+                                  <th rowSpan={2} style={{ verticalAlign: "bottom" }}>Hour (UTC)</th>
+                                  <th colSpan={5} style={{ textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>Live</th>
+                                  <th colSpan={5} style={{ textAlign: "center", borderBottom: "1px solid var(--border-soft)" }}>Backtest</th>
+                                </tr>
+                                <tr>
+                                  <th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Return %</th>
+                                  <th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Return %</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {aligned.map((row) => (
+                                  <tr key={row.hour}>
+                                    <td className="mono">{row.hour}:00</td>
+                                    {row.live ? (
+                                      <>
+                                        <td className="mono">{row.live.symbol}</td>
+                                        <td className={row.live.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{row.live.side}</td>
+                                        <td className="mono">{fmtPrice(row.live.entry_price)}</td>
+                                        <td className="mono">{fmtPrice(row.live.exit_price)}</td>
+                                        <td className={`mono ${pnlClass(row.live.pnl_pct)}`}>{fmtPct(row.live.pnl_pct)}</td>
+                                      </>
+                                    ) : (
+                                      <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>—</td>
+                                    )}
+                                    {row.backtest ? (
+                                      <>
+                                        <td className="mono">{row.backtest.symbol}</td>
+                                        <td className={row.backtest.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{row.backtest.side}</td>
+                                        <td className="mono">{fmtPrice(row.backtest.entry_price)}</td>
+                                        <td className="mono">{fmtPrice(row.backtest.exit_price)}</td>
+                                        <td className={`mono ${pnlClass(row.backtest.pnl_pct)}`}>{fmtPct(row.backtest.pnl_pct)}</td>
+                                      </>
+                                    ) : (
+                                      <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>—</td>
+                                    )}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : (
+                            <div className="empty-state" style={{ padding: 8 }}>Zero trades executed on either side.</div>
+                          )}
                         </td>
                       </tr>
                     )}

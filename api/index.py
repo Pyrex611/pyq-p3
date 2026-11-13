@@ -417,6 +417,42 @@ def get_open_signals():
     return {"signals": state_store.list_signals(status="open", limit=50)}
 
 
+@app.get("/api/signals/{signal_id}/detail")
+def get_signal_detail(signal_id: int):
+    """2026-11-13 (Signals page row click-through) — "every data
+    regarding that tick as is currently being collected": the signal
+    row itself, plus the nearest live diagnostic row for that symbol/
+    hour (ukf_velocity, raw_close, fresh_pred, signal_source_pred,
+    train window, gate state — whatever's on pyquant_diagnostics_history
+    for that tick) and, when a completed backtest run exists, that
+    run's own diagnostic row at the same hour for reference. Reuses
+    _nearest_gate_states() (same same-UTC-hour match Compare already
+    uses) rather than duplicating that lookup — this is the same data,
+    just reached by clicking a signal instead of picking a timestamp by
+    hand. Declared after the static /api/signals/open and
+    /api/signals/baseline routes above so this path-param route can
+    never shadow them."""
+    signal = state_store.get_signal(signal_id)
+    if signal is None:
+        raise HTTPException(status_code=404, detail=f"Signal {signal_id} not found")
+    run_id = None
+    try:
+        wf_runs = state_store.list_runs(run_type="walkforward", limit=1)
+        if wf_runs and wf_runs[0].get("status") == "completed":
+            run_id = wf_runs[0]["id"]
+    except Exception:
+        pass
+    live_diagnostics, _, backtest_diagnostics = _nearest_gate_states(
+        signal["symbol"], signal.get("opened_at") or datetime.now(timezone.utc).isoformat(), run_id,
+    )
+    return {
+        "signal": signal,
+        "live_diagnostics": live_diagnostics,
+        "backtest_diagnostics": backtest_diagnostics,
+        "backtest_run_id": run_id,
+    }
+
+
 # ── Signals baseline ("fresh start") — 2026-10-26 ────────────────────────
 #
 # A soft, non-destructive marker: GET /api/dashboard (and GET /api/compare
@@ -969,6 +1005,38 @@ def get_dashboard():
         "cron_last_tick_at": cron.get("ts") if cron else None,
         "cron_age_seconds": cron_age_seconds,
     }
+
+
+_RETURNS_WINDOWS = {
+    "24h": timedelta(hours=24), "2d": timedelta(days=2), "7d": timedelta(days=7),
+    "2w": timedelta(weeks=2), "1m": timedelta(days=30), "all": None,
+}
+
+
+@app.get("/api/dashboard/returns")
+def get_dashboard_returns(window: str = Query("24h", description="One of 24h, 2d, 7d, 2w, 1m, all")):
+    """2026-11-13 (Dashboard "Returns (%)" card, owner UI request) — avg.
+    leveraged-%% return + trade/win count over a selectable trailing
+    window, reusing compute_live_performance()'s existing `since` filter
+    (the same aggregation GET /api/dashboard's "Avg. Return (recent)"
+    tile already uses, just over the last 10 closed signals / a fixed
+    window instead of a chosen one) rather than a second, separately-
+    maintained computation. `window="all"` passes since=None (every
+    closed signal, respecting the signals baseline below either way)."""
+    if window not in _RETURNS_WINDOWS:
+        raise HTTPException(status_code=400, detail=f"window must be one of {list(_RETURNS_WINDOWS)}")
+    baseline = state_store.get_signals_baseline()
+    delta = _RETURNS_WINDOWS[window]
+    since = None
+    if delta is not None:
+        cutoff = (datetime.now(timezone.utc) - delta).isoformat()
+        # Respect whichever is MORE restrictive: the window's own cutoff,
+        # or the "fresh start" baseline if one is set and is more recent.
+        since = max(cutoff, baseline) if baseline else cutoff
+    else:
+        since = baseline
+    perf = state_store.compute_live_performance(since=since, limit=2000)
+    return {"window": window, "since": since, **perf}
 
 
 # ── Backtest-vs-Live comparison (new Compare screen) — 2026-10-26 ───────

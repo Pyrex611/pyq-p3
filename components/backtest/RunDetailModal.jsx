@@ -276,6 +276,12 @@ export default function RunDetailModal({ modal, onClose, bounds }) {
                       </div>
                     </div>
                     <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
+                      <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Final Capital</div>
+                      <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>
+                        {modal.run.metrics?.["Final Capital ($)"] ? fmtMoney(parseFloat(modal.run.metrics["Final Capital ($)"])) : "—"}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg)", padding: "10px 14px", borderRadius: 6, border: "1px solid var(--border-soft)" }}>
                       <div style={{ fontSize: 10, color: "var(--text-faint)", textTransform: "uppercase" }}>Avg Daily Trade Freq</div>
                       <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>
                         {modal.run.metrics?.["Avg Daily Trade Freq"] ?? "—"}{modal.run.metrics?.["Avg Daily Trade Freq"] ? "/day" : ""}
