@@ -56,6 +56,9 @@ export default function Settings() {
   const [anchor, setAnchor] = useState(null);
   const [anchorError, setAnchorError] = useState(null);
   const [anchorBusy, setAnchorBusy] = useState(false);
+  const [sigTrigger, setSigTrigger] = useState(null);
+  const [sigTriggerError, setSigTriggerError] = useState(null);
+  const [sigTriggerBusy, setSigTriggerBusy] = useState(false);
 
   useEffect(() => {
     try {
@@ -112,12 +115,23 @@ export default function Settings() {
     }
   }
 
+  async function loadSigTrigger() {
+    try {
+      const d = await apiGet("/signal/trigger");
+      setSigTrigger(d);
+      setSigTriggerError(null);
+    } catch (e) {
+      setSigTriggerError(e.message);
+    }
+  }
+
   useEffect(() => {
     apiGet("/config").then(setCfg).catch((e) => setCfgError(e.message));
     loadBaseline();
     loadSigSource();
     loadTrigger();
     loadAnchor();
+    loadSigTrigger();
   }, []);
 
   async function updateSigSource(patch) {
@@ -163,6 +177,23 @@ export default function Settings() {
       alert("Could not queue the manual anchor: " + e.message);
     } finally {
       setAnchorBusy(false);
+    }
+  }
+
+  async function runSignalNow() {
+    if (!confirm(
+      "Run hourly signal generation now (on the next cron tick, within ~5 minutes)? " +
+      "This runs in addition to the normal hourly tick and never places a real order " +
+      "while SIGNAL_ONLY_MODE is on."
+    )) return;
+    setSigTriggerBusy(true);
+    try {
+      await apiPost("/signal/trigger", {});
+      await loadSigTrigger();
+    } catch (e) {
+      alert("Could not queue the manual signal run: " + e.message);
+    } finally {
+      setSigTriggerBusy(false);
     }
   }
 
@@ -345,6 +376,29 @@ export default function Settings() {
                 00:01 UTC automatic retrain — an EXTRA one-off run, on top of (not instead of) tonight&apos;s
                 scheduled retrain. Useful for confirming a fix to the UKF right away rather than waiting for
                 the next daily cycle.
+              </p>
+            </div>
+
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border-soft)" }}>
+              <div className="stat-label" style={{ marginBottom: 8 }}>Generate Signal Now</div>
+              {sigTriggerError && <div className="banner error">Could not load ({sigTriggerError}).</div>}
+              <button type="button" className="btn" disabled={sigTriggerBusy} onClick={runSignalNow}>
+                ⚡ Generate Signal Now
+              </button>
+              {sigTrigger && (
+                <div className="mono" style={{ fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, marginTop: 8 }}>
+                  {sigTrigger.pending
+                    ? "queued — runs within ~5 min"
+                    : sigTrigger.last_cron_tick?.ts
+                    ? `last cron tick at ${fmtTime(sigTrigger.last_cron_tick.ts)}`
+                    : "no cron tick recorded yet"}
+                </div>
+              )}
+              <p className="hint" style={{ marginTop: 8, marginBottom: 0 }}>
+                Runs hourly signal generation (and its diagnostics) right now, as an EXTRA one-off run on
+                top of (not instead of) the normal hourly tick. Added to confirm the fresh-from-scratch
+                UKF bypass (2026-11-13) without waiting up to an hour — never places a real order while
+                SIGNAL_ONLY_MODE is on.
               </p>
             </div>
           </>

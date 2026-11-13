@@ -42,7 +42,10 @@ import traceback
 from datetime import datetime, timezone
 
 import pyq_p4
-from pyq_p4 import hourly_task, fifteen_minute_task, five_minute_task, one_minute_task
+from pyq_p4 import (
+    hourly_task, fifteen_minute_task, five_minute_task, one_minute_task,
+    _run_pending_manual_signal,
+)
 import p4_orchestra  # safe to import now — its scheduler/loop is behind __main__
 import pyquant_state as state_store
 
@@ -88,6 +91,12 @@ def run_one_cron_tick():
         ("five_minute_task", five_minute_task),
         ("fifteen_minute_task", fifteen_minute_task),
         ("hourly_task", hourly_task),
+        # 2026-11-13 — manual "Generate Signal Now" trigger (Settings page
+        # / POST /api/signal/trigger), checked every tick so a manually
+        # requested run fires on the very next ~5-minute cron tick rather
+        # than waiting for the next real hourly_task() claim. See
+        # _run_pending_manual_signal()'s docstring in pyq_p4.py.
+        ("manual_signal_trigger", _run_pending_manual_signal),
         ("daily_optimizer", p4_orchestra.daily_optimizer),
     ]
     failures = []

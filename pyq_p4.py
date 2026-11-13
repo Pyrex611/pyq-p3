@@ -753,6 +753,31 @@ def _fresh_signal_ukf_predict(symbol_alpaca: str):
         return None
 
 
+def _run_pending_manual_signal() -> bool:
+    """2026-11-13 (manual "Generate Signal Now" trigger, Settings page) —
+    checks the `manual_signal_request` kv flag (set by POST
+    /api/signal/trigger) and, if set, runs hourly_task(manual=True) right
+    now via its own one-off minute bucket, so it never consumes or is
+    blocked by the hour's normal automatic claim — same pattern as
+    retrain's _run_pending_manual_anchor(). Added specifically so the
+    just-shipped persisted-state bypass (_fresh_signal_ukf_predict()
+    above) can be confirmed within the next ~5-minute cron tick instead
+    of waiting up to an hour for the next real hourly tick. Clears the
+    flag BEFORE running, same reasoning as the other manual triggers: a
+    crash mid-run should never tick-lock a retry loop — the owner sees
+    whatever this run's own logging/diagnostics show and can just click
+    the button again."""
+    if not state_store.get_json("manual_signal_request", False):
+        return False
+    try:
+        state_store.set_json("manual_signal_request", False)
+    except Exception as e:
+        print(f"[Hourly] Failed to clear manual_signal_request (non-fatal): {e}")
+    print("[Hourly] Manual trigger: running hourly signal generation now…")
+    hourly_task(manual=True)
+    return True
+
+
 # Phase 1: run guards now live in pyquant_state (SQLite locally, Postgres
 # in production via DATABASE_URL) instead of local timestamp files.
 # try_claim_run() is atomic and safe against two invocations racing each
@@ -1337,8 +1362,21 @@ def last_resort_stop_loss_check(symbol: str, tracker: dict) -> bool:
     return False
 
 
-def hourly_task():
-    if not state_store.try_claim_run("hourly_task", state_store.current_hour_bucket()):
+def hourly_task(manual: bool = False):
+    """`manual=True` (only via _run_pending_manual_signal(), itself only
+    reachable via POST /api/signal/trigger) bypasses the hour-bucket
+    guard via a one-off minute bucket, same "extra one-off run, never a
+    substitute for the normal claim" pattern retrain's manual anchor
+    trigger uses — a manual run now does not stop the normal automatic
+    hourly tick from also claiming and running later in the same hour.
+    Safe to run extra times in the same hour regardless: SIGNAL_ONLY_MODE
+    (live on origin/main as of this writing) means this never places a
+    real exchange order no matter how many times it runs — it only
+    generates/logs a signal and its diagnostics, which is exactly what a
+    manual confirmation run needs."""
+    bucket = (f"manual-{state_store.current_minute_bucket()}" if manual
+              else state_store.current_hour_bucket())
+    if not state_store.try_claim_run("hourly_task", bucket):
         print(f"Hourly task already ran (or is running) this hour. Skipping.")
         return
 

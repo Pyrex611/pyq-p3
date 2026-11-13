@@ -345,6 +345,42 @@ def post_anchor_trigger():
     }
 
 
+@app.get("/api/signal/trigger")
+def get_signal_trigger():
+    """2026-11-13 (manual "Generate Signal Now" trigger, Settings page) —
+    added so the just-shipped persisted-state UKF bypass
+    (pyq_p4._fresh_signal_ukf_predict()) can be confirmed within the
+    next ~5-minute cron tick instead of waiting up to an hour for the
+    next real hourly tick. Mirrors GET /api/anchor/trigger exactly:
+    current pending flag plus the last cron tick's own heartbeat (the
+    best available "did a tick actually run yet" signal — hourly_task()
+    itself has no dedicated heartbeat key, but every cron tick, manual
+    or not, updates pyq_p4_cron_heartbeat), so the Settings page can
+    show "queued, runs within ~5 min" without a second round trip."""
+    return {
+        "pending": bool(state_store.get_json("manual_signal_request", False)),
+        "last_cron_tick": state_store.get_json("pyq_p4_cron_heartbeat"),
+    }
+
+
+@app.post("/api/signal/trigger")
+def post_signal_trigger():
+    """Sets the `manual_signal_request` kv flag — same trust-boundary
+    pattern as every other write this API makes (trading_enabled,
+    manual_anchor_request, manual_optimizer_request, …): this never runs
+    signal generation itself, only flags it for the next GitHub Actions
+    cron tick (~5 min) to pick up via pyq_p4._run_pending_manual_signal().
+    SIGNAL_ONLY_MODE (live on origin/main) means this can never place a
+    real exchange order no matter how many extra times it runs this
+    hour — it only generates/logs a signal and its diagnostics, which
+    is exactly what's needed to confirm the UKF bypass without waiting."""
+    state_store.set_json("manual_signal_request", True)
+    return {
+        "queued": True,
+        "note": "Runs on the next GitHub Actions cron tick (~5 min).",
+    }
+
+
 @app.get("/api/config")
 def get_config():
     """

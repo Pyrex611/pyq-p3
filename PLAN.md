@@ -989,6 +989,25 @@ here before moving on, even if you also wrote it up elsewhere.
     this push to check `fresh_pred` actually differs sensibly from the
     frozen persisted-state `pred` and that no tick silently falls back
     every time.
+  - **[x] Manual "Generate Signal Now" trigger added, 2026-11-13** —
+    same pattern as the manual UKF anchor trigger: `hourly_task()`
+    gained a `manual: bool = False` param (bypasses the hour-bucket
+    guard via a one-off minute bucket when `True`, as an EXTRA run on
+    top of the normal hourly claim, never a substitute for it); new
+    `manual_signal_request` kv flag + `pyq_p4._run_pending_manual_signal()`
+    (checks/clears the flag, calls `hourly_task(manual=True)`); wired
+    into `cron_runner.py`'s task list so it fires on the very next
+    ~5-minute cron tick; `GET`/`POST /api/signal/trigger` (mirrors
+    `/api/anchor/trigger` exactly); Settings page gained a "⚡ Generate
+    Signal Now" button next to "Anchor Now". Added specifically so the
+    fresh-UKF bypass above can be confirmed within ~5 minutes instead
+    of waiting up to an hour for the next real hourly tick. Safe to
+    fire as many extra times as needed in the same hour: SIGNAL_ONLY_MODE
+    (live on `origin/main`) means it can never place a real exchange
+    order regardless of how many times it runs — only extra signal
+    generation + diagnostic rows, which is exactly what's needed here.
+    **Not yet exercised against a live deploy** — needs an actual
+    button click after this push.
   - **Remediation path — still needs an owner decision**, now that
     "shared math characteristic" is ruled out and this is confirmed to
     be a live-only effect localized to the UKF-state persistence
