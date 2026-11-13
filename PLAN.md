@@ -1008,28 +1008,101 @@ here before moving on, even if you also wrote it up elsewhere.
     generation + diagnostic rows, which is exactly what's needed here.
     **Not yet exercised against a live deploy** — needs an actual
     button click after this push.
-  - **Remediation path — still needs an owner decision**, now that
-    "shared math characteristic" is ruled out and this is confirmed to
-    be a live-only effect localized to the UKF-state persistence
-    mechanism:
+  - **[x] ROOT CAUSE FOUND AND FIXED, 2026-11-13.** The manual
+    "Generate Signal Now" trigger's own result (run at 03:21 UTC) gave
+    the data needed to pin this down exactly, reproduced mechanically
+    in isolation before writing the fix (not just inferred from
+    reading code):
+    - `_restore_ukf_state()` only ever overwrote a filter's `.x`/`.P`
+      from persisted JSON. A filterpy `UnscentedKalmanFilter`'s
+      internal `.sigmas_f` cache (the sigma points `.update()` actually
+      reads) is a completely separate attribute, set to
+      `zeros((num_sigmas, dim_x))` at construction and **only ever
+      populated by calling `.predict()`** — which `make_ukf_shell()`'s
+      freshly-built shell never does before `_restore_ukf_state()` runs.
+    - `step_ukf()` calls `.update()` BEFORE `.predict()` each tick
+      (update-then-predict). So on every shell-restored filter, the
+      very first (and, under GitHub Actions' one-fresh-process-per-tick
+      cron model, ONLY) `.update()` call of that tick's process runs
+      against `sigmas_f` that is still all zeros.
+    - filterpy's `.update()` maps `hx()` over `self.sigmas_f` to build
+      `sigmas_h`. With every row of `sigmas_f` identically `[0, 0]`,
+      every `sigmas_h` entry is identically `0`, which forces the
+      cross-covariance `Pxz` — and therefore the Kalman gain
+      `K = Pxz @ inv(S)` — to the exact zero matrix, **regardless of
+      what the real restored `.x`/`.P` are**. A zero gain makes
+      `.update()`'s `x += K@y` and `P -= K@S@K.T` literal no-ops:
+      `.x`/`.P` pass straight through unchanged. Every tick is a fresh
+      process (fresh shell, zero `sigmas_f` again), so this isn't a
+      one-time glitch — it silently breaks `.update()` on literally
+      every live tick, forever, until the next retrain's in-process
+      training loop (which does call `.predict()` properly) produces a
+      healthy object for exactly the remainder of that one tick, after
+      which the next tick's shell+restore breaks it again. This
+      matches every observed symptom exactly: velocity frozen
+      bit-identical hour after hour, `.P` only ever growing from
+      `.predict()`'s `+Q` term and never shrinking from `.update()`,
+      breaking starting the first tick after every retrain and never
+      self-correcting.
+    - **Reproduced mechanically in isolation** (real filterpy
+      `UnscentedKalmanFilter`/`MerweScaledSigmaPoints`, same
+      hyperparameters/fx/hx `p4_utils._make_ukf()` uses, one fresh
+      Python object per simulated "tick" to match the real cron
+      architecture): velocity froze bit-identical and `.P` grew
+      monotonically every tick, exactly like the live data.
+    - **The fix** (`pyq_p4._restore_ukf_state()`): immediately after
+      setting `.x`/`.P` from persisted values, also regenerate
+      `.sigmas_f` directly from them —
+      `ukf.sigmas_f = ukf.points_fn.sigma_points(ukf.x, ukf.P)`. This
+      is mathematically the same sigma points a real `.predict()` call
+      would have just produced (the unscented transform of
+      `sigma_points(x, P)` reproduces that exact `x`, `P` by
+      construction), so the very next `.update()` call sees sigma
+      points genuinely consistent with the restored state instead of
+      stale zeros — no extra `.predict()` call is added (that would
+      double-step time), only the cached sigma points are rebuilt.
+      **Verified the fix in the same isolated repro**: with it, a
+      restored filter's velocity responds to real price moves
+      (including flipping sign on a real reversal) and `.P` converges
+      to a steady state instead of growing forever.
+    - **Scope of this push**: fixes `_restore_ukf_state()` only — the
+      persisted-state path used for diagnostics (`ukf_handler()` on
+      `ukf_data`, `ukf_diag_state()`) and by the 2026-11-13 fresh-UKF
+      bypass's fallback. The bypass (below) is currently what actually
+      drives the tradeable signal, so this fix is low-risk to ship
+      immediately: it does not touch the path currently placing trades
+      either way. **Not yet confirmed against a live tick** — needs the
+      next GitHub Actions tick (or another manual trigger) to show
+      `ukf_velocity` varying hour to hour instead of frozen, and `P`
+      settling instead of growing, on the `source: "walkforward"`
+      diagnostic rows.
+    - **Bypass left ON for now, deliberately** — per the standing
+      "validate strategy-affecting changes via `walkforward.py` before
+      trusting them live" rule: switching the live trading signal back
+      from the from-scratch bypass to the now-fixed persisted/restored
+      incremental path is itself a strategy-affecting decision (the
+      two paths aren't guaranteed to produce identical numbers even
+      both "correct"), so it needs its own confirmation window (watch
+      the fixed persisted-state `pred`/`ukf_velocity` behave sanely for
+      a few ticks first) before being trusted as the primary driver
+      again — an owner call, not something to flip unilaterally the
+      same push as the fix itself.
+  - **Remediation path, now mostly resolved**:
     1. **Diagnostic logging (above)** — done; confirmed 2026-11-13 the
-       defect is in the update math / restored `.P`, not stale upstream
-       data (see the CONFIRMED entry above).
-    2. **Retrain more often than once/day** — would shorten any single
-       drift window's damage but doesn't address the root cause if
-       it's a persistence-round-trip defect; still needs `walkforward.py`
-       validation first per the standing rule before touching live.
+       defect is in the update math / restored sigma-point cache, not
+       stale upstream data (see the CONFIRMED and ROOT CAUSE entries
+       above).
+    2. **Retrain more often than once/day** — no longer needed now
+       that the actual defect is fixed; was only ever a workaround for
+       a persistence-round-trip defect, not a fix for one.
     3. **Bypass the persist/restore round-trip for `.P` specifically**
-       — **interim version implemented 2026-11-13** (see the "Interim
-       bypass implemented" entry above): rather than a partial
-       targeted fix to `.P` alone, this bypasses persist/restore
-       entirely for the tradeable signal by retraining fresh every
-       tick. This is explicitly a stopgap, not the permanent fix — the
-       permanent fix still needs the actual mechanical defect inside
-       `_persist_ukf_state()`/`_restore_ukf_state()` (or wherever else)
-       pinned down and corrected, at which point this bypass can be
-       turned off again (`bypass_persisted_ukf_for_signal` kv flag)
-       and persisted state restored as the normal path.
+       — superseded by the actual root-cause fix above. The interim
+       from-scratch bypass (implemented 2026-11-13, see the "Interim
+       bypass implemented" entry above) stays on for now per the
+       confirmation-window reasoning just above, and can be turned off
+       (`bypass_persisted_ukf_for_signal` kv flag) once the fixed
+       persisted-state path's behavior is confirmed over a few real
+       ticks.
   - **Owner's follow-up request, 2026-11-11/12 (recorded for when a fix
     ships)**: once the actual root cause above is found and fixed, keep
     the current trade-frequency-aware optimizer objective (confirmed

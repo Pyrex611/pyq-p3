@@ -235,7 +235,49 @@ _UKF_NAMES = [
 def _restore_ukf_state():
     """Best-effort: overwrite each freshly-created filter's .x/.P with the
     last-persisted values, if any. A miss (first-ever run, or a read
-    error) just leaves the freshly-trained models from above in place."""
+    error) just leaves the freshly-trained models from above in place.
+
+    2026-11-13 — ROOT CAUSE FOUND AND FIXED here. This is what was
+    actually causing the UKF prediction-drift bug (PLAN.md's Active
+    section): restoring only `.x`/`.P` leaves a filterpy
+    UnscentedKalmanFilter's internal `.sigmas_f` cache at its
+    constructor default (`zeros((num_sigmas, dim_x))` — see
+    filterpy.kalman.UKF.UnscentedKalmanFilter.__init__), because
+    `.sigmas_f` is only ever populated by calling `.predict()`, which
+    make_ukf_shell()'s freshly-constructed shells never do before this
+    function runs. step_ukf() then calls `.update()` BEFORE
+    `.predict()` each tick (update-then-predict, not predict-then-
+    update) — and filterpy's `.update()` builds `sigmas_h` by mapping
+    `hx()` over `self.sigmas_f`. With `sigmas_f` all zeros, every
+    sigma point maps to the identical `hx(zeros) = 0`, so `sigmas_h`
+    has exactly zero spread regardless of the real (just-restored) x/P
+    — which makes the cross-covariance `Pxz` (and therefore the
+    Kalman gain `K = Pxz @ inv(S)`) the exact zero matrix. A zero gain
+    means `.update()`'s `x += K @ y` and `P -= K @ S @ K.T` are
+    literally no-ops: `.x`/`.P` pass through completely unchanged,
+    every single tick, for as long as a brand-new shell+restore keeps
+    happening (i.e. forever, under GitHub Actions' one-fresh-process-
+    per-tick cron model) — exactly matching the confirmed symptom
+    (velocity frozen bit-identical hour after hour, `.P` only ever
+    growing from `.predict()`'s `+Q`, never shrinking from `.update()`).
+    Reproduced and confirmed mechanically in isolation (see commit
+    message / PLAN.md) before writing this fix.
+
+    Fix: regenerate `.sigmas_f` directly from the just-restored `.x`/
+    `.P` via the filter's own sigma-point generator
+    (`points_fn.sigma_points(x, P)`) — mathematically the same sigma
+    points a real `.predict()` call would have just produced (by
+    construction, the unscented transform of `sigma_points(x, P)`
+    reproduces that exact `x`, `P`), so the very next `.update()` call
+    sees sigma points genuinely consistent with the restored state
+    instead of stale zeros. No extra predict() call is added (that
+    would double-step time) — only the cached sigma points are
+    reconstructed. Verified: with this fix, a restored filter's
+    velocity now responds to real price moves (including flipping
+    sign on a real reversal) and `.P` converges to a steady state
+    instead of growing monotonically forever, both confirmed in an
+    isolated repro.
+    """
     saved = state_store.get_json(_UKF_STATE_KEY)
     if not saved:
         logger.info("No persisted UKF state found — using freshly-trained models (expected on first run).")
@@ -249,6 +291,9 @@ def _restore_ukf_state():
         try:
             ukf.x = np.array(entry["x"], dtype=float)
             ukf.P = np.array(entry["P"], dtype=float)
+            # THE FIX — see docstring above. Must run every time .x/.P
+            # are restored, or the very next .update() call is a no-op.
+            ukf.sigmas_f = ukf.points_fn.sigma_points(ukf.x, ukf.P)
             restored += 1
         except Exception as e:
             logger.error(f"UKF state restore failed for {name}: {e}")
