@@ -341,6 +341,29 @@ def _run_shadow_param_search(manual: bool = False):
         # (matplotlib/filterpy/optuna — all already in requirements.txt,
         # but kept lazy in case that ever changes) can never block
         # daily_optimizer()'s two calls above from running.
+
+        # 2026-11-13 — FIX for a bug found while investigating why live
+        # trades were far less frequent than backtest's: this shadow run
+        # was failing EVERY single time it actually fired in production
+        # ("[Errno 2] No such file or directory: 'btc_back366.csv'"),
+        # because run_standalone_grid_search() reads those CSVs straight
+        # off disk and orchestra.yml's cron job (unlike backtest.yml,
+        # which has its own "python3 data_download.py" step) never wrote
+        # them — they're gitignored, so actions/checkout never provides
+        # them either. The owner had `live_signal_source` set to
+        # "walkforward", so live was trading on whatever
+        # walkforward_optimal_params happened to already be sitting in kv
+        # from some earlier successful run, NEVER actually refreshed by
+        # the real daily schedule — while p4_search.py's own optimizer
+        # (the other source) kept refreshing fine and already reflects
+        # the 2026-11-08/09 frequency-aware objective. Fix: call the same
+        # data_download() function backtest.yml's step calls, right here,
+        # right before the search — this only runs on the rare tick this
+        # function gets past its own once-daily clock/day-bucket gate
+        # above, so it does not add cost to the other ~288 ticks/day.
+        import data_download as _data_download_mod
+        _data_download_mod.data_download()
+
         prev_params = state_store.get_json("walkforward_optimal_params")
         best_params = walkforward.run_standalone_grid_search(prev_params=prev_params)
         state_store.set_json("walkforward_optimal_params", best_params)
