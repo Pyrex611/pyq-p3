@@ -693,6 +693,66 @@ def retrain_daily_ukfs():
     _persist_runtime_flags()
 
 
+_BYPASS_PERSISTED_UKF_KEY = "bypass_persisted_ukf_for_signal"  # kv flag, default True — see below
+
+
+def _fresh_signal_ukf_predict(symbol_alpaca: str):
+    """2026-11-13 — owner-directed interim workaround for the confirmed-
+    but-not-yet-pinned live-only UKF update()-no-op bug (PLAN.md's Active
+    section): rather than feed generate_signal() the pred/high_pred/
+    low_pred coming out of the PERSISTED/restored UKF state (ukf_data in
+    hourly_task(), round-tripped every tick through
+    _persist_ukf_state()/_restore_ukf_state()'s JSON kv storage — the
+    leading suspect for the freeze), this trains a completely fresh
+    close/high/low UKF triplet from scratch, right now, on a freshly-
+    fetched trailing 30-day window, and returns what THAT model predicts.
+
+    Deliberately mirrors retrain_daily_ukfs()'s own fetch (same
+    UKF_TRAIN_DAYS*24-hour window, same build_ukfs() call walkforward.py's
+    own training uses) rather than inventing a new training path — the
+    whole point is to exercise the exact training code already proven
+    correct in backtest, with NO persisted state anywhere in the loop.
+    build_ukfs()'s _train_ukf() ends its fit with one extra .predict()
+    past the last bar in the window, so when that window's last bar is
+    the same latest-closed bar hourly_task() just fetched into `ddata`,
+    the returned UKF's .x[0] is already the one-step-ahead forecast for
+    the NEXT tick — the same semantic as ukf_handler()'s `pred` (which
+    also updates with ddata, then predicts one step ahead). So this is a
+    drop-in replacement for that tuple, not a different quantity.
+
+    Runs on EVERY hourly tick (not once daily like retrain_daily_ukfs())
+    — materially more Alpaca API + CPU cost per tick, accepted here as a
+    deliberate, temporary trade-off per explicit instruction while the
+    root cause is being pinned down, not a permanent architecture change.
+    Returns None (never raises) on any failure — fetch error, too few
+    bars, etc. — so hourly_task() can fall back to the persisted-state
+    pred and a transient issue here never blocks a tick's trading.
+    """
+    try:
+        hours_needed = UKF_TRAIN_DAYS * 24
+        start_time = datetime.now(timezone.utc) - timedelta(hours=hours_needed + 5)
+        request_params = CryptoBarsRequest(
+            symbol_or_symbols=[symbol_alpaca],
+            timeframe=TimeFrame.Hour,
+            start=start_time,
+        )
+        bars = crypto_client.get_crypto_bars(request_params).df
+        if isinstance(bars.index, pd.MultiIndex):
+            bars = bars.xs(symbol_alpaca, level="symbol")
+        bars = bars.sort_index().tail(hours_needed)
+        if len(bars) < 50:
+            logger.warning(f"[Fresh UKF] Too few bars ({len(bars)}) for {symbol_alpaca} — skipping, falling back.")
+            return None
+        bars = bars.reset_index(drop=True)
+        symb_short = "BTC" if "BTC" in symbol_alpaca else "ETH"
+
+        ukf_c, ukf_h, ukf_l = build_ukfs(bars, symb_short)
+        return float(ukf_c.x[0]), float(ukf_h.x[0]), float(ukf_l.x[0])
+    except Exception as e:
+        logger.error(f"[Fresh UKF] Error training from-scratch UKF for {symbol_alpaca} (non-fatal, falling back): {e}")
+        return None
+
+
 # Phase 1: run guards now live in pyquant_state (SQLite locally, Postgres
 # in production via DATABASE_URL) instead of local timestamp files.
 # try_claim_run() is atomic and safe against two invocations racing each
@@ -1475,10 +1535,42 @@ def hourly_task():
                         ddata,
                         ukf_data["ukf"], ukf_data["high_ukf"], ukf_data["low_ukf"]
                     )
+
+                    # 2026-11-13 — bypass persisted UKF state for the
+                    # actual tradeable signal (see
+                    # _fresh_signal_ukf_predict()'s docstring above for
+                    # the full rationale/owner directive). The
+                    # ukf_handler() call above, and every diagnostic
+                    # snapshot below that reads from ukf_data (the
+                    # persisted-state objects), are left completely
+                    # unchanged and keep running every tick regardless —
+                    # this only decides which pred/high_pred/low_pred
+                    # tuple actually reaches generate_signal() a few
+                    # lines down. Gated behind a kv flag (default True)
+                    # so it can be turned off from a future Settings
+                    # control without a code push once the bug is fixed.
+                    signal_source_pred = "persisted_fallback"
+                    fresh_pred = fresh_high_pred = fresh_low_pred = None
+                    if state_store.get_json(_BYPASS_PERSISTED_UKF_KEY, True):
+                        fresh = _fresh_signal_ukf_predict(symbol)
+                        if fresh is not None:
+                            fresh_pred, fresh_high_pred, fresh_low_pred = fresh
+                            pred, high_pred, low_pred = fresh
+                            signal_source_pred = "fresh"
+
                     my_signal = signal_generator.generate_signal(
                         price, pred, high_pred, low_pred, symbol, LEVERAGE, wallet_balance,
                         atr=atr_val, atr_mult=atr_mult
                     )
+                    try:
+                        signal_generator.last_diagnostic.update({
+                            "fresh_pred": fresh_pred,
+                            "fresh_high_pred": fresh_high_pred,
+                            "fresh_low_pred": fresh_low_pred,
+                            "signal_source_pred": signal_source_pred,
+                        })
+                    except Exception as e:
+                        print(f"Fresh-UKF diagnostic tag error for {symbol} (non-fatal): {e}")
                     # 2026-11-12 — see p4_utils.ukf_diag_state()'s docstring:
                     # snapshot the close-price UKF's internal state (velocity
                     # term + its own variance) onto THIS tick's diagnostic

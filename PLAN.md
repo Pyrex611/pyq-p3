@@ -932,21 +932,85 @@ here before moving on, even if you also wrote it up elsewhere.
     restored `.P` itself. **Not yet checked against real data** — the
     next GitHub Actions tick(s) need to run first (this change needs
     its own deploy/push cycle before any row carries these fields).
+  - **[x] CONFIRMED against real data, 2026-11-13 — the measurement is
+    fresh, so the defect is in the update math / restored `.P`, not
+    upstream data.** Pulled `raw_close`/`raw_bar_ts`/`ukf_velocity`
+    straight from `GET /api/diagnostics/history?symbol=BTC/USD` for 4
+    consecutive live `source: "walkforward"` rows spanning the
+    2026-11-13 00:00–02:00 UTC hourly ticks (ids 925/929/933, plus
+    921 from the hour before, which was pre-retrain):
+    `raw_close` = 71037.4575 (00:00) → 70866.225 (01:00) → 70173.6435
+    (02:00) — genuinely different every hour, moving with the real
+    market, and `raw_bar_ts` advances one real hour each row too — so
+    the measurement fed into `.update()` is NOT stale or duplicated.
+    Meanwhile `ukf_velocity` over those exact same three rows:
+    0.817305558395432 → 0.817305558362857 → 0.817305558448425 — frozen
+    to 9 significant figures across all three ticks (row 921, the tick
+    before, was −52.36, confirming this froze at the very next tick
+    after a retrain, consistent with every prior reproduction). This
+    rules out explanation (1) from the raw-measurement entry above
+    (stale upstream data) and confirms explanation (2): `.update()` is
+    receiving fresh, correct measurements every tick and still not
+    moving the state at all — the defect is in the update math itself
+    or in the restored `.P`/`.x` it operates on (i.e. remediation path
+    option 3 below, not a data-freshness fix of any kind).
+  - **[x] Interim bypass implemented, 2026-11-13 (owner-directed,
+    "in the meantime")**: `hourly_task()` now also trains a completely
+    fresh close/high/low UKF triplet from scratch every tick
+    (`pyq_p4._fresh_signal_ukf_predict()` — same trailing 30-day
+    window and `p4_utils.build_ukfs()` call `retrain_daily_ukfs()`/
+    `walkforward.py` already use, just run every hour instead of once
+    daily) and, when it succeeds, uses THAT model's
+    pred/high_pred/low_pred to drive `generate_signal()`/`my_signal`
+    instead of the persisted/restored values — bypassing the
+    live-only persist/restore round-trip entirely for the actual
+    tradeable signal, per explicit instruction. Gated behind a kv flag
+    (`bypass_persisted_ukf_for_signal`, default `True`) so it can be
+    turned off later without a code push once the real fix lands.
+    **Deliberately left untouched**: the existing `ukf_handler()` call
+    on the persisted `ukf_data`, the `ukf_diag_state()` snapshot, and
+    the raw-measurement snapshot above — all three keep running every
+    tick exactly as before, so the ongoing bug-hunt data collection is
+    completely unaffected. New `fresh_pred`/`fresh_high_pred`/
+    `fresh_low_pred`/`signal_source_pred` diagnostic fields (live-only,
+    `pyquant_diagnostics_history`) record what the fresh path produced
+    and which source actually drove each tick's decision, so the
+    persisted-state's frozen `ukf_velocity` and the fresh path's
+    (expected-healthy) `pred` can be read side by side on the same row.
+    **Known trade-off, accepted deliberately per the owner's explicit
+    "in the meantime" framing, not yet re-confirmed against a live
+    deploy**: this roughly matches `retrain_daily_ukfs()`'s per-symbol
+    cost (full 720-bar fetch + 3-filter `_train_ukf()` walk) but now
+    pays it every hourly tick instead of once a day — materially more
+    Alpaca API calls and CPU time per tick. Falls back to the
+    persisted-state pred on any fetch/training failure, so a transient
+    issue here can never block a tick's trading. **Not yet confirmed
+    on a live deploy** — needs the next few GitHub Actions ticks after
+    this push to check `fresh_pred` actually differs sensibly from the
+    frozen persisted-state `pred` and that no tick silently falls back
+    every time.
   - **Remediation path — still needs an owner decision**, now that
     "shared math characteristic" is ruled out and this is confirmed to
     be a live-only effect localized to the UKF-state persistence
     mechanism:
-    1. **Diagnostic logging (above)** — done; check its first real
-       results after the next retrain before deciding between 2/3 below.
+    1. **Diagnostic logging (above)** — done; confirmed 2026-11-13 the
+       defect is in the update math / restored `.P`, not stale upstream
+       data (see the CONFIRMED entry above).
     2. **Retrain more often than once/day** — would shorten any single
        drift window's damage but doesn't address the root cause if
        it's a persistence-round-trip defect; still needs `walkforward.py`
        validation first per the standing rule before touching live.
     3. **Bypass the persist/restore round-trip for `.P` specifically**
-       (e.g. re-run a cheap partial retrain instead of restoring `.P`
-       from kv) — more invasive, needs the diagnostic logging's first
-       real results to confirm this is actually where the defect lives
-       before committing to a fix.
+       — **interim version implemented 2026-11-13** (see the "Interim
+       bypass implemented" entry above): rather than a partial
+       targeted fix to `.P` alone, this bypasses persist/restore
+       entirely for the tradeable signal by retraining fresh every
+       tick. This is explicitly a stopgap, not the permanent fix — the
+       permanent fix still needs the actual mechanical defect inside
+       `_persist_ukf_state()`/`_restore_ukf_state()` (or wherever else)
+       pinned down and corrected, at which point this bypass can be
+       turned off again (`bypass_persisted_ukf_for_signal` kv flag)
+       and persisted state restored as the normal path.
   - **Owner's follow-up request, 2026-11-11/12 (recorded for when a fix
     ships)**: once the actual root cause above is found and fixed, keep
     the current trade-frequency-aware optimizer objective (confirmed

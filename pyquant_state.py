@@ -410,6 +410,32 @@ def _bootstrap_postgres(conn) -> None:
         ):
             cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
 
+        # 2026-11-13 — owner-directed interim workaround for the still-
+        # unpinned update()-no-op bug above: hourly_task() now also trains
+        # a completely fresh close/high/low UKF triplet from scratch every
+        # tick (p4_utils.build_ukfs() on a freshly-fetched trailing 30-day
+        # window — see pyq_p4._fresh_signal_ukf_predict()) and, when that
+        # succeeds, uses THAT model's pred/high_pred/low_pred to drive
+        # generate_signal()/my_signal instead of the persisted/restored
+        # values — bypassing the live-only persist/restore round-trip
+        # entirely for the actual tradeable signal. `fresh_pred`/
+        # `fresh_high_pred`/`fresh_low_pred` are the values that path
+        # produced this tick (NULL if it failed and the tick fell back to
+        # the persisted-state values); `signal_source_pred` records which
+        # one actually drove this tick's decision ("fresh" or
+        # "persisted_fallback"). The existing ukf_handler()-on-persisted-
+        # state call, ukf_velocity/raw_close snapshots etc. above are left
+        # completely untouched by this — they keep collecting the exact
+        # same bug-hunt diagnostics regardless of which source drove the
+        # trade. LIVE-ONLY (no backtest equivalent — backtest already
+        # trains fresh per simulated day by design, it never has a
+        # persisted-state alternative to bypass).
+        for _col, _type in (
+            ("fresh_pred", "DOUBLE PRECISION"), ("fresh_high_pred", "DOUBLE PRECISION"),
+            ("fresh_low_pred", "DOUBLE PRECISION"), ("signal_source_pred", "TEXT"),
+        ):
+            cur.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN IF NOT EXISTS {_col} {_type}")
+
 
 @contextmanager
 def _sqlite_conn():
@@ -530,6 +556,15 @@ def _sqlite_conn():
         # above: raw measurement fed into step_ukf()'s .update() each
         # live tick. LIVE-ONLY, pyquant_diagnostics_history only.
         for _col in ("raw_close REAL", "raw_high REAL", "raw_low REAL", "raw_bar_ts TEXT"):
+            try:
+                conn.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN {_col}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        # 2026-11-13 — see the matching Postgres ALTER block above: fresh
+        # from-scratch UKF predict values + which source actually drove
+        # each tick's signal. LIVE-ONLY, pyquant_diagnostics_history only.
+        for _col in ("fresh_pred REAL", "fresh_high_pred REAL", "fresh_low_pred REAL",
+                     "signal_source_pred TEXT"):
             try:
                 conn.execute(f"ALTER TABLE pyquant_diagnostics_history ADD COLUMN {_col}")
             except sqlite3.OperationalError:
@@ -1189,6 +1224,10 @@ _DIAG_HISTORY_COLS = [
     # 2026-11-12, second pass — see the matching CREATE TABLE/ALTER
     # comment: raw measurement actually fed into .update() each tick.
     "raw_close", "raw_high", "raw_low", "raw_bar_ts",
+    # 2026-11-13 — see the matching CREATE TABLE/ALTER comment: from-
+    # scratch fresh-trained UKF predict values + which source drove the
+    # tick's actual signal (bypass-persisted-state workaround).
+    "fresh_pred", "fresh_high_pred", "fresh_low_pred", "signal_source_pred",
 ]
 
 
