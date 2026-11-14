@@ -1695,17 +1695,26 @@ def compute_comparison_buckets(run_id: Optional[int] = None, since: Optional[str
             return s[:13] if len(s) >= 13 else None
 
         def _align_by_hour(live_trades: list, backtest_trades: list) -> list:
+            # FIXED 2026-11-14: this used to assign a single dict slot
+            # ("live"/"backtest") per hour-bucket, so a second trade on
+            # the same side landing in the same UTC hour silently
+            # overwrote the first — confirmed real data loss (backtest
+            # 2026-11-14 had 5 trades; the aligned view only showed 3
+            # before this fix, because two BTC trades collided with
+            # other trades in the same hour bucket). Both sides are now
+            # lists, accumulated via append rather than assignment, so
+            # multiple same-hour trades on one side all survive.
             rows: dict = {}
             for t in live_trades:
                 hk = _hour_key(t.get("entry_ts"))
                 if hk is None:
                     continue
-                rows.setdefault(hk, {"hour": hk, "live": None, "backtest": None})["live"] = t
+                rows.setdefault(hk, {"hour": hk, "live": [], "backtest": []})["live"].append(t)
             for t in backtest_trades:
                 hk = _hour_key(t.get("entry_ts"))
                 if hk is None:
                     continue
-                rows.setdefault(hk, {"hour": hk, "live": None, "backtest": None})["backtest"] = t
+                rows.setdefault(hk, {"hour": hk, "live": [], "backtest": []})["backtest"].append(t)
             return sorted(rows.values(), key=lambda r: r["hour"])
 
         aligned_by_day = {}

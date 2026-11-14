@@ -588,6 +588,91 @@ here before moving on, even if you also wrote it up elsewhere.
 
 ## Active (Phase 3)
 
+- [x] **FIXED 2026-11-14 — `_align_by_hour()` silently dropped same-
+  hour, same-side trades.** Found while investigating the owner's
+  "why is the live/backtest gap still so great" question using real
+  2026-11-14 data: `aligned_by_day["2026-11-14"]` only showed 3
+  hour-rows even though `backtest_by_day["2026-11-14"]` had 5 trades.
+  Root cause: `_align_by_hour()`'s accumulator used
+  `rows.setdefault(hk, {...})["live"] = t` / `["backtest"] = t` — a
+  single dict slot per hour, so a second same-hour trade on the same
+  side silently overwrote the first instead of being added. Fixed by
+  making both slots lists (`.append(t)` instead of assignment) in
+  `pyquant_state.py`'s `_align_by_hour()`, and updated
+  `pages/compare.js`'s "Tick-Aligned Trades" table to render one
+  sub-row per `max(live_count, backtest_count, 1)` at each hour
+  instead of assuming exactly one trade per side. Not yet confirmed
+  on a live deploy.
+
+- [ ] **OPEN, diagnosed 2026-11-14 — live/backtest trade-frequency gap
+  traced to BTC's `p4_search` `strict_threshold` being miscalibrated
+  roughly 2x too strict relative to ETH's, not a frequency bug in
+  general.** Owner asked why live only generated ETH signals today and
+  why backtest still produces far more trades/day than live. Pulled
+  every `p4_search`-source diagnostic row for both symbols for all of
+  2026-11-14 (hourly, 01:01–21:01 UTC) directly from
+  `GET /api/diagnostics/history`:
+  - **ETH fired exactly once today** (04:01 UTC, `strict_diff=0.004354`
+    vs `strict_threshold=0.0031` — cleared by ~40%), matching the one
+    real live ETHUSDT SELL trade in `pyquant_signals` for today
+    (entered 1882.21, closed `closed_sl` at -0.1527%). This resolves
+    what looked like a contradiction (every diagnostic row showing
+    `signal_fired=false`) — the firing tick was outside the first
+    20-row page fetched; a wider pull found it. **`signal_fired` in the
+    diagnostics table is a reliable record of the real decision, not a
+    separate/stale proxy** — confirmed by this match.
+  - **BTC never once cleared its strict gate today**: the day's highest
+    `strict_diff` reached was `0.00420968` (18:01 UTC), still short of
+    `strict_threshold=0.00595` by about 30%. Every other hour's
+    `strict_diff` was far below that peak (several under `0.001`).
+    This is why live generated zero BTC trades today — not bad luck on
+    a near-miss, but BTC's realized intraday price action never coming
+    close to the threshold the optimizer picked.
+  - **The likely cause: BTC's `p4_search` threshold is tuned far more
+    conservatively than the equivalent `walkforward`-sourced threshold
+    for the same symbol, same day** — `p4_search` BTC
+    `strict_threshold=0.00595` vs `walkforward` BTC
+    `strict_threshold=0.004335` (37% higher on `p4_search`). ETH's two
+    thresholds are much closer (`p4_search` 0.0031 vs `walkforward`
+    0.003085). If BTC had been running on the `walkforward`-tuned
+    threshold instead, today's peak `strict_diff` of `0.0042` would
+    very nearly have cleared it (`0.0042` vs `0.004335` — within ~3%,
+    not 30%). This lines up with the standing, already-flagged
+    `p4_search.py` consolidation risk (`CLAUDE.md` Section 5/6): the
+    two optimizers are supposed to be numerically equivalent but are
+    independent code paths, and this is the first concrete evidence
+    they're actually diverging in a way that materially suppresses
+    live BTC trade frequency specifically (not ETH, not uniformly).
+  - **Next stage (not yet done)**: compare `p4_search.run_grid_search()`
+    and `walkforward.run_standalone_grid_search()`'s BTC threshold
+    selection side by side on identical input data to find exactly
+    where the two diverge (different search grid, different recent-
+    data window, or an actual constant/formula drift despite the
+    "SL/TP constants match" finding from 2026-11-03 — that check only
+    covered SL/TP/leverage math, not the optimizer's own threshold
+    search logic). This is a more promising lead than generic
+    "generate more signals" tuning, since it's symbol-specific and has
+    a concrete A/B (the `walkforward` threshold already sitting in kv,
+    unused by BTC today) to test against rather than guessing at a new
+    number. A faster, lower-risk interim step the owner can take right
+    now from Settings: flip `live_signal_source` to `walkforward` for
+    BTC specifically isn't possible yet (the toggle is global, not
+    per-symbol) — worth considering a per-symbol `live_signal_source`
+    as a small follow-up if this diagnosis holds up over a few more
+    days of data, rather than switching the whole engine over on one
+    day's evidence.
+  - Backtest's own higher trade count (5 today: 3 BTC + 2 ETH) likely
+    reflects the same mechanism in reverse: `walkforward.py`'s
+    simulation re-tunes thresholds inside its own walk-forward loop
+    per test window, rather than trading all day on one fixed
+    nightly-optimized number the way live does — so a day where BTC's
+    realized volatility undershoots the live optimizer's assumption
+    still produces backtest trades, because backtest's own thresholds
+    for that stretch were set lower, closer to what actually happened.
+    This is a plausible explanation grounded in today's concrete
+    numbers, not a general theory — it should be checked against a few
+    more days before treating it as confirmed.
+
 - [x] **FIXED 2026-11-11 (CORRECTED — see below) — backtest gate
   diagnostics have NEVER actually persisted to the DB, for any run,
   since the training-window-metadata feature shipped 2026-11-06.**

@@ -297,33 +297,53 @@ export default function Compare() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {aligned.map((row) => (
-                                  <tr key={row.hour}>
-                                    <td className="mono">{row.hour}:00</td>
-                                    {row.live ? (
-                                      <>
-                                        <td className="mono">{row.live.symbol}</td>
-                                        <td className={row.live.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{row.live.side}</td>
-                                        <td className="mono">{fmtPrice(row.live.entry_price)}</td>
-                                        <td className="mono">{fmtPrice(row.live.exit_price)}</td>
-                                        <td className={`mono ${pnlClass(row.live.pnl_pct)}`}>{fmtPct(row.live.pnl_pct)}</td>
-                                      </>
-                                    ) : (
-                                      <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>—</td>
-                                    )}
-                                    {row.backtest ? (
-                                      <>
-                                        <td className="mono">{row.backtest.symbol}</td>
-                                        <td className={row.backtest.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{row.backtest.side}</td>
-                                        <td className="mono">{fmtPrice(row.backtest.entry_price)}</td>
-                                        <td className="mono">{fmtPrice(row.backtest.exit_price)}</td>
-                                        <td className={`mono ${pnlClass(row.backtest.pnl_pct)}`}>{fmtPct(row.backtest.pnl_pct)}</td>
-                                      </>
-                                    ) : (
-                                      <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>—</td>
-                                    )}
-                                  </tr>
-                                ))}
+                                {aligned.map((row) => {
+                                  // Both sides are now lists (fixed 2026-11-14 — a
+                                  // same-hour, same-side collision used to silently
+                                  // overwrite and drop trades). Render one sub-row
+                                  // per max(live.length, backtest.length, 1) so every
+                                  // trade from either side is visible, with cells left
+                                  // blank (not "—") on a sub-row where that side has
+                                  // no corresponding trade at that index.
+                                  const liveList = row.live || [];
+                                  const btList = row.backtest || [];
+                                  const subRows = Math.max(liveList.length, btList.length, 1);
+                                  return Array.from({ length: subRows }).map((_, i) => {
+                                    const lv = liveList[i];
+                                    const bt = btList[i];
+                                    return (
+                                      <tr key={`${row.hour}-${i}`}>
+                                        <td className="mono">{i === 0 ? `${row.hour}:00` : ""}</td>
+                                        {lv ? (
+                                          <>
+                                            <td className="mono">{lv.symbol}</td>
+                                            <td className={lv.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{lv.side}</td>
+                                            <td className="mono">{fmtPrice(lv.entry_price)}</td>
+                                            <td className="mono">{fmtPrice(lv.exit_price)}</td>
+                                            <td className={`mono ${pnlClass(lv.pnl_pct)}`}>{fmtPct(lv.pnl_pct)}</td>
+                                          </>
+                                        ) : (
+                                          <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>
+                                            {i === 0 && liveList.length === 0 ? "—" : ""}
+                                          </td>
+                                        )}
+                                        {bt ? (
+                                          <>
+                                            <td className="mono">{bt.symbol}</td>
+                                            <td className={bt.side?.toUpperCase().startsWith("B") ? "side-buy" : "side-sell"}>{bt.side}</td>
+                                            <td className="mono">{fmtPrice(bt.entry_price)}</td>
+                                            <td className="mono">{fmtPrice(bt.exit_price)}</td>
+                                            <td className={`mono ${pnlClass(bt.pnl_pct)}`}>{fmtPct(bt.pnl_pct)}</td>
+                                          </>
+                                        ) : (
+                                          <td className="mono" colSpan={5} style={{ color: "var(--text-faint)", textAlign: "center" }}>
+                                            {i === 0 && btList.length === 0 ? "—" : ""}
+                                          </td>
+                                        )}
+                                      </tr>
+                                    );
+                                  });
+                                })}
                               </tbody>
                             </table>
                           ) : (
