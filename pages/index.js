@@ -39,7 +39,7 @@ function ReturnsWindowCard() {
     return () => { cancelled = true; };
   }, [window_]);
 
-  const pct = res?.avg_pnl_pct ?? null;
+  const pct = res?.cumulative_pnl_pct ?? null;
 
   return (
     <div className="card">

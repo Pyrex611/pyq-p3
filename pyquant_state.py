@@ -1556,6 +1556,16 @@ def compute_live_performance(since: Optional[str] = None, limit: int = 500) -> d
         "loss_count": len(losses),
         "win_rate_pct": (len(wins) / len(closed) * 100.0) if closed else None,
         "avg_pnl_pct": (sum(pct_vals) / len(pct_vals)) if pct_vals else None,
+        # 2026-11-14 — added for the Dashboard's windowed "Returns (%)"
+        # card, which the owner pointed out should show the CUMULATIVE
+        # return across the selected window (the simple sum of each
+        # trade's own leveraged %% return — not compounded capital,
+        # since each trade risks a fresh entry_capital slice, not the
+        # account's whole growing balance), not an average that hides
+        # how many trades actually contributed. avg_pnl_pct is left as
+        # it was (GET /api/dashboard's "Avg. Return (recent)" tile and
+        # GET /api/compare both already read it; this is additive only).
+        "cumulative_pnl_pct": sum(pct_vals) if pct_vals else None,
         "pct_sample_size": len(pct_vals),
     }
 
