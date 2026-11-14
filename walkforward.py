@@ -1657,6 +1657,32 @@ def run_walk_forward():
     _final_capital = capital_curve[-1] if capital_curve else INITIAL_CAPITAL
     _total_ret_pct = (_final_capital / INITIAL_CAPITAL - 1) * 100
     _trade_count = len(all_trades)
+    # 2026-11-14 fix — "Avg Daily Return (%)" was computed as
+    # _total_ret_pct / _test_days: a LINEAR average of a COMPOUNDED
+    # total return. That's wrong for a compounding capital curve (which
+    # this is — paper_trade_day() carries each day's ending capital
+    # into the next day's starting capital, confirmed by run #94's
+    # Initial/Final Capital of $10.00 -> $89.95): it overstates the
+    # true daily rate by conflating "total growth spread evenly" with
+    # "the rate that, compounded daily, produces that total growth."
+    # Concretely, run #94 (799.55% total over 15 days) reported
+    # +53.45%/day under the old formula; the correct geometric/CAGR-
+    # style daily rate is only +16.0%/day — still a very high number
+    # (small $10 base, 10x leverage, 88% win rate at ~8.5 trades/day —
+    # see PLAN.md's 2026-11-14 entry for the realism caveat that goes
+    # with this), but the honest one: compounding +16.0%/day for 15
+    # days is what actually produces +799.55% total, not +53.45%/day.
+    # Guarded against a non-positive capital value (shouldn't happen —
+    # the account isn't modeled as going to zero/negative — but a
+    # fractional power of a non-positive base is undefined, so this
+    # degrades to "—" rather than crashing or returning a bogus number).
+    try:
+        _avg_daily_ret_pct = (
+            (((_final_capital / INITIAL_CAPITAL) ** (1.0 / _test_days)) - 1.0) * 100
+            if _test_days and _final_capital > 0 and INITIAL_CAPITAL > 0 else None
+        )
+    except Exception:
+        _avg_daily_ret_pct = None
     _extra_rows = pd.DataFrame([
         {"Metric": "Initial Capital ($)", "Value": f"{INITIAL_CAPITAL:.2f}"},
         # 2026-11-13 (owner UI request): final capital alongside initial —
@@ -1666,7 +1692,7 @@ def run_walk_forward():
         {"Metric": "Avg Daily Trade Freq",
          "Value": f"{_trade_count/_test_days:.2f}" if _test_days else "—"},
         {"Metric": "Avg Daily Return (%)",
-         "Value": f"{_total_ret_pct/_test_days:+.4f}" if _test_days else "—"},
+         "Value": f"{_avg_daily_ret_pct:+.4f}" if _avg_daily_ret_pct is not None else "—"},
     ])
     metrics = pd.concat([metrics, _extra_rows], ignore_index=True) if not metrics.empty else _extra_rows
 
